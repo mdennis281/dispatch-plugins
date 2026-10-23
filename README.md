@@ -8,6 +8,8 @@ A [Dispatch](https://github.com/mdennis281/dispatch) plugin that runs each chat'
 - **Servers are forwarded.** Anything that listens on a port of 1024 or above in the container gets a `http://127.0.0.1:<port>` on the Dispatch host. It shows up in the terminal tool's results and in the Terminals panel, so a browser (or the agent's Playwright) can open it.
 - **Failure is loud.** If Proxmox is unreachable or provisioning times out, Dispatch brings the shell up locally and says why, in the terminal, the chat, and the agent's next tool result.
 
+![A chat's Terminals panel with both shells on a Proxmox container, and its dev server forwarded to 127.0.0.1](docs/terminals-light.png)
+
 It is optional: Dispatch without this plugin behaves exactly as it always has. Which chats use it is your choice. Set a project default (Project settings → Chat defaults → *Terminals run on*) and override it per chat (Terminals panel → *New shells run on*).
 
 Requires a Dispatch that has terminal backends (#414/#415, the `terminals` plugin capability).
