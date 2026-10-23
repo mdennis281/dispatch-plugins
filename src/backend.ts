@@ -301,7 +301,7 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
       // of it the local repo also has keeps the pack down to the delta.
       const refs = await conn.exec(`cd ${remote} && git for-each-ref --format='%(objectname)' && git rev-parse -q --verify HEAD`);
       const exclude = await localHas(root, [...new Set(refs.stdout.split(/\s+/).filter(Boolean))]);
-      const r = await conn.exec(`cd ${remote} && git index-pack --stdin -q >/dev/null`, {
+      const r = await conn.exec(`cd ${remote} && git index-pack --stdin >/dev/null`, {
         stdin: async (ch) => {
           await pack(root, snap, exclude, ch);
         },
