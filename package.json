@@ -1,0 +1,24 @@
+{
+  "name": "dispatch-proxmox-terminal",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Run Dispatch chat terminals in a per-chat Proxmox LXC.",
+  "scripts": {
+    "build": "vite build -c vite.server.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@dispatch/plugin-sdk": "link:../claude-manager/packages/plugin-sdk",
+    "@types/node": "^26.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^4.1.11",
+    "@types/ssh2": "^1.15.4"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ssh2": "^1.16.0"
+  }
+}

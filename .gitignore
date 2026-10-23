@@ -1,0 +1,2 @@
+node_modules/
+# server/ is COMMITTED: the URL installer copies the repo as-is and never builds.

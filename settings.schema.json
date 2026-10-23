@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Proxmox terminal",
+  "type": "object",
+  "properties": {
+    "apiUrl": {
+      "type": "string",
+      "title": "Proxmox API URL",
+      "description": "The node's API, e.g. https://10.0.0.20:8006 (no /api2/json)."
+    },
+    "node": { "type": "string", "title": "Node", "default": "pve" },
+    "templateVmid": {
+      "type": "integer",
+      "title": "Template vmid",
+      "description": "The LXC template each chat's container is linked-cloned from (see the README for how to build one).",
+      "default": 9000
+    },
+    "pool": {
+      "type": "string",
+      "title": "Resource pool",
+      "description": "Containers are created in this pool; the API token's permissions are scoped to it.",
+      "default": "dispatch-terminals"
+    },
+    "bridge": { "type": "string", "title": "Network bridge", "description": "Containers get DHCP on this bridge.", "default": "vmbr0" },
+    "cores": { "type": "integer", "title": "Cores per container", "default": 2 },
+    "memory": { "type": "integer", "title": "Memory per container (MB)", "default": 4096 },
+    "vmidStart": { "type": "integer", "title": "First vmid to use", "default": 9001 },
+    "vmidEnd": { "type": "integer", "title": "Last vmid to use", "default": 9099 },
+    "idleStopMinutes": {
+      "type": "integer",
+      "title": "Stop after idle (minutes)",
+      "description": "Minutes after the chat goes idle before its container is stopped (it restarts on the next command). 0 stops at once; -1 never stops.",
+      "default": 30
+    },
+    "sshUser": { "type": "string", "title": "SSH user", "default": "root" },
+    "sshKeyPath": {
+      "type": "string",
+      "title": "SSH private key file",
+      "description": "Path on the Dispatch host, e.g. ~/.ssh/dispatch_proxmox_terminal. Used when the PROXMOX_TERMINAL_SSH_KEY secret is not set. PROXMOX_TERMINAL_SSH_PASSWORD works instead of (or as well as) a key."
+    },
+    "workDir": { "type": "string", "title": "Checkout directory on the container", "default": "/root/work" },
+    "spawnTimeoutSeconds": {
+      "type": "integer",
+      "title": "Provisioning timeout (seconds)",
+      "description": "How long Dispatch waits for a container before falling back to a local shell.",
+      "default": 240
+    },
+    "caCert": {
+      "type": "string",
+      "title": "Proxmox CA certificate (PEM)",
+      "description": "Paste /etc/pve/pve-root-ca.pem to verify the node's self-signed certificate properly."
+    },
+    "insecureTls": {
+      "type": "boolean",
+      "title": "Skip TLS verification",
+      "description": "Only if you cannot supply the CA certificate. The API token travels in every request.",
+      "default": false
+    }
+  }
+}
