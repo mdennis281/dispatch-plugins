@@ -20,7 +20,8 @@ import type { SshConnection } from "../src/ssh.js";
 
 const dirs: string[] = [];
 afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  // Retries: on Windows a git child can still hold the directory for a moment.
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 function gitRepo(): string {
@@ -226,7 +227,8 @@ describe("ProxmoxTerminalBackend", () => {
     writeFileSync(join(repo, "a.txt"), "edited locally\n");
     handle.stdin.write("cat a.txt\n");
     handle.stdin.write("__cm_ec=$?; printf ...\n");
-    await new Promise((r) => setTimeout(r, 300));
+    // A snapshot is real git work; on a loaded Windows box it takes a while.
+    for (let i = 0; i < 100 && f.shells[0]!.written.length < 2; i++) await new Promise((r) => setTimeout(r, 100));
     expect(f.remote.filter((c) => c.includes("index-pack")).length).toBe(packsBefore + 1);
     expect(f.shells[0]!.written).toEqual(["cat a.txt\n", "__cm_ec=$?; printf ...\n"]);
   });
@@ -274,5 +276,18 @@ describe("activate", () => {
     await plugin.activate(t.ctx);
     expect([...t.terminalBackends.keys()]).toEqual(["proxmox"]);
     expect(t.terminalBackends.get("proxmox")).toMatchObject({ label: "Proxmox container", shell: "bash" });
+  });
+});
+
+describe("the committed bundle", () => {
+  // The URL installer copies server/index.js as-is, so it must load on its own
+  // as an ES module — this caught ssh2's `__dirname` reference, which only
+  // failed once the bundle was loaded from a plugin directory.
+  it("imports and activates outside the source tree", async () => {
+    // @ts-expect-error -- the built bundle ships no .d.ts; its shape is asserted here.
+    const mod = (await import("../server/index.js")) as { default: { activate(ctx: unknown): unknown } };
+    const t = createTestContext({ id: "proxmox-terminal", capabilities: ["terminals", "secrets", "kv"] });
+    await mod.default.activate(t.ctx);
+    expect([...t.terminalBackends.keys()]).toEqual(["proxmox"]);
   });
 });

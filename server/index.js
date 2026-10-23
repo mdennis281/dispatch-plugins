@@ -1,3 +1,7 @@
+import { fileURLToPath as __pt_fileURLToPath } from "node:url";
+import { dirname as __pt_dirname } from "node:path";
+const __filename = __pt_fileURLToPath(import.meta.url);
+const __dirname = __pt_dirname(__filename);
 import { mkdtemp, copyFile, rm, readFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { resolve, isAbsolute, join, basename } from "node:path";

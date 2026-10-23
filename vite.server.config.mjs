@@ -31,7 +31,27 @@ const stubNativeAddons = {
   },
 };
 
+/**
+ * ssh2 is CommonJS and reads `__dirname` (its poly1305 WASM loader and its
+ * agent module) at load time. Inlined into an ES module that name does not
+ * exist, and activation died with "ReferenceError: __dirname is not defined in
+ * ES module scope". Define both from `import.meta.url` at the top of the bundle.
+ */
+const banner = [
+  'import { fileURLToPath as __pt_fileURLToPath } from "node:url";',
+  'import { dirname as __pt_dirname } from "node:path";',
+  "const __filename = __pt_fileURLToPath(import.meta.url);",
+  "const __dirname = __pt_dirname(__filename);",
+].join("\n");
+
 export default {
   ...base,
   plugins: [stubNativeAddons],
+  build: {
+    ...base.build,
+    rollupOptions: {
+      ...base.build.rollupOptions,
+      output: { ...base.build.rollupOptions.output, banner },
+    },
+  },
 };
