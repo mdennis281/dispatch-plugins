@@ -54,6 +54,8 @@ interface ChatState {
 
 export interface BackendDeps {
   ctx: PluginContext;
+  /** Where each chat's vmid is remembered across restarts (`ctx.kv`). */
+  kv?: PluginContext["kv"];
   settings: () => Settings;
   /** The Proxmox API token, `USER@REALM!ID=SECRET`. */
   token: () => Promise<string | undefined>;
@@ -137,7 +139,7 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
   private async stateFor(chatId: string): Promise<ChatState> {
     let st = this.chats.get(chatId);
     if (st) return st;
-    const rec = await this.deps.ctx.kv?.get<ChatRecord>(`chat:${chatId}`);
+    const rec = await this.deps.kv?.get<ChatRecord>(`chat:${chatId}`);
     st = {
       chatId,
       vmid: rec?.vmid ?? 0,
@@ -221,7 +223,7 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
         net0: `name=eth0,bridge=${s.bridge},ip=dhcp,type=veth`,
         tags: "dispatch-terminal",
       });
-      await this.deps.ctx.kv?.set(`chat:${st.chatId}`, { vmid, hostname: st.hostname, createdAt: Date.now() } satisfies ChatRecord);
+      await this.deps.kv?.set(`chat:${st.chatId}`, { vmid, hostname: st.hostname, createdAt: Date.now() } satisfies ChatRecord);
       return vmid;
     }
     throw new Error(
@@ -443,7 +445,7 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
       });
       await api.waitTask(s.node, upid, 120_000);
     }
-    await this.deps.ctx.kv?.delete(`chat:${chatId}`);
+    await this.deps.kv?.delete(`chat:${chatId}`);
   }
 
   /** Stop a chat's container (idle). The next spawn starts it again. */

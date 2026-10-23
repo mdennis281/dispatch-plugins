@@ -4292,7 +4292,9 @@ function requireConstants() {
     const crypto2 = require$$0$2;
     let cpuInfo;
     try {
-      cpuInfo = require("cpu-features")();
+      cpuInfo = (() => {
+        throw new Error("cpu-features is not bundled");
+      })();
     } catch {
     }
     const { bindingAvailable, CIPHER_INFO, MAC_INFO } = requireCrypto();
@@ -5445,7 +5447,9 @@ function requireCrypto() {
   let ChaChaPolyDecipher;
   let GenericDecipher;
   try {
-    binding = require("./crypto/build/Release/sshcrypto.node");
+    binding = (() => {
+      throw new Error("the ssh2 native binding is not bundled");
+    })();
     ({
       AESGCMCipher,
       ChaChaPolyCipher,
@@ -20587,7 +20591,7 @@ class ProxmoxTerminalBackend {
   async stateFor(chatId) {
     let st = this.chats.get(chatId);
     if (st) return st;
-    const rec = await this.deps.ctx.kv?.get(`chat:${chatId}`);
+    const rec = await this.deps.kv?.get(`chat:${chatId}`);
     st = {
       chatId,
       vmid: rec?.vmid ?? 0,
@@ -20664,7 +20668,7 @@ class ProxmoxTerminalBackend {
         net0: `name=eth0,bridge=${s.bridge},ip=dhcp,type=veth`,
         tags: "dispatch-terminal"
       });
-      await this.deps.ctx.kv?.set(`chat:${st.chatId}`, { vmid, hostname: st.hostname, createdAt: Date.now() });
+      await this.deps.kv?.set(`chat:${st.chatId}`, { vmid, hostname: st.hostname, createdAt: Date.now() });
       return vmid;
     }
     throw new Error(
@@ -20866,7 +20870,7 @@ class ProxmoxTerminalBackend {
       });
       await api.waitTask(s.node, upid, 12e4);
     }
-    await this.deps.ctx.kv?.delete(`chat:${chatId}`);
+    await this.deps.kv?.delete(`chat:${chatId}`);
   }
   /** Stop a chat's container (idle). The next spawn starts it again. */
   async stop(st) {
@@ -20972,6 +20976,7 @@ const server = definePlugin({
     const settings = () => readSettings(ctx.settings.get());
     const backend = new ProxmoxTerminalBackend({
       ctx,
+      kv: ctx.kv,
       settings,
       token: async () => (await ctx.secrets?.get(TOKEN))?.trim() || void 0,
       sshAuth: async () => {

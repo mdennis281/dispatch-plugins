@@ -37,6 +37,7 @@ export default definePlugin({
     const settings = () => readSettings(ctx.settings.get());
     const backend = new ProxmoxTerminalBackend({
       ctx,
+      kv: ctx.kv,
       settings,
       token: async () => (await ctx.secrets?.get(TOKEN))?.trim() || undefined,
       sshAuth: async () => {

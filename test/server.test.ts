@@ -187,6 +187,7 @@ describe("ProxmoxTerminalBackend", () => {
     const t = createTestContext({ id: "proxmox-terminal" });
     const backend = new ProxmoxTerminalBackend({
       ctx: t.ctx,
+      kv: t.ctx.kv,
       settings: () => readSettings({ apiUrl: "https://pve:8006", node: "g" }),
       token: async () => "u@pve!t=x",
       sshAuth: async () => ({ privateKey: "k" }),
@@ -213,6 +214,7 @@ describe("ProxmoxTerminalBackend", () => {
     const t = createTestContext({ id: "proxmox-terminal" });
     const backend = new ProxmoxTerminalBackend({
       ctx: t.ctx,
+      kv: t.ctx.kv,
       settings: () => readSettings({ apiUrl: "https://pve:8006", node: "g" }),
       token: async () => "u@pve!t=x",
       sshAuth: async () => ({ privateKey: "k" }),
@@ -235,6 +237,7 @@ describe("ProxmoxTerminalBackend", () => {
     const t = createTestContext({ id: "proxmox-terminal" });
     const backend = new ProxmoxTerminalBackend({
       ctx: t.ctx,
+      kv: t.ctx.kv,
       settings: () => readSettings({ apiUrl: "https://pve:8006", node: "g", idleStopMinutes: 0 }),
       token: async () => "u@pve!t=x",
       sshAuth: async () => ({ privateKey: "k" }),
@@ -254,6 +257,7 @@ describe("ProxmoxTerminalBackend", () => {
     const t = createTestContext({ id: "proxmox-terminal" });
     const backend = new ProxmoxTerminalBackend({
       ctx: t.ctx,
+      kv: t.ctx.kv,
       settings: () => readSettings({}),
       token: async () => undefined,
       sshAuth: async () => ({}),
