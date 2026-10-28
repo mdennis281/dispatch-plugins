@@ -132,7 +132,7 @@ function fakes() {
   const api = {
     call: async (method: string, path: string, params?: Record<string, unknown>) => {
       calls.push(`${method} ${path}${params?.newid ? ` newid=${params.newid}` : ""}`);
-      if (path.startsWith("/pools/")) return { members: [{ vmid: 9001 }] };
+      if (path === "/cluster/resources") return [{ vmid: 9001, type: "lxc", pool: "dispatch-terminals" }];
       if (path.endsWith("/config") && method === "GET") {
         if (!state.status) throw new ProxmoxError("Configuration file does not exist", 500);
         return { description: state.description };

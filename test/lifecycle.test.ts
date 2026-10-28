@@ -29,7 +29,15 @@ function fakeProxmox(initial: Record<number, Ct> = {}) {
   const call = async (method: string, path: string, params: Record<string, unknown> = {}) => {
     if (state.down) throw new ProxmoxError(`Proxmox API unreachable (pve:8006): connect ECONNREFUSED`);
     calls.push(`${method} ${path}`);
-    if (path.startsWith("/pools/")) return { members: [...cts.keys()].map((vmid) => ({ vmid, type: "lxc" })) };
+    // Like the real token: no Pool.Audit, so only /cluster/resources lists the pool.
+    if (path.startsWith("/pools/")) throw new ProxmoxError("Permission check failed (/pool/dispatch-terminals, Pool.Audit)", 403);
+    if (path === "/cluster/resources") {
+      return [
+        ...[...cts.keys()].map((vmid) => ({ vmid, type: "lxc", pool: "dispatch-terminals" })),
+        { vmid: 9050, type: "lxc" }, // outside the pool: never listed as ours
+        { vmid: 115, type: "qemu", pool: "dispatch-terminals" },
+      ];
+    }
     const m = path.match(/^\/nodes\/g\/lxc\/(\d+)(\/.*)?$/);
     if (!m) return null;
     const vmid = Number(m[1]);

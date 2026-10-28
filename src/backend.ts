@@ -282,10 +282,9 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
 
   /** Linked-clone the template into a free vmid, size it, and remember it. */
   private async cloneFor(api: Proxmox, s: Settings, st: ChatState, signal: AbortSignal): Promise<number> {
-    const pool = await api.call<{ members?: Array<{ vmid?: number }> }>("GET", `/pools/${encodeURIComponent(s.pool)}`).catch(
-      () => ({ members: [] as Array<{ vmid?: number }> }),
-    );
-    const taken = new Set((pool.members ?? []).map((m) => m.vmid).filter((v): v is number => typeof v === "number"));
+    // Best effort: a vmid held outside the pool still fails the clone with
+    // "already exists", and the loop moves on.
+    const taken = new Set(await this.poolVmids(api, s).catch(() => []));
     let lastErr: unknown;
     for (let vmid = s.vmidStart; vmid <= s.vmidEnd; vmid++) {
       if (taken.has(vmid) || vmid === s.templateVmid) continue;
@@ -565,7 +564,9 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
     const kv = this.deps.kv;
     if (!s.apiUrl || !kv) return; // not configured yet: nothing can exist
     for (const key of await kv.list("chat:")) await this.stateFor(key.slice("chat:".length));
-    if (opts.adopt) await this.adopt();
+    // Adoption failing (Proxmox down, a permission missing) must not cost the
+    // idle stops and retries below — the first live run lost its boot sweep so.
+    if (opts.adopt) await this.adopt().catch((err: unknown) => this.log.warn(`re-adopting containers: ${errText(err)}`));
     const now = Date.now();
 
     for (const key of await kv.list("destroy:")) {
@@ -791,10 +792,16 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
     return cfg.hostname === hostnameFor(chatId) ? "ours" : "not-ours";
   }
 
+  /**
+   * The pool's containers, from `/cluster/resources` rather than `/pools/<id>`:
+   * the latter needs Pool.Audit, which the setup's DispatchTerminal role does
+   * not grant (a live run got 403), while every pool member is listed here to
+   * a token holding VM.Audit on the pool.
+   */
   private async poolVmids(api: Proxmox, s: Settings): Promise<number[]> {
-    const pool = await api.call<{ members?: Array<{ vmid?: number; type?: string }> }>("GET", `/pools/${encodeURIComponent(s.pool)}`);
-    return (pool.members ?? [])
-      .filter((m) => m.type === undefined || m.type === "lxc")
+    const all = await api.call<Array<{ vmid?: number; type?: string; pool?: string }>>("GET", "/cluster/resources", { type: "vm" });
+    return (all ?? [])
+      .filter((m) => m.pool === s.pool && m.type === "lxc")
       .map((m) => m.vmid)
       .filter((v): v is number => typeof v === "number");
   }

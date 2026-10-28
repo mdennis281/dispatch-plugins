@@ -20687,10 +20687,7 @@ class ProxmoxTerminalBackend {
   }
   /** Linked-clone the template into a free vmid, size it, and remember it. */
   async cloneFor(api, s, st, signal) {
-    const pool = await api.call("GET", `/pools/${encodeURIComponent(s.pool)}`).catch(
-      () => ({ members: [] })
-    );
-    const taken = new Set((pool.members ?? []).map((m) => m.vmid).filter((v) => typeof v === "number"));
+    const taken = new Set(await this.poolVmids(api, s).catch(() => []));
     let lastErr;
     for (let vmid = s.vmidStart; vmid <= s.vmidEnd; vmid++) {
       if (taken.has(vmid) || vmid === s.templateVmid) continue;
@@ -20946,7 +20943,7 @@ class ProxmoxTerminalBackend {
     const kv = this.deps.kv;
     if (!s.apiUrl || !kv) return;
     for (const key of await kv.list("chat:")) await this.stateFor(key.slice("chat:".length));
-    if (opts.adopt) await this.adopt();
+    if (opts.adopt) await this.adopt().catch((err) => this.log.warn(`re-adopting containers: ${errText(err)}`));
     const now = Date.now();
     for (const key of await kv.list("destroy:")) {
       const p = await kv.get(key);
@@ -21148,9 +21145,15 @@ class ProxmoxTerminalBackend {
     if (d.chatId) return d.chatId === chatId ? "ours" : "not-ours";
     return cfg.hostname === hostnameFor(chatId) ? "ours" : "not-ours";
   }
+  /**
+   * The pool's containers, from `/cluster/resources` rather than `/pools/<id>`:
+   * the latter needs Pool.Audit, which the setup's DispatchTerminal role does
+   * not grant (a live run got 403), while every pool member is listed here to
+   * a token holding VM.Audit on the pool.
+   */
   async poolVmids(api, s) {
-    const pool = await api.call("GET", `/pools/${encodeURIComponent(s.pool)}`);
-    return (pool.members ?? []).filter((m) => m.type === void 0 || m.type === "lxc").map((m) => m.vmid).filter((v) => typeof v === "number");
+    const all = await api.call("GET", "/cluster/resources", { type: "vm" });
+    return (all ?? []).filter((m) => m.pool === s.pool && m.type === "lxc").map((m) => m.vmid).filter((v) => typeof v === "number");
   }
   /**
    * Startup reconcile (core's module hook, forwarded by server.ts): `chats`
