@@ -11,6 +11,7 @@
  * on the container between commands. Losing the container loses only those:
  * the real copy of the code is on the Dispatch host.
  */
+import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type {
   PluginContext,
@@ -25,12 +26,44 @@ import type { Settings } from "./settings.js";
 
 export const BACKEND_ID = "proxmox";
 
-/** What survives a restart, per chat, in the plugin's kv. */
+/** What survives a restart, per chat, in the plugin's kv (`chat:<chatId>`). */
 interface ChatRecord {
   vmid: number;
   hostname: string;
   createdAt: number;
+  /**
+   * When the idle stop is due (epoch ms). Kept here and not only in a timer:
+   * an in-memory setTimeout died with every Dispatch restart, and the
+   * container it was meant to stop ran until someone noticed.
+   */
+  idleDeadline?: number;
+  /** Last spawn. A clone unused for `destroyUnusedDays` is destroyed. */
+  lastUsedAt?: number;
 }
+
+/**
+ * A destroy that has not succeeded yet (`destroy:<chatId>`). Written BEFORE the
+ * first attempt, so a crash mid-destroy is retried too. Core fires
+ * onChatDeleted without waiting on older versions, so a Proxmox outage at that
+ * moment used to leak the container for good.
+ */
+interface PendingDestroy {
+  chatId: string;
+  vmid: number;
+  hostname: string;
+  attempts: number;
+  nextAt: number;
+  lastError?: string;
+}
+
+/** Why core is shutting the plugin down (the timed `onShutdown` hook). */
+export type ShutdownReason = "restart" | "stop" | "disable" | "uninstall";
+
+const SWEEP_MS = 60_000;
+const RETRY_BASE_MS = 30_000;
+const RETRY_MAX_MS = 30 * 60_000;
+/** Under core's 60 s onChatDeleted timeout, so a slow destroy is ours to report, not a timeout. */
+const DESTROY_WAIT_MS = 45_000;
 
 /** Live state per chat. */
 interface ChatState {
@@ -50,6 +83,16 @@ interface ChatState {
   forwards: Map<number, { close: () => void; withdraw: () => void }>;
   /** Live shells, so a stop/destroy can end them. */
   shells: Set<TerminalBackendHandle>;
+  idleDeadline?: number;
+  lastUsedAt?: number;
+  /**
+   * Bumped by every spawn. A stop decided under an older generation is
+   * dropped, so an idle stop (or the boot sweep) that lost a race with a new
+   * command never stops the container out from under it.
+   */
+  generation: number;
+  /** Serialises bring-up, stop and destroy for this chat's container. */
+  opChain: Promise<unknown>;
 }
 
 export interface BackendDeps {
@@ -98,9 +141,13 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
 
   async spawn(info: TerminalSpawnInfo): Promise<TerminalBackendHandle> {
     const st = await this.stateFor(info.chatId);
+    st.generation++;
     if (st.idleTimer) clearTimeout(st.idleTimer);
     st.idleTimer = undefined;
+    st.idleDeadline = undefined;
+    st.lastUsedAt = Date.now();
     await this.ensureReady(st, info.signal as AbortSignal);
+    await this.persist(st);
     const local = await repoInfo(info.cwd);
     const repo = await this.ensureRepo(st, local.root, local);
     await this.sync(st, local.root);
@@ -140,6 +187,9 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
     let st = this.chats.get(chatId);
     if (st) return st;
     const rec = await this.deps.kv?.get<ChatRecord>(`chat:${chatId}`);
+    // Another await (a concurrent spawn, or the boot sweep) may have made it meanwhile.
+    const raced = this.chats.get(chatId);
+    if (raced) return raced;
     st = {
       chatId,
       vmid: rec?.vmid ?? 0,
@@ -148,16 +198,47 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
       syncChain: Promise.resolve(),
       forwards: new Map(),
       shells: new Set(),
+      idleDeadline: rec?.idleDeadline,
+      lastUsedAt: rec?.lastUsedAt,
+      generation: 0,
+      opChain: Promise.resolve(),
     };
     this.chats.set(chatId, st);
+    // A record from before lastUsedAt existed: start its unused clock now, not
+    // at createdAt, or the first sweep after an update would destroy a clone
+    // its chat is still using.
+    if (rec && rec.lastUsedAt === undefined) {
+      st.lastUsedAt = Date.now();
+      await this.persist(st);
+    }
     return st;
+  }
+
+  /** Write the chat's record back to kv (only once it has a container). */
+  private async persist(st: ChatState): Promise<void> {
+    if (!st.vmid || !this.deps.kv) return;
+    const prev = await this.deps.kv.get<ChatRecord>(`chat:${st.chatId}`);
+    await this.deps.kv.set(`chat:${st.chatId}`, {
+      vmid: st.vmid,
+      hostname: st.hostname,
+      createdAt: prev?.createdAt ?? Date.now(),
+      idleDeadline: st.idleDeadline,
+      lastUsedAt: st.lastUsedAt,
+    } satisfies ChatRecord);
+  }
+
+  /** Run one container operation for a chat, after any already in flight. */
+  private serial<T>(st: ChatState, fn: () => Promise<T>): Promise<T> {
+    const run = st.opChain.then(fn);
+    st.opChain = run.catch(() => {});
+    return run;
   }
 
   /** Make sure the chat's container exists, is running, and has an open SSH connection. */
   private ensureReady(st: ChatState, signal: AbortSignal): Promise<void> {
     if (st.conn?.isOpen) return Promise.resolve();
     if (!st.ready) {
-      st.ready = this.bringUp(st, signal).finally(() => {
+      st.ready = this.serial(st, () => (st.conn?.isOpen ? Promise.resolve() : this.bringUp(st, signal))).finally(() => {
         st.ready = undefined;
       });
     }
@@ -168,6 +249,13 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
     const s = this.deps.settings();
     const api = await this.api();
     let status = st.vmid ? await api.status(s.node, st.vmid) : undefined;
+    // A remembered vmid whose container was destroyed behind our back may
+    // since have gone to another chat (or the other Dispatch instance sharing
+    // the pool). Starting and syncing into THAT would be the worst outcome here.
+    if (status && (await this.ownership(api, s, st.vmid, st.chatId)) !== "ours") {
+      this.log.warn(`vmid ${st.vmid} no longer holds chat ${st.chatId}'s container; making a new one`);
+      status = undefined;
+    }
     if (!status) {
       st.vmid = await this.cloneFor(api, s, st, signal);
       status = "stopped";
@@ -207,7 +295,7 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
           newid: vmid,
           hostname: st.hostname,
           pool: s.pool,
-          description: `Dispatch terminal for chat ${st.chatId} (proxmox-terminal plugin). Destroyed when the chat is deleted.`,
+          description: describe(st.chatId, await this.instanceId()),
         });
         await api.waitTask(s.node, upid, 180_000, signal);
       } catch (err) {
@@ -223,7 +311,8 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
         net0: `name=eth0,bridge=${s.bridge},ip=dhcp,type=veth`,
         tags: "dispatch-terminal",
       });
-      await this.deps.kv?.set(`chat:${st.chatId}`, { vmid, hostname: st.hostname, createdAt: Date.now() } satisfies ChatRecord);
+      st.vmid = vmid;
+      await this.persist(st);
       return vmid;
     }
     throw new Error(
@@ -410,63 +499,454 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
   }
 
   /* ----------------------------------------------------------- lifecycle */
+  //
+  // Everything below survives a Dispatch restart through kv: the idle
+  // deadline, the chat → vmid map, and destroys that have not succeeded yet.
+  // A sweep (at load, then every minute) acts on what is due, so nothing here
+  // depends on a timer or a hook having fired in THIS process.
 
-  onChatIdle({ chatId }: { chatId: string }): void {
-    const st = this.chats.get(chatId);
-    if (!st?.vmid) return;
-    const minutes = this.deps.settings().idleStopMinutes;
-    if (minutes < 0) return;
+  private instance?: Promise<string>;
+  private sweepTimer?: ReturnType<typeof setInterval>;
+  private sweepChain: Promise<void> = Promise.resolve();
+  private readonly destroying = new Map<number, Promise<void>>();
+
+  /**
+   * This instance's id, minted once into kv. Stable and dev Dispatch share
+   * config/ — so the same settings and the same Proxmox pool — but not data/,
+   * so each has its own kv and its own id. Every clone's description carries
+   * it, and the sweeps only adopt or destroy clones that carry THIS id: the
+   * other instance's containers are never ours to touch.
+   */
+  instanceId(): Promise<string> {
+    this.instance ??= (async () => {
+      const have = await this.deps.kv?.get<string>("instance");
+      if (have) return have;
+      const id = randomUUID().replace(/-/g, "").slice(0, 12);
+      await this.deps.kv?.set("instance", id);
+      return id;
+    })();
+    return this.instance;
+  }
+
+  /**
+   * Called once from activate. Recovers what a restart lost — the chat → vmid
+   * map from kv and the pool, the idle stops that were due, the destroys that
+   * failed — then keeps sweeping. Never throws: Proxmox may be down, and the
+   * next sweep tries again.
+   */
+  start(): Promise<void> {
+    if (!this.sweepTimer) {
+      this.sweepTimer = setInterval(() => void this.sweep(), SWEEP_MS);
+      this.sweepTimer.unref?.();
+    }
+    return this.sweep({ adopt: true, boot: true });
+  }
+
+  /**
+   * One pass over everything this instance owns. Passes queue behind each
+   * other, so a reconcile arriving mid-sweep runs after it rather than racing.
+   *
+   * - `adopt`: also read the pool, and take back any clone tagged with this
+   *   instance's id that kv has no record of.
+   * - `boot`: a running container with no live shell and no idle deadline is
+   *   one whose chat was busy when Dispatch died without a clean shutdown —
+   *   nothing will ever fire onChatIdle for it again, so stop it now.
+   * - `liveChats`: every chat that still exists. A clone for any other chat is
+   *   destroyed.
+   */
+  sweep(opts: { adopt?: boolean; boot?: boolean; liveChats?: ReadonlySet<string> } = {}): Promise<void> {
+    const run = this.sweepChain.then(() => this.sweepOnce(opts));
+    this.sweepChain = run.catch(() => {});
+    return run.catch((err: unknown) => this.log.warn(`cleanup sweep: ${errText(err)}`));
+  }
+
+  private async sweepOnce(opts: { adopt?: boolean; boot?: boolean; liveChats?: ReadonlySet<string> }): Promise<void> {
+    const s = this.deps.settings();
+    const kv = this.deps.kv;
+    if (!s.apiUrl || !kv) return; // not configured yet: nothing can exist
+    for (const key of await kv.list("chat:")) await this.stateFor(key.slice("chat:".length));
+    if (opts.adopt) await this.adopt();
+    const now = Date.now();
+
+    for (const key of await kv.list("destroy:")) {
+      const p = await kv.get<PendingDestroy>(key);
+      if (p && p.nextAt <= now) await this.attemptDestroy(p).catch(() => {});
+    }
+
+    const unusedMs = s.destroyUnusedDays > 0 ? s.destroyUnusedDays * 86_400_000 : 0;
+    for (const st of [...this.chats.values()]) {
+      if (!st.vmid) continue;
+      const busy = st.shells.size > 0 || !!st.ready;
+      if (opts.liveChats && !opts.liveChats.has(st.chatId)) {
+        await this.enqueueDestroy(st, "its chat no longer exists").catch(() => {});
+      } else if (unusedMs && !busy && (st.lastUsedAt ?? now) < now - unusedMs) {
+        // The chat may live on but stopped using this backend — switched back
+        // to local, or (with per-terminal locations) just never picks it. The
+        // container only holds installs and build output, so a later spawn
+        // re-cloning costs a reinstall, not work.
+        await this.enqueueDestroy(st, `unused for ${s.destroyUnusedDays} days`).catch(() => {});
+      } else if (st.idleDeadline !== undefined && st.idleDeadline <= now) {
+        await this.stopIdle(st, st.generation).catch((err: unknown) => this.log.warn(`stopping ${st.vmid}: ${errText(err)}`));
+      } else if (st.idleDeadline !== undefined) {
+        this.armIdleTimer(st);
+      } else if (opts.boot && !busy && !st.conn) {
+        await this.stopIdle(st, st.generation).catch((err: unknown) => this.log.warn(`stopping ${st.vmid}: ${errText(err)}`));
+      }
+    }
+  }
+
+  /** Take back clones in the pool tagged with this instance whose kv record was lost. */
+  private async adopt(): Promise<void> {
+    const s = this.deps.settings();
+    const api = await this.api();
+    const ours = await this.instanceId();
+    const known = new Set([...this.chats.values()].map((st) => st.vmid));
+    for (const key of (await this.deps.kv?.list("destroy:")) ?? []) known.add(Number(key.slice("destroy:".length)));
+    for (const vmid of await this.poolVmids(api, s)) {
+      if (known.has(vmid) || !inRange(s, vmid)) continue;
+      const cfg = await this.config(api, s, vmid).catch(() => undefined);
+      if (!cfg || Number(cfg.template) === 1) continue;
+      const d = parseDescription(cfg.description);
+      if (d.instance !== ours || !d.chatId) continue;
+      const st = await this.stateFor(d.chatId);
+      if (st.vmid && st.vmid !== vmid) {
+        // The chat already has another container: this one is a stray.
+        await this.recordDestroy({ chatId: d.chatId, vmid, hostname: cfg.hostname ?? "", attempts: 0, nextAt: 0 });
+        continue;
+      }
+      this.log.info(`re-adopting container ${vmid} for chat ${d.chatId} (its kv record was lost)`);
+      st.vmid = vmid;
+      st.hostname = cfg.hostname ?? st.hostname;
+      st.lastUsedAt ??= Date.now();
+      await this.persist(st);
+    }
+  }
+
+  onChatIdle({ chatId }: { chatId: string }): Promise<void> {
+    return (async () => {
+      const st = this.chats.get(chatId) ?? (await this.deps.kv?.get<ChatRecord>(`chat:${chatId}`) ? await this.stateFor(chatId) : undefined);
+      if (!st?.vmid) return;
+      const minutes = this.deps.settings().idleStopMinutes;
+      if (minutes < 0) return;
+      const gen = st.generation;
+      st.idleDeadline = Date.now() + minutes * 60_000;
+      await this.persist(st);
+      // A spawn while that write was in flight un-idled the chat.
+      if (st.generation === gen) this.armIdleTimer(st, gen);
+    })().catch((err: unknown) => this.log.warn(`idle for chat ${chatId}: ${errText(err)}`));
+  }
+
+  /** The timer is only the fast path; the minute sweep stops anything the timer missed. */
+  private armIdleTimer(st: ChatState, gen = st.generation): void {
+    if (st.idleDeadline === undefined) return;
     if (st.idleTimer) clearTimeout(st.idleTimer);
     st.idleTimer = setTimeout(() => {
       st.idleTimer = undefined;
-      void this.stop(st).catch((err: unknown) => this.log.warn(`stopping ${st.vmid} failed: ${String(err)}`));
-    }, minutes * 60_000);
+      void this.stopIdle(st, gen).catch((err: unknown) => this.log.warn(`stopping ${st.vmid} failed: ${errText(err)}`));
+    }, Math.max(0, st.idleDeadline - Date.now()));
     st.idleTimer.unref?.();
   }
 
-  async onChatDeleted({ chatId }: { chatId: string }): Promise<void> {
-    const st = await this.stateFor(chatId);
-    if (st.idleTimer) clearTimeout(st.idleTimer);
-    this.dropConnection(st);
-    this.chats.delete(chatId);
-    if (!st.vmid) return;
-    const s = this.deps.settings();
-    const api = await this.api();
-    const status = await api.status(s.node, st.vmid);
-    if (status === "running") {
-      const upid = await api.call<string>("POST", `/nodes/${s.node}/lxc/${st.vmid}/status/stop`);
-      await api.waitTask(s.node, upid, 60_000);
-    }
-    if (status) {
-      this.log.info(`destroying container ${st.vmid} (chat ${chatId} was deleted)`);
-      const upid = await api.call<string>("DELETE", `/nodes/${s.node}/lxc/${st.vmid}`, {
-        purge: 1,
-        "destroy-unreferenced-disks": 1,
-      });
-      await api.waitTask(s.node, upid, 120_000);
-    }
-    await this.deps.kv?.delete(`chat:${chatId}`);
+  /**
+   * Stop the chat's container, unless a spawn has happened since the stop was
+   * decided (`gen`). The next spawn starts it again.
+   */
+  private stopIdle(st: ChatState, gen: number): Promise<void> {
+    return this.serial(st, async () => {
+      if (st.generation !== gen || !st.vmid) return;
+      await this.stop(st);
+      st.idleDeadline = undefined;
+      await this.persist(st);
+    });
   }
 
-  /** Stop a chat's container (idle). The next spawn starts it again. */
+  /** Stop a chat's container. Ends its shells; checks the vmid is still this chat's first. */
   async stop(st: ChatState): Promise<void> {
     this.dropConnection(st);
     const s = this.deps.settings();
     const api = await this.api();
     if ((await api.status(s.node, st.vmid)) !== "running") return;
+    if ((await this.ownership(api, s, st.vmid, st.chatId)) !== "ours") return;
     this.log.info(`stopping idle container ${st.vmid} (chat ${st.chatId})`);
     const upid = await api.call<string>("POST", `/nodes/${s.node}/lxc/${st.vmid}/status/shutdown`, { timeout: 30, forceStop: 1 });
     await api.waitTask(s.node, upid, 90_000);
   }
 
-  /** Plugin switched off: close connections. Containers are left as they are. */
-  dispose(): void {
+  /**
+   * Destroy the chat's container. Resolves only once it is gone (or was never
+   * made); REJECTS when it could not be destroyed, so a core that retries
+   * chat cleanup knows to. Either way the attempt is recorded and the sweep
+   * keeps retrying with backoff, so an older core that does not wait on this
+   * loses nothing either.
+   */
+  async onChatDeleted({ chatId }: { chatId: string }): Promise<void> {
+    const pending = await this.pendingFor(chatId);
+    const st = await this.stateFor(chatId);
+    if (st.vmid) await this.enqueueDestroy(st, "its chat was deleted");
+    else this.forget(st);
+    // A retry from core after an earlier failure: the record is all that is left.
+    for (const p of pending) await this.attemptDestroy(p);
+  }
+
+  /** Forget the chat's container and destroy it: pending in kv first, then one attempt now. */
+  private async enqueueDestroy(st: ChatState, why: string): Promise<void> {
+    const p: PendingDestroy = { chatId: st.chatId, vmid: st.vmid, hostname: st.hostname, attempts: 0, nextAt: 0 };
+    this.log.info(`destroying container ${p.vmid} (chat ${p.chatId}): ${why}`);
+    await this.recordDestroy(p);
+    this.forget(st);
+    await this.deps.kv?.delete(`chat:${st.chatId}`);
+    await this.attemptDestroy(p);
+  }
+
+  private forget(st: ChatState): void {
+    st.generation++;
+    if (st.idleTimer) clearTimeout(st.idleTimer);
+    st.idleTimer = undefined;
+    this.dropConnection(st);
+    if (this.chats.get(st.chatId) === st) this.chats.delete(st.chatId);
+  }
+
+  private async recordDestroy(p: PendingDestroy): Promise<void> {
+    await this.deps.kv?.set(`destroy:${p.vmid}`, p);
+  }
+
+  private async pendingFor(chatId: string): Promise<PendingDestroy[]> {
+    const kv = this.deps.kv;
+    if (!kv) return [];
+    const out: PendingDestroy[] = [];
+    for (const key of await kv.list("destroy:")) {
+      const p = await kv.get<PendingDestroy>(key);
+      if (p?.chatId === chatId) out.push(p);
+    }
+    return out;
+  }
+
+  /** One destroy attempt for a pending record; on failure, back off and rethrow. */
+  private attemptDestroy(p: PendingDestroy, opts: { timeoutMs?: number } = {}): Promise<void> {
+    const inflight = this.destroying.get(p.vmid);
+    if (inflight) return inflight;
+    const run = (async () => {
+      try {
+        await this.destroyVm(p.vmid, p.chatId, opts);
+        await this.deps.kv?.delete(`destroy:${p.vmid}`);
+      } catch (err) {
+        p.attempts++;
+        p.nextAt = Date.now() + Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (p.attempts - 1));
+        p.lastError = errText(err);
+        await this.recordDestroy(p).catch(() => {});
+        this.log.warn(
+          `destroying container ${p.vmid} (chat ${p.chatId}) failed, attempt ${p.attempts}; ` +
+            `retrying after ${new Date(p.nextAt).toISOString()}: ${p.lastError}`,
+        );
+        throw err;
+      }
+    })().finally(() => this.destroying.delete(p.vmid));
+    this.destroying.set(p.vmid, run);
+    return run;
+  }
+
+  /**
+   * Stop and destroy one container — only after checking it is a clone in the
+   * configured range, not a template, and (by its description) the chat's.
+   * Anything else is treated as already gone: never destroy what we can't
+   * prove is ours.
+   */
+  private async destroyVm(vmid: number, chatId: string, opts: { timeoutMs?: number } = {}): Promise<void> {
+    const s = this.deps.settings();
+    const api = await this.api();
+    const own = await this.ownership(api, s, vmid, chatId);
+    if (own === "gone") return;
+    if (own === "not-ours") {
+      this.log.warn(`not destroying ${vmid}: it is not chat ${chatId}'s clone (outside ${s.vmidStart}-${s.vmidEnd}, a template, or another chat's)`);
+      return;
+    }
+    // One task, not stop-then-destroy: core gives onChatDeleted 60 s and
+    // onShutdown 5 s, and `force` destroys a running container in one go.
+    const upid = await api.call<string>("DELETE", `/nodes/${s.node}/lxc/${vmid}`, {
+      purge: 1,
+      "destroy-unreferenced-disks": 1,
+      force: 1,
+    });
+    await api.waitTask(s.node, upid, opts.timeoutMs ?? DESTROY_WAIT_MS);
+    this.log.info(`destroyed container ${vmid} (chat ${chatId})`);
+  }
+
+  private async config(api: Proxmox, s: Settings, vmid: number): Promise<LxcConfig | undefined> {
+    try {
+      return await api.call<LxcConfig>("GET", `/nodes/${s.node}/lxc/${vmid}/config`);
+    } catch (err) {
+      if (err instanceof ProxmoxError && GONE.test(err.message)) return undefined;
+      throw err;
+    }
+  }
+
+  private async ownership(api: Proxmox, s: Settings, vmid: number, chatId: string): Promise<"ours" | "gone" | "not-ours"> {
+    if (!inRange(s, vmid)) return "not-ours";
+    const cfg = await this.config(api, s, vmid);
+    if (!cfg) return "gone";
+    if (Number(cfg.template) === 1) return "not-ours";
+    const d = parseDescription(cfg.description);
+    if (d.chatId) return d.chatId === chatId ? "ours" : "not-ours";
+    // A description someone edited away: fall back to the hostname we gave it.
+    return cfg.hostname === hostnameFor(chatId) ? "ours" : "not-ours";
+  }
+
+  private async poolVmids(api: Proxmox, s: Settings): Promise<number[]> {
+    const pool = await api.call<{ members?: Array<{ vmid?: number; type?: string }> }>("GET", `/pools/${encodeURIComponent(s.pool)}`);
+    return (pool.members ?? [])
+      .filter((m) => m.type === undefined || m.type === "lxc")
+      .map((m) => m.vmid)
+      .filter((v): v is number => typeof v === "number");
+  }
+
+  /**
+   * Startup reconcile (core's module hook, forwarded by server.ts): `chats`
+   * is every chat that exists, archived included. A
+   * clone for any other chat is destroyed; idle ones are stopped.
+   */
+  reconcile({ chats }: { chats: Iterable<string | { id: string }> }): Promise<void> {
+    const ids = new Set<string>();
+    for (const c of chats) ids.add(typeof c === "string" ? c : c.id);
+    return this.sweep({ adopt: true, boot: true, liveChats: ids });
+  }
+
+  /**
+   * Timed shutdown (core hook).
+   * - `restart`: leave containers running — they are reused when Dispatch is
+   *   back. Busy chats get an idle deadline written down, so one whose chat
+   *   never comes back is still stopped by the boot sweep in time.
+   * - `stop` / `disable`: nothing will manage the containers for a while, so
+   *   ask Proxmox to shut each one down, without waiting for it to finish.
+   * - `uninstall`: destroy every clone this instance made, waiting as long as
+   *   the deadline allows. Whatever is left is logged by vmid.
+   */
+  async onShutdown(e: { reason: ShutdownReason; deadline?: number; signal?: AbortSignal }): Promise<void> {
+    const left = () => (e.deadline ? Math.max(1_000, e.deadline - Date.now()) : 60_000);
+    await this.noteDeadlines().catch(() => {});
+    if (e.reason === "restart") return this.closeAll();
+    const s = this.deps.settings();
+    if (!s.apiUrl || !this.deps.kv) return this.closeAll();
+    for (const key of await this.deps.kv.list("chat:")) await this.stateFor(key.slice("chat:".length)).catch(() => undefined);
+    const chats = [...this.chats.values()].filter((st) => st.vmid);
+    this.closeAll();
+    const api = await this.api();
+    if (e.reason === "uninstall") {
+      await this.adopt().catch(() => {});
+      for (const st of [...this.chats.values()]) if (st.vmid) await this.recordDestroy({ chatId: st.chatId, vmid: st.vmid, hostname: st.hostname, attempts: 0, nextAt: 0 });
+      this.chats.clear();
+      const pending: PendingDestroy[] = [];
+      for (const key of await this.deps.kv.list("destroy:")) {
+        const p = await this.deps.kv.get<PendingDestroy>(key);
+        if (p) pending.push(p);
+      }
+      const results = await withDeadline(
+        Promise.allSettled(pending.map((p) => this.attemptDestroy(p, { timeoutMs: left() }))),
+        left(),
+        e.signal,
+      );
+      const failed = pending.filter((_, i) => results?.[i]?.status !== "fulfilled").map((p) => p.vmid);
+      if (failed.length) this.log.warn(`uninstall: could not destroy ${failed.join(", ")} in time; remove them by hand`);
+      for (const key of await this.deps.kv.list("chat:")) await this.deps.kv.delete(key);
+      return;
+    }
+    // stop / disable: start the shutdowns, don't wait for the tasks.
+    await withDeadline(
+      Promise.allSettled(
+        chats.map(async (st) => {
+          if ((await api.status(s.node, st.vmid)) !== "running") return;
+          if ((await this.ownership(api, s, st.vmid, st.chatId)) !== "ours") return;
+          this.log.info(`shutting down container ${st.vmid} (chat ${st.chatId}): Dispatch is ${e.reason === "stop" ? "stopping" : "disabling the plugin"}`);
+          await api.call("POST", `/nodes/${s.node}/lxc/${st.vmid}/status/shutdown`, { timeout: 30, forceStop: 1 });
+        }),
+      ),
+      left(),
+      e.signal,
+    );
+  }
+
+  /**
+   * A chat busy at shutdown has no idle deadline, and nothing will fire
+   * onChatIdle for it after the restart. Give it one now, so the boot sweep
+   * leaves it running for a normal idle period — reusable if the chat comes
+   * back — rather than treating it like a crash's leftovers.
+   */
+  private async noteDeadlines(): Promise<void> {
+    const minutes = this.deps.settings().idleStopMinutes;
+    if (minutes < 0) return;
+    for (const st of this.chats.values()) {
+      if (!st.vmid || st.idleDeadline !== undefined || !st.conn) continue;
+      st.idleDeadline = Date.now() + minutes * 60_000;
+      await this.persist(st);
+    }
+  }
+
+  private closeAll(): void {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = undefined;
     for (const st of this.chats.values()) {
       if (st.idleTimer) clearTimeout(st.idleTimer);
+      st.idleTimer = undefined;
       this.dropConnection(st);
     }
+  }
+
+  /**
+   * Plugin switched off, or Dispatch shutting down on a core without
+   * onShutdown: close connections, leave containers as they are. The idle
+   * deadlines written here are what lets the next load stop them on time.
+   */
+  async dispose(): Promise<void> {
+    await this.noteDeadlines().catch(() => {});
+    this.closeAll();
     this.chats.clear();
   }
+}
+
+interface LxcConfig {
+  hostname?: string;
+  description?: string;
+  template?: number | string;
+}
+
+const GONE = /does not exist|no such|not found/i;
+
+function inRange(s: Settings, vmid: number): boolean {
+  return vmid >= s.vmidStart && vmid <= s.vmidEnd && vmid !== s.templateVmid;
+}
+
+/** The description every clone gets. `parseDescription` reads it back; keep the two in step. */
+export function describe(chatId: string, instance: string): string {
+  return `Dispatch terminal for chat ${chatId} (proxmox-terminal plugin, instance ${instance}). Destroyed when the chat is deleted.`;
+}
+
+export function parseDescription(text: string | undefined): { chatId?: string; instance?: string } {
+  const t = text ?? "";
+  return {
+    chatId: t.match(/terminal for chat ([A-Za-z0-9_-]+)/)?.[1],
+    instance: t.match(/instance ([a-z0-9]+)\)/)?.[1],
+  };
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Resolve with `p`'s value, or undefined once `ms` passes or `signal` aborts — whichever is first. */
+function withDeadline<T>(p: Promise<T>, ms: number, signal?: AbortSignal): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(undefined), ms);
+    signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+    void p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(undefined);
+      },
+    );
+  });
 }
 
 /* ------------------------------------------------------------------ helpers */

@@ -14,6 +14,7 @@ export interface Settings {
   vmidStart: number;
   vmidEnd: number;
   idleStopMinutes: number;
+  destroyUnusedDays: number;
   sshUser: string;
   sshKeyPath: string;
   workDir: string;
@@ -33,6 +34,7 @@ export const DEFAULTS: Settings = {
   vmidStart: 9001,
   vmidEnd: 9099,
   idleStopMinutes: 30,
+  destroyUnusedDays: 7,
   sshUser: "root",
   sshKeyPath: "",
   workDir: "/root/work",

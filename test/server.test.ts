@@ -15,7 +15,7 @@ import plugin, { normaliseKey } from "../src/server.js";
 import { ProxmoxTerminalBackend, githubHttps, hostnameFor, parseListeners } from "../src/backend.js";
 import { remotePathFor, snapshot } from "../src/snapshot.js";
 import { readSettings } from "../src/settings.js";
-import type { Proxmox } from "../src/proxmox.js";
+import { ProxmoxError, type Proxmox } from "../src/proxmox.js";
 import type { SshConnection } from "../src/ssh.js";
 
 const dirs: string[] = [];
@@ -128,13 +128,18 @@ class FakeChannel extends EventEmitter {
 
 function fakes() {
   const calls: string[] = [];
-  const state = { status: undefined as string | undefined };
+  const state = { status: undefined as string | undefined, description: undefined as string | undefined };
   const api = {
     call: async (method: string, path: string, params?: Record<string, unknown>) => {
       calls.push(`${method} ${path}${params?.newid ? ` newid=${params.newid}` : ""}`);
       if (path.startsWith("/pools/")) return { members: [{ vmid: 9001 }] };
+      if (path.endsWith("/config") && method === "GET") {
+        if (!state.status) throw new ProxmoxError("Configuration file does not exist", 500);
+        return { description: state.description };
+      }
       if (path.endsWith("/clone")) {
         state.status = "stopped";
+        state.description = String(params?.description);
         return "UPID:clone";
       }
       if (path.endsWith("/status/start")) {
@@ -279,15 +284,34 @@ describe("activate", () => {
   });
 });
 
+describe("cleanup hooks on the module", () => {
+  it("exposes onShutdown and reconcile beside activate, and they are no-ops before setup", async () => {
+    const t = createTestContext({ id: "proxmox-terminal", capabilities: ["terminals", "secrets", "kv"] });
+    await plugin.activate(t.ctx);
+    const mod = plugin as unknown as {
+      onShutdown(e: unknown): Promise<void>;
+      reconcile(e: unknown): Promise<void>;
+    };
+    const signal = new AbortController().signal;
+    await mod.reconcile({ chats: [], deadline: Date.now() + 1_000, signal });
+    await mod.onShutdown({ reason: "restart", deadline: Date.now() + 1_000, signal });
+    await plugin.deactivate?.();
+  });
+});
+
 describe("the committed bundle", () => {
   // The URL installer copies server/index.js as-is, so it must load on its own
   // as an ES module — this caught ssh2's `__dirname` reference, which only
   // failed once the bundle was loaded from a plugin directory.
   it("imports and activates outside the source tree", async () => {
     // @ts-expect-error -- the built bundle ships no .d.ts; its shape is asserted here.
-    const mod = (await import("../server/index.js")) as { default: { activate(ctx: unknown): unknown } };
+    const mod = (await import("../server/index.js")) as {
+      default: { activate(ctx: unknown): unknown; onShutdown?: unknown; reconcile?: unknown };
+    };
     const t = createTestContext({ id: "proxmox-terminal", capabilities: ["terminals", "secrets", "kv"] });
     await mod.default.activate(t.ctx);
     expect([...t.terminalBackends.keys()]).toEqual(["proxmox"]);
+    expect(typeof mod.default.onShutdown).toBe("function");
+    expect(typeof mod.default.reconcile).toBe("function");
   });
 });
