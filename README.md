@@ -111,6 +111,7 @@ Containers must not outlive their purpose just because Dispatch restarted, crash
 - **Destroys are retried.** A destroy is recorded before it is tried, and retried with backoff (30 s, doubling to 30 min) until it succeeds, across restarts.
 - **Only its own containers.** Each clone's description names its chat and this Dispatch instance. The plugin only stops or destroys a vmid inside the configured range that is not a template and whose description still names the chat. Two Dispatch instances sharing one pool (stable and dev) never touch each other's clones.
 - **On a Dispatch with the cleanup lifecycle** (`reconcile` / `onShutdown`): at startup, clones of chats that no longer exist are destroyed. On restart, containers are left running. On stop or disable, they are shut down (not destroyed). On uninstall, every clone this instance made is destroyed. Older Dispatch versions don't call these hooks; everything above still works.
+- **Switch the plugin on before uninstalling it.** Dispatch can't run a switched-off plugin's uninstall hook, so its clones would be left behind. If that already happened, the leftovers are the pool's members whose description says `proxmox-terminal plugin`; destroy them by hand.
 
 ## How the sync works
 
