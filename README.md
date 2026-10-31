@@ -6,6 +6,10 @@ Plugins for [Dispatch](https://github.com/mdennis281/dispatch). Each one lives i
 |---|---|---|
 | [Proxmox terminal](plugins/proxmox-terminal) | `proxmox-terminal` | Runs each chat's managed terminals in its own Proxmox LXC, with the local worktree synced in before every command. |
 
+## Planned
+
+- **Remote host** (`remote-host`): run a chat's terminals, a synced worktree and its browser MCPs on your own machines, Mac first. Design: [docs/design/remote-host.md](docs/design/remote-host.md).
+
 ## Install
 
 In Dispatch: **Settings → Plugins → Inspect from URL**, paste
