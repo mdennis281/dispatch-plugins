@@ -1,6 +1,6 @@
-# dispatch-proxmox-terminal
+# Proxmox terminal (`proxmox-terminal`)
 
-A [Dispatch](https://github.com/mdennis281/dispatch) plugin that runs each chat's **managed terminals** (the agent's `terminal` tool and the Terminals panel) in **its own Proxmox LXC**, instead of on the machine Dispatch runs on.
+A [Dispatch](https://github.com/mdennis281/dispatch) plugin, part of [dispatch-plugins](https://github.com/mdennis281/dispatch-plugins), that runs each chat's **managed terminals** (the agent's `terminal` tool and the Terminals panel) in **its own Proxmox LXC**, instead of on the machine Dispatch runs on.
 
 - **One container per chat.** It is linked-cloned from a template the first time the chat opens a terminal, stopped when the chat goes idle, started again on the next command, and destroyed when the chat is deleted.
 - **The container has its own git checkout.** Before every command, the plugin snapshots the chat's *local* worktree (committed, uncommitted and untracked files alike, ignored files excluded) and checks it out on the container. The agent keeps editing locally; nothing is pushed to GitHub to test a change, and **no GitHub token ever goes onto the container**.
@@ -80,13 +80,15 @@ Put the template in the pool (`--pool dispatch-terminals` above, or `pveum pool 
 
 ## 3. Install the plugin
 
-In Dispatch: **Settings → Plugins → Install from URL**, paste
+In Dispatch: **Settings → Plugins → Inspect from URL**, paste
 
 ```
-https://github.com/mdennis281/dispatch-proxmox-terminal
+https://github.com/mdennis281/dispatch-plugins
 ```
 
-review what it asks for, and install. Or from a shell: `dispatch plugin add https://github.com/mdennis281/dispatch-proxmox-terminal`.
+tick **Proxmox terminal** in the list, review what it asks for, and install. This plugin's own URL, `https://github.com/mdennis281/dispatch-plugins/tree/main/plugins/proxmox-terminal`, goes straight to its report. Or from a shell: `dispatch plugin add https://github.com/mdennis281/dispatch-plugins --plugin proxmox-terminal`.
+
+Installed from the old `dispatch-proxmox-terminal` URL? That copy can't follow the move with Check for updates; see [Moving an install from the old URL](https://github.com/mdennis281/dispatch-plugins#moving-an-install-from-the-old-url).
 
 Then:
 
@@ -128,16 +130,13 @@ container: git update-ref refs/dispatch/snapshot <sha> && git checkout --force -
 
 ## Develop
 
-The SDK is not on npm. It is `link:`ed from a Dispatch checkout beside this one, at `../claude-manager/packages/plugin-sdk`; edit that path in `package.json` if yours lives elsewhere.
+Set up the workspace as the [repository README](https://github.com/mdennis281/dispatch-plugins#develop) describes (a Dispatch checkout beside it for the SDK, then `pnpm install` at the root). Then, in this directory:
 
 ```bash
-git clone https://github.com/mdennis281/dispatch claude-manager
-cd claude-manager && pnpm install && pnpm --filter @dispatch/shared --filter @dispatch/plugin-sdk build && cd ..
-git clone https://github.com/mdennis281/dispatch-proxmox-terminal && cd dispatch-proxmox-terminal
-pnpm install && pnpm test && pnpm build                 # build → server/index.js, which is COMMITTED
+pnpm test && pnpm build                 # build → server/index.js, which is COMMITTED
 ```
 
-`server/index.js` is committed on purpose: the URL installer copies the repository as-is and never builds, and the update check compares commits. Rebuild and commit it with every source change. `ssh2`'s optional native addons are left out of the bundle (see `vite.server.config.mjs`), so it runs on ssh2's pure-JS crypto.
+`server/index.js` is committed on purpose: the URL installer copies this directory as-is and never builds, and the update check compares the files in it. Rebuild and commit it with every source change. `ssh2`'s optional native addons are left out of the bundle (see `vite.server.config.mjs`), so it runs on ssh2's pure-JS crypto.
 
 ## License
 

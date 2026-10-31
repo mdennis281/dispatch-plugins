@@ -1,9 +1,17 @@
+# plugins/* are the plugins Dispatch installs, one directory each.
+# packages/* is for code two or more plugins share. It is never installed on its
+# own: Dispatch copies only a plugin's directory, with no node_modules, so a
+# plugin that uses a shared package must bundle it into its server/index.js.
+packages:
+  - plugins/*
+  - packages/*
+
 # pnpm will not run esbuild's postinstall (which unpacks its binary) unless
 # it is allowed here; without it `pnpm install` exits with ERR_PNPM_IGNORED_BUILDS.
 allowBuilds:
   esbuild: true
   # ssh2's optional native crypto binding and cpu-features. Denied on purpose:
-  # the plugin is ONE bundled JS file loaded from Dispatch's config dir, where
+  # a plugin is ONE bundled JS file loaded from Dispatch's config dir, where
   # no compiled .node addon can follow it, and ssh2 falls back to pure JS.
   ssh2: false
   cpu-features: false

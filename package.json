@@ -1,0 +1,12 @@
+{
+  "name": "dispatch-plugins",
+  "private": true,
+  "type": "module",
+  "description": "A collection of Dispatch plugins, each installable on its own.",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "license": "MIT"
+}
