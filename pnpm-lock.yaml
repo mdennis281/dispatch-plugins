@@ -6,15 +6,17 @@ settings:
 
 importers:
 
-  .:
+  .: {}
+
+  plugins/proxmox-terminal:
     dependencies:
       ssh2:
         specifier: ^1.16.0
         version: 1.17.0
     devDependencies:
       '@dispatch/plugin-sdk':
-        specifier: link:../claude-manager/packages/plugin-sdk
-        version: link:../claude-manager/packages/plugin-sdk
+        specifier: link:../../../claude-manager/packages/plugin-sdk
+        version: link:../../../claude-manager/packages/plugin-sdk
       '@types/node':
         specifier: ^26.1.0
         version: 26.6.5

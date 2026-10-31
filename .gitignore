@@ -1,2 +1,3 @@
 node_modules/
-# server/ is COMMITTED: the URL installer copies the repo as-is and never builds.
+# plugins/*/server/ is COMMITTED: the URL installer copies a plugin's directory
+# as-is and never builds.

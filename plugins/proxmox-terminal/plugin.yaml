@@ -2,14 +2,14 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: proxmox-terminal
 name: Proxmox terminal
-version: 0.1.0
+version: 0.1.1
 dispatch: ">=1"
 description: >-
   Run each chat's managed terminals in its own Proxmox LXC — a linked clone of
   a template, holding its own git checkout that your local worktree is synced
   into before every command. Stopped when the chat goes idle, destroyed when
   it is deleted.
-homepage: https://github.com/mdennis281/dispatch-proxmox-terminal
+homepage: https://github.com/mdennis281/dispatch-plugins/tree/main/plugins/proxmox-terminal
 server: ./server/index.js
 settings: ./settings.schema.json
 secrets:

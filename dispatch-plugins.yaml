@@ -1,0 +1,8 @@
+# The plugins in this repository. Pasting the repository's URL into Dispatch
+# (Settings → Plugins) lists exactly these paths, in this order, to pick from.
+# Paths only: each plugin's name, version and capabilities live in its own
+# plugin.yaml, which is the copy Dispatch actually reads.
+name: dispatch-plugins
+description: Plugins for Dispatch, each installable on its own.
+plugins:
+  - plugins/proxmox-terminal
