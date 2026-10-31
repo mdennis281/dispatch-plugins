@@ -32,6 +32,12 @@
       "description": "Minutes after the chat goes idle before its container is stopped (it restarts on the next command). 0 stops at once; -1 never stops.",
       "default": 30
     },
+    "destroyUnusedDays": {
+      "type": "integer",
+      "title": "Destroy after unused (days)",
+      "description": "A container no terminal has used for this many days is destroyed, even if its chat still exists (e.g. it went back to local terminals). The next remote terminal makes a fresh one. 0 keeps it until the chat is deleted.",
+      "default": 7
+    },
     "sshUser": { "type": "string", "title": "SSH user", "default": "root" },
     "sshKeyPath": {
       "type": "string",

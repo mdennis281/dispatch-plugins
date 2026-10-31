@@ -99,8 +99,19 @@ Then:
    - **First/last vmid**: the range clones are allocated from (default 9001–9099)
    - **SSH private key file**: e.g. `~/.ssh/dispatch_proxmox_terminal`, if you didn't use the secret
    - **Stop after idle (minutes)**: 30 by default; 0 stops at once, -1 never
+   - **Destroy after unused (days)**: 7 by default; a container no terminal has used for this long is destroyed even if its chat still exists (0 keeps it until the chat is deleted)
    - **Proxmox CA certificate**: paste `/etc/pve/pve-root-ca.pem` so the node's self-signed certificate is verified properly (or, worse, tick *Skip TLS verification*)
 3. Pick which chats use it: a project default under Project settings → Chat defaults → **Terminals run on**, or per chat in its Terminals panel.
+
+## Cleanup
+
+Containers must not outlive their purpose just because Dispatch restarted, crashed, or Proxmox was down at the wrong moment. Everything below is kept in the plugin's kv store, and a sweep (at load, then every minute) acts on what is due:
+
+- **Idle stop survives restarts.** The idle deadline is stored, not just held in a timer. A container whose deadline passed while Dispatch was down is stopped on the next load. One whose chat was busy when Dispatch crashed is stopped at once; a clean shutdown writes a deadline first, so a restart keeps it for reuse.
+- **Destroys are retried.** A destroy is recorded before it is tried, and retried with backoff (30 s, doubling to 30 min) until it succeeds, across restarts.
+- **Only its own containers.** Each clone's description names its chat and this Dispatch instance. The plugin only stops or destroys a vmid inside the configured range that is not a template and whose description still names the chat. Two Dispatch instances sharing one pool (stable and dev) never touch each other's clones.
+- **On a Dispatch with the cleanup lifecycle** (`reconcile` / `onShutdown`): at startup, clones of chats that no longer exist are destroyed. On restart, containers are left running. On stop or disable, they are shut down (not destroyed). On uninstall, every clone this instance made is destroyed. Older Dispatch versions don't call these hooks; everything above still works.
+- **Switch the plugin on before uninstalling it.** Dispatch can't run a switched-off plugin's uninstall hook, so its clones would be left behind. If that already happened, the leftovers are the pool's members whose description says `proxmox-terminal plugin`; destroy them by hand.
 
 ## How the sync works
 
