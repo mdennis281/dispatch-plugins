@@ -5,8 +5,10 @@
  * `@dispatch/plugin-sdk` is not on npm, so every package here depends on it as
  * `link:../../.dispatch-sdk`: a path INSIDE this checkout, which is the same
  * from the primary checkout, from any git worktree of it, and from CI. This
- * script fills that path. It runs as the root `pnpm:devPreinstall`, so a plain
- * `pnpm install` refreshes it before pnpm links anything.
+ * script fills that path. It runs as the root `pnpm:devPreinstall`, so the
+ * first `pnpm install` of a checkout makes it before pnpm links anything. A
+ * REPEAT install that pnpm finds "Already up to date" skips the hook, so to
+ * refresh it, run `pnpm copy-sdk`. The `link:` follows: no reinstall needed.
  *
  * A COPY, never a link. `.dispatch-sdk` was once a junction to the Dispatch
  * checkout, and removing a worktree that held it (`git worktree remove` on
@@ -21,14 +23,20 @@
  *                                         shared's dependencies (zod, yaml),
  *                                         @types/react, and their dependencies
  * The SDK and shared must be BUILT in the Dispatch checkout (their dist/).
- * Re-run `pnpm install` after rebuilding them there; the copy does not follow.
+ * Run `pnpm copy-sdk` after rebuilding them there; the copy does not follow.
  *
- * Which Dispatch checkout, first match wins:
- *   1. `DISPATCH_REPO`, if set. CI sets it; so can anyone whose checkout is
- *      somewhere else.
- *   2. A sibling of the PRIMARY checkout named `claude-manager` or `dispatch`.
+ * Which Dispatch checkout, first match wins. Any checkout or git worktree of
+ * Dispatch will do, as long as its shared and plugin-sdk are built:
+ *   1. `DISPATCH_REPO`, if set. CI sets it.
+ *   2. `git config dispatch.repo`. It lives in this repository's shared
+ *      `.git/config`, so every worktree sees it and every later copy keeps
+ *      using it. An environment variable is gone in the next shell, and the
+ *      next copy then silently fell back to (3).
+ *   3. A sibling of the PRIMARY checkout named `claude-manager` or `dispatch`.
  *      The primary checkout comes from `git rev-parse --git-common-dir`, so a
- *      worktree finds the same sibling the primary does.
+ *      worktree finds the same sibling the primary does. That checkout may be
+ *      well behind Dispatch's main; the commit copied from is printed.
+ * A checkout named by (1) or (2) that has no SDK is an error, not a fallback.
  */
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync } from "node:fs";
@@ -48,18 +56,19 @@ function fail(message) {
   process.exit(1);
 }
 
+/** `git <args>` in `cwd`: its trimmed stdout, or undefined when git fails or prints nothing. */
+function gitOut(args, cwd = repoRoot) {
+  try {
+    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The directory holding the main `.git`, whichever worktree we are in. */
 function primaryCheckout() {
-  try {
-    const common = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return dirname(common);
-  } catch {
-    return repoRoot; // not a git checkout (an unpacked tarball): look beside it
-  }
+  const common = gitOut(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  return common ? dirname(common) : repoRoot; // not a git checkout (an unpacked tarball): look beside it
 }
 
 function manifest(dir) {
@@ -70,23 +79,26 @@ function manifest(dir) {
   }
 }
 
+/** The SDK to copy, and which rule (see the header) found it. */
 function findSdk() {
-  const fromEnv = process.env.DISPATCH_REPO;
-  if (fromEnv) {
-    const sdk = resolve(fromEnv, "packages", "plugin-sdk");
-    if (manifest(sdk)?.name !== SDK) fail(`DISPATCH_REPO=${fromEnv} has no ${SDK} at packages/plugin-sdk`);
-    return sdk;
+  const [via, named] = process.env.DISPATCH_REPO
+    ? ["DISPATCH_REPO", process.env.DISPATCH_REPO]
+    : ["git config dispatch.repo", gitOut(["config", "--path", "--get", "dispatch.repo"])];
+  if (named) {
+    const sdk = resolve(named, "packages", "plugin-sdk");
+    if (manifest(sdk)?.name !== SDK) fail(`${via} is ${named}, which has no ${SDK} at packages/plugin-sdk`);
+    return { sdk, via };
   }
   const parent = dirname(primaryCheckout());
   const tried = [];
   for (const name of ["claude-manager", "dispatch"]) {
     const sdk = join(parent, name, "packages", "plugin-sdk");
     tried.push(sdk);
-    if (manifest(sdk)?.name === SDK) return sdk;
+    if (manifest(sdk)?.name === SDK) return { sdk, via: `the ${name} checkout beside this repository` };
   }
   fail(
     `no Dispatch checkout found. Clone https://github.com/mdennis281/dispatch beside this repository ` +
-      `(looked for ${tried.join(", ")}), or set DISPATCH_REPO to one.`,
+      `(looked for ${tried.join(", ")}), or point \`git config dispatch.repo\` or DISPATCH_REPO at one.`,
   );
 }
 
@@ -112,7 +124,8 @@ function remove(p) {
   else rmSync(p, { recursive: true, force: true });
 }
 
-const sdk = realpathSync(findSdk());
+const found = findSdk();
+const sdk = realpathSync(found.sdk);
 const shared = locate(SHARED, sdk);
 if (!shared) fail(`${SDK} at ${sdk} cannot resolve ${SHARED}; run pnpm install in the Dispatch checkout`);
 for (const [name, dir] of [[SDK, sdk], [SHARED, shared]]) {
@@ -153,4 +166,8 @@ while (queue.length) {
 
 remove(dest);
 renameSync(tmp, dest);
-console.log(`[copy-dispatch-sdk] .dispatch-sdk <- ${sdk} (+ ${SHARED}, ${[...copied].join(", ")})`);
+// Which Dispatch this SDK is: a checkout far behind main has none of the
+// newer plugin APIs, and nothing else here would say so.
+const at = gitOut(["log", "-1", "--format=%h %cs %s"], resolve(sdk, "..", "..")) ?? "an unknown commit";
+console.log(`[copy-dispatch-sdk] .dispatch-sdk <- ${sdk}, found by ${found.via}`);
+console.log(`[copy-dispatch-sdk]   Dispatch at ${at}; also copied ${SHARED}, ${[...copied].join(", ")}`);

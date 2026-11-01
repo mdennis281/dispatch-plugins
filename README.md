@@ -61,7 +61,23 @@ packages/<name>/             code two or more plugins share; remote-core is the 
 
 ## Develop
 
-The plugin SDK (`@dispatch/plugin-sdk`) is not on npm. Packages here depend on it as `link:../../.dispatch-sdk`. That is a gitignored **copy** of a built Dispatch checkout's `packages/plugin-sdk` (plus `@dispatch/shared` and what they load), which `pnpm install` makes (`scripts/copy-dispatch-sdk.mjs`). The script uses `DISPATCH_REPO` when set. Otherwise it uses a checkout named `claude-manager` or `dispatch` **beside** this repository's primary checkout, which git worktrees of this repository find too. After rebuilding the SDK in Dispatch, run `pnpm install` here again.
+The plugin SDK (`@dispatch/plugin-sdk`) is not on npm. Packages here depend on it as `link:../../.dispatch-sdk`. That is a gitignored **copy** of a built Dispatch checkout's `packages/plugin-sdk` (plus `@dispatch/shared` and what they load), which `scripts/copy-dispatch-sdk.mjs` makes. A checkout's first `pnpm install` runs it. A repeat install that pnpm finds "Already up to date" skips it, so **after rebuilding the SDK in Dispatch, or pointing at a different Dispatch, run `pnpm copy-sdk`**. The link follows the copy, so no reinstall is needed.
+
+**Which Dispatch it copies from.** Any Dispatch checkout or git worktree will do, as long as `shared` and `plugin-sdk` are built in it. The first match wins:
+
+1. `DISPATCH_REPO`, when set (CI sets it).
+2. `git config dispatch.repo`, when set. It is stored in this repository's `.git/config`, so every worktree of it uses the same one, and so does every later copy.
+3. A checkout named `claude-manager` or `dispatch` **beside** this repository's primary checkout.
+
+A plugin that needs a plugin API newer than your sibling checkout must be built against a Dispatch that has it. Point (2) at an up-to-date checkout or worktree, rather than updating a checkout you use for something else:
+
+```bash
+git config dispatch.repo /path/to/an/up-to-date/dispatch   # absolute; any worktree of this repo picks it up
+pnpm copy-sdk                                              # prints the path and the Dispatch commit it copied from
+git config --unset dispatch.repo && pnpm copy-sdk          # back to the sibling checkout
+```
+
+A path named by (1) or (2) that has no SDK is an error; it does not fall back to (3).
 
 It is a copy and not a link on purpose. On Windows, `git worktree remove` walks into junctions, so a worktree holding a link to the Dispatch checkout deleted that checkout's SDK when the worktree was removed. Nothing in this repository may link outside it.
 
