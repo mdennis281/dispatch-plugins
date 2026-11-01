@@ -6,10 +6,10 @@
  *
  * How: copy the worktree's index to a temp file (so git's stat cache makes
  * `add -A` fast on a big tree), point `GIT_INDEX_FILE` at the copy, `add -A`,
- * `write-tree`, `commit-tree -p HEAD`. Author and committer dates are pinned,
- * so the same tree on the same HEAD is the same commit sha every time — which
- * is what lets a sync before every command cost one `git add -A` and nothing
- * else when nothing changed.
+ * `write-tree`, `commit-tree -p HEAD` (no parent before the first commit).
+ * Author and committer dates are pinned, so the same tree on the same HEAD is
+ * the same commit sha every time — which is what lets a sync before every
+ * command cost one `git add -A` and nothing else when nothing changed.
  *
  * The commit is never referenced by any local ref; `git gc` collects it once
  * it is old enough. The remote checkout keeps it under `refs/dispatch/snapshot`.
@@ -55,15 +55,25 @@ export interface RepoInfo {
   branch?: string;
   /** `origin`'s URL, when there is one. */
   originUrl?: string;
-  head: string;
+  /** The commit HEAD is at; undefined in a repository with no commits yet. */
+  head?: string;
 }
 
 export async function repoInfo(cwd: string): Promise<RepoInfo> {
   const root = await git(cwd, ["rev-parse", "--show-toplevel"]);
-  const head = await git(root, ["rev-parse", "HEAD"]);
+  const head = await headOf(root);
   const branch = await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => undefined);
   const originUrl = await git(root, ["remote", "get-url", "origin"]).catch(() => undefined);
   return { root: resolve(root), head, branch: branch || undefined, originUrl: originUrl || undefined };
+}
+
+/**
+ * The commit HEAD is at, or undefined while HEAD is unborn: `git init`, some
+ * files, nothing committed yet. `rev-parse HEAD` is an error there, and it
+ * failed every spawn in a brand-new project.
+ */
+async function headOf(root: string): Promise<string | undefined> {
+  return (await git(root, ["rev-parse", "-q", "--verify", "HEAD^{commit}"]).catch(() => "")) || undefined;
 }
 
 /**
@@ -82,8 +92,10 @@ export async function snapshot(root: string): Promise<string> {
     const env = { GIT_INDEX_FILE: tmpIndex };
     await git(root, ["add", "-A"], env);
     const tree = await git(root, ["write-tree"], env);
-    const head = await git(root, ["rev-parse", "HEAD"]);
-    return await git(root, ["commit-tree", tree, "-p", head, "-m", "dispatch: working-tree snapshot"], {
+    // No commits yet: the snapshot is a root commit.
+    const head = await headOf(root);
+    const parent = head ? ["-p", head] : [];
+    return await git(root, ["commit-tree", tree, ...parent, "-m", "dispatch: working-tree snapshot"], {
       GIT_AUTHOR_NAME: "Dispatch",
       GIT_AUTHOR_EMAIL: "dispatch@localhost",
       GIT_COMMITTER_NAME: "Dispatch",
