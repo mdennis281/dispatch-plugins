@@ -75,8 +75,8 @@ export type Ref = { id: number };
 
 export const INSTANCE = "abc123abc123";
 
-/** `conn`: what bringUp connects to; a fresh fake each time by default. */
-export function fakeProvider(initial: Record<number, Machine> = {}, opts: { conn?: SshConnection } = {}) {
+/** `conn`: what bringUp connects to (or makes it, per bring-up); a fresh fake each time by default. */
+export function fakeProvider(initial: Record<number, Machine> = {}, opts: { conn?: SshConnection | (() => SshConnection) } = {}) {
   const machines = new Map<number, Machine>(Object.entries(initial).map(([k, v]) => [Number(k), { ...v }]));
   const calls: string[] = [];
   const state = { down: false, configured: true };
@@ -102,7 +102,7 @@ export function fakeProvider(initial: Record<number, Machine> = {}, opts: { conn
         machines.get(id)!.status = "running";
         calls.push(`start ${id}`);
       }
-      return opts.conn ?? fakeConn().conn;
+      return typeof opts.conn === "function" ? opts.conn() : (opts.conn ?? fakeConn().conn);
     },
     async stop(chatId, ref) {
       reachable();

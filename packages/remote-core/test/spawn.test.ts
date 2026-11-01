@@ -85,6 +85,42 @@ describe("spawn", () => {
   });
 });
 
+describe("a new connection", () => {
+  // Bring-up after a drop may reach a different disk: Proxmox re-clones a chat
+  // whose container went away, and remote-host's machines can be wiped. What
+  // this process remembers about the checkout is only true of the old one.
+  it("re-checks the checkout, so a re-provisioned machine is seeded and synced again", async () => {
+    const repo = gitRepo();
+    const first = fakeConn();
+    const second = fakeConn(); // a fresh disk: no .git, no snapshot
+    const conns = [first, second];
+    const { c } = chats(fakeProvider({}, { conn: () => conns.shift()!.conn }));
+    await c.spawn(info(repo));
+    expect(first.remote.some((cmd) => cmd.includes("git index-pack"))).toBe(true);
+    first.conn.emit("close");
+    await c.spawn(info(repo));
+    expect(second.remote.some((cmd) => cmd.includes("git init"))).toBe(true);
+    expect(second.remote.some((cmd) => cmd.includes("git index-pack"))).toBe(true);
+    expect(second.remote.some((cmd) => /git checkout -q --force --detach [0-9a-f]{40}/.test(cmd))).toBe(true);
+  });
+
+  it("does not re-send a checkout the machine still has", async () => {
+    const repo = gitRepo();
+    const first = fakeConn();
+    const synced = () => first.remote.map((cmd) => cmd.match(/--detach ([0-9a-f]{40})/)?.[1]).find(Boolean);
+    const second = fakeConn({ exec: (cmd) => (cmd.includes("test -d") ? { code: 0, stdout: `yes
+${synced()}
+` } : undefined) });
+    const conns = [first, second];
+    const { c } = chats(fakeProvider({}, { conn: () => conns.shift()!.conn }));
+    await c.spawn(info(repo));
+    first.conn.emit("close");
+    await c.spawn(info(repo));
+    expect(second.remote.some((cmd) => cmd.includes("test -d"))).toBe(true);
+    expect(second.remote.some((cmd) => cmd.includes("git init") || cmd.includes("git index-pack"))).toBe(false);
+  });
+});
+
 describe("PortWatch", () => {
   it("forwards new listeners, publishes them, and withdraws them when they go", async () => {
     let listening = "LISTEN 0 511 *:3000 *:*\nLISTEN 0 4096 0.0.0.0:22 0.0.0.0:*\n";
