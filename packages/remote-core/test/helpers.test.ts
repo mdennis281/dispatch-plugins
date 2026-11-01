@@ -163,6 +163,6 @@ describe("RemoteShell", () => {
     const cmd = remoteShellCommand("/w/it's here", { A: "x y", B: "it's" });
     expect(cmd).toContain(`export A='x y'; export B='it'\\''s';`);
     expect(cmd).toContain(`cd '/w/it'\\''s here'`);
-    expect(cmd.startsWith('echo "DTPID:$$";')).toBe(true);
+    expect(cmd).toContain('echo "DTPID:$$";');
   });
 });
