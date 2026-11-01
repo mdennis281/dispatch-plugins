@@ -2,7 +2,7 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: proxmox-terminal
 name: Proxmox terminal
-version: 0.1.7
+version: 0.1.8
 dispatch: ">=1"
 description: >-
   Run each chat's managed terminals in its own Proxmox LXC — a linked clone of

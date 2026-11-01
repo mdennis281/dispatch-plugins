@@ -158,7 +158,7 @@ export class SshConnection extends EventEmitter {
     return new Promise((resolve, reject) => {
       client.exec(cmd, (err, ch) => {
         if (err) return reject(err);
-        const sh = new RemoteShell(ch, cwd, (pid) => this.killSession(pid));
+        const sh = new RemoteShell(ch, cwd, (pid, signal) => this.signalSession(pid, signal));
         const timer = setTimeout(() => {
           sh.kill();
           reject(new Error(`the shell on ${host} did not start within ${startTimeoutMs / 1000}s`));
@@ -185,9 +185,10 @@ export class SshConnection extends EventEmitter {
     });
   }
 
-  private killSession(pid: number): void {
+  /** Send `signal` (a bare name from RemoteShell's allow-list) to every process in session `pid`. */
+  private signalSession(pid: number, signal: string): void {
     if (!this.isOpen) return;
-    void this.exec(`pkill -KILL -s ${pid} 2>/dev/null; kill -KILL ${pid} 2>/dev/null; true`, { timeoutMs: 10_000 }).catch(() => {});
+    void this.exec(`pkill -${signal} -s ${pid} 2>/dev/null; kill -${signal} ${pid} 2>/dev/null; true`, { timeoutMs: 10_000 }).catch(() => {});
   }
 
   /**

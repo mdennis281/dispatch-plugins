@@ -11364,7 +11364,7 @@ function requireProtocol() {
     DISCONNECT_REASON,
     eddsaSupported,
     MESSAGE,
-    SIGNALS,
+    SIGNALS: SIGNALS2,
     TERMINAL_MODE
   } = requireConstants();
   const {
@@ -12312,7 +12312,7 @@ function requireProtocol() {
       signal = signal.toUpperCase();
       if (signal.slice(0, 3) === "SIG")
         signal = signal.slice(3);
-      if (SIGNALS[signal] !== 1)
+      if (SIGNALS2[signal] !== 1)
         throw new Error(`Invalid signal: ${origSignal}`);
       const signalLen = signal.length;
       let p = this._packetRW.write.allocStart;
@@ -12599,7 +12599,7 @@ function requireProtocol() {
       let signal = name.toUpperCase();
       if (signal.slice(0, 3) === "SIG")
         signal = signal.slice(3);
-      if (SIGNALS[signal] !== 1)
+      if (SIGNALS2[signal] !== 1)
         throw new Error(`Invalid signal: ${origSignal}`);
       const nameLen = Buffer.byteLength(signal);
       const msgLen = msg ? Buffer.byteLength(msg) : 0;
@@ -16253,11 +16253,11 @@ function requireChannel() {
         );
       }
     }
-    signal(signalName) {
+    signal(signalName2) {
       if (this.server)
         throw new Error("Client-only method called in server mode");
       if (this.type === "session" && this.writable && this.outgoing.state === "open") {
-        this._client._protocol.signal(this.outgoing.id, signalName);
+        this._client._protocol.signal(this.outgoing.id, signalName2);
       }
     }
     exit(statusOrSignal, coreDumped, msg) {
@@ -20121,6 +20121,11 @@ function remoteShellCommand(cwd, env) {
   const exports = Object.entries(env).map(([k, v]) => `export ${k}=${sq(v)};`).join(" ");
   return `${exports} cd ${sq(cwd)} 2>/dev/null || { echo "DTERR:cwd"; exit ${NO_CWD_EXIT}; }; echo "DTPID:$$"; exec bash --noprofile --norc`;
 }
+const SIGNALS = /* @__PURE__ */ new Set(["HUP", "INT", "QUIT", "KILL", "TERM", "USR1", "USR2", "STOP", "CONT", "TSTP", "WINCH"]);
+function signalName(signal) {
+  const name = (signal ?? "").toUpperCase().replace(/^SIG/, "");
+  return SIGNALS.has(name) ? name : "KILL";
+}
 class ShellStartError extends Error {
   constructor(reason, code, message) {
     super(message);
@@ -20205,8 +20210,22 @@ class RemoteShell extends EventEmitter {
     this.settle.reject(new ShellStartError("exited", code, `the shell exited before it started (exit ${code ?? "unknown"})`));
     this.emit("exit", code);
   }
-  kill() {
-    if (this.pid) this.killer(this.pid);
+  /**
+   * No signal (core's teardown) or KILL: kill the shell's whole session,
+   * close the channel and report the exit now. Any other signal is delivered
+   * to the session and nothing more, as `ChildProcess.kill` does: the shell
+   * may trap it or outlive it, and its exit is reported when it happens.
+   */
+  kill(signal) {
+    const name = signalName(signal);
+    if (this.pid) this.killer(this.pid, name);
+    else if (name !== "KILL") {
+      try {
+        this.ch.signal(name);
+      } catch {
+      }
+    }
+    if (name !== "KILL") return;
     try {
       this.ch.close();
     } catch {
@@ -20328,7 +20347,7 @@ class SshConnection extends EventEmitter {
     return new Promise((resolve2, reject) => {
       client2.exec(cmd, (err, ch) => {
         if (err) return reject(err);
-        const sh = new RemoteShell(ch, cwd, (pid) => this.killSession(pid));
+        const sh = new RemoteShell(ch, cwd, (pid, signal) => this.signalSession(pid, signal));
         const timer = setTimeout(() => {
           sh.kill();
           reject(new Error(`the shell on ${host} did not start within ${startTimeoutMs / 1e3}s`));
@@ -20351,9 +20370,10 @@ class SshConnection extends EventEmitter {
       });
     });
   }
-  killSession(pid) {
+  /** Send `signal` (a bare name from RemoteShell's allow-list) to every process in session `pid`. */
+  signalSession(pid, signal) {
     if (!this.isOpen) return;
-    void this.exec(`pkill -KILL -s ${pid} 2>/dev/null; kill -KILL ${pid} 2>/dev/null; true`, { timeoutMs: 1e4 }).catch(() => {
+    void this.exec(`pkill -${signal} -s ${pid} 2>/dev/null; kill -${signal} ${pid} 2>/dev/null; true`, { timeoutMs: 1e4 }).catch(() => {
     });
   }
   /**

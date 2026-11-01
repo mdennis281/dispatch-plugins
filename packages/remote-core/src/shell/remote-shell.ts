@@ -30,6 +30,15 @@ export function remoteShellCommand(cwd: string, env: Record<string, string>): st
   return `${exports} cd ${sq(cwd)} 2>/dev/null || { echo "DTERR:cwd"; exit ${NO_CWD_EXIT}; }; echo "DTPID:$$"; exec bash --noprofile --norc`;
 }
 
+/** Signals `kill()` passes on by name. Anything else is KILL: the name goes into a remote command line. */
+const SIGNALS = new Set(["HUP", "INT", "QUIT", "KILL", "TERM", "USR1", "USR2", "STOP", "CONT", "TSTP", "WINCH"]);
+
+/** `"SIGTERM"`, `"term"` → `"TERM"`; undefined or unknown → `"KILL"`. */
+export function signalName(signal?: string): string {
+  const name = (signal ?? "").toUpperCase().replace(/^SIG/, "");
+  return SIGNALS.has(name) ? name : "KILL";
+}
+
 /** Why a shell did not start. */
 export class ShellStartError extends Error {
   constructor(
@@ -70,7 +79,8 @@ export class RemoteShell extends EventEmitter implements TerminalBackendHandle {
   constructor(
     private readonly ch: ClientChannel,
     readonly cwd: string,
-    private readonly killer: (pid: number) => void,
+    /** Send `signal` (a name like `TERM`) to every process in session `pid`. */
+    private readonly killer: (pid: number, signal: string) => void,
   ) {
     super();
     this.ready = new Promise((resolve, reject) => (this.settle = { resolve, reject }));
@@ -130,8 +140,25 @@ export class RemoteShell extends EventEmitter implements TerminalBackendHandle {
     this.emit("exit", code);
   }
 
-  kill(): void {
-    if (this.pid) this.killer(this.pid);
+  /**
+   * No signal (core's teardown) or KILL: kill the shell's whole session,
+   * close the channel and report the exit now. Any other signal is delivered
+   * to the session and nothing more, as `ChildProcess.kill` does: the shell
+   * may trap it or outlive it, and its exit is reported when it happens.
+   */
+  kill(signal?: string): void {
+    const name = signalName(signal);
+    if (this.pid) this.killer(this.pid, name);
+    else if (name !== "KILL") {
+      // No session id to signal (the start line never came): the SSH
+      // channel's own signal request is all there is.
+      try {
+        this.ch.signal(name);
+      } catch {
+        /* closed, or the server does not take signal requests */
+      }
+    }
+    if (name !== "KILL") return;
     try {
       this.ch.close();
     } catch {
