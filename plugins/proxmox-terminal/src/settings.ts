@@ -3,6 +3,8 @@
  * (settings.schema.json is the form). Read live at every spawn, so a change
  * applies to the next container without restarting anything.
  */
+import { coerceSettings } from "@dispatch-plugins/remote-core";
+
 export interface Settings {
   apiUrl: string;
   node: string;
@@ -45,19 +47,5 @@ export const DEFAULTS: Settings = {
 
 /** Merge what is stored over the defaults, coercing the obvious mistakes. */
 export function readSettings(raw: Record<string, unknown>): Settings {
-  const out: Settings = { ...DEFAULTS };
-  for (const key of Object.keys(DEFAULTS) as (keyof Settings)[]) {
-    const v = raw[key];
-    if (v === undefined || v === null || v === "") continue;
-    const d = DEFAULTS[key];
-    if (typeof d === "number") {
-      const n = Number(v);
-      if (Number.isFinite(n)) (out as unknown as Record<string, unknown>)[key] = n;
-    } else if (typeof d === "boolean") {
-      (out as unknown as Record<string, unknown>)[key] = v === true || v === "true";
-    } else {
-      (out as unknown as Record<string, unknown>)[key] = String(v).trim();
-    }
-  }
-  return out;
+  return coerceSettings(DEFAULTS, raw);
 }

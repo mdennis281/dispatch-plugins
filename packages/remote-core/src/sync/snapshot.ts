@@ -12,12 +12,12 @@
  * else when nothing changed.
  *
  * The commit is never referenced by any local ref; `git gc` collects it once
- * it is old enough. The container keeps it under `refs/dispatch/snapshot`.
+ * it is old enough. The remote checkout keeps it under `refs/dispatch/snapshot`.
  *
- * Then `pack()` produces the objects the container lacks: `git pack-objects
- * --revs` fed the snapshot and `^<every commit the container already has>`.
+ * Then `pack()` produces the objects the remote lacks: `git pack-objects
+ * --revs` fed the snapshot and `^<every commit the remote already has>`.
  * Not `--thin`, so the receiving `index-pack` needs no base objects — the
- * container may be a shallow clone of GitHub, or nothing at all.
+ * remote may be a shallow clone of GitHub, or nothing at all.
  */
 import { execFile, spawn } from "node:child_process";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
@@ -138,7 +138,7 @@ export function pack(
 }
 
 /**
- * Where a LOCAL directory lands on the container: the same path relative to
+ * Where a LOCAL directory lands on the remote machine: the same path relative to
  * the worktree root, under `remoteRoot`. A cwd outside the worktree (a project
  * with no worktree for this chat, say) maps to the root.
  */

@@ -2,12 +2,6 @@ import { fileURLToPath as __pt_fileURLToPath } from "node:url";
 import { dirname as __pt_dirname } from "node:path";
 const __filename = __pt_fileURLToPath(import.meta.url);
 const __dirname = __pt_dirname(__filename);
-import { mkdtemp, copyFile, rm, readFile } from "node:fs/promises";
-import { tmpdir, homedir } from "node:os";
-import { randomUUID } from "node:crypto";
-import { resolve, isAbsolute, join, basename } from "node:path";
-import { request } from "node:https";
-import { spawn, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:net";
 import require$$0$4 from "net";
@@ -25,219 +19,14 @@ import require$$2 from "dns";
 import require$$0$6 from "events";
 import require$$0$5 from "util";
 import require$$1$2 from "zlib";
+import { randomUUID } from "node:crypto";
+import { execFile, spawn } from "node:child_process";
+import { mkdtemp, copyFile, rm, readFile } from "node:fs/promises";
+import { tmpdir, homedir } from "node:os";
+import { resolve, isAbsolute, join, basename } from "node:path";
+import { request } from "node:https";
 function definePlugin(mod) {
   return mod;
-}
-class ProxmoxError extends Error {
-  constructor(message, status) {
-    super(message);
-    this.status = status;
-  }
-}
-class Proxmox {
-  constructor(opts) {
-    this.opts = opts;
-  }
-  /** One API call. `params` is a query string for GET/DELETE and a form body otherwise. */
-  async call(method, path, params = {}) {
-    const form = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) {
-      if (v === void 0) continue;
-      form.set(k, typeof v === "boolean" ? v ? "1" : "0" : String(v));
-    }
-    const base = new URL(this.opts.apiUrl.replace(/\/+$/, "") + "/api2/json" + path);
-    const body = method === "GET" || method === "DELETE" ? void 0 : form.toString();
-    if (!body && form.toString()) base.search = form.toString();
-    return new Promise((resolve2, reject) => {
-      const req = request(
-        base,
-        {
-          method,
-          headers: {
-            Authorization: `PVEAPIToken=${this.opts.token}`,
-            ...body ? { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(body) } : {}
-          },
-          ca: this.opts.caCert || void 0,
-          rejectUnauthorized: !this.opts.insecureTls,
-          timeout: this.opts.timeoutMs ?? 2e4
-        },
-        (res) => {
-          const chunks = [];
-          res.on("data", (c) => chunks.push(c));
-          res.on("end", () => {
-            const text = Buffer.concat(chunks).toString("utf8");
-            const status = res.statusCode ?? 0;
-            if (status < 200 || status >= 300) {
-              let detail = res.statusMessage ?? "";
-              try {
-                const parsed = JSON.parse(text);
-                if (parsed.errors) detail += ` ${JSON.stringify(parsed.errors)}`;
-                if (parsed.message) detail += ` ${parsed.message}`;
-              } catch {
-              }
-              reject(new ProxmoxError(`Proxmox ${method} ${path} → ${status} ${detail}`.trim(), status));
-              return;
-            }
-            try {
-              resolve2(JSON.parse(text).data);
-            } catch {
-              reject(new ProxmoxError(`Proxmox ${method} ${path}: unreadable response`));
-            }
-          });
-        }
-      );
-      req.on("timeout", () => req.destroy(new ProxmoxError(`Proxmox ${method} ${path}: no answer from ${base.host}`)));
-      req.on(
-        "error",
-        (err) => reject(err instanceof ProxmoxError ? err : new ProxmoxError(`Proxmox API unreachable (${base.host}): ${err.message}`))
-      );
-      if (body) req.write(body);
-      req.end();
-    });
-  }
-  /**
-   * Wait for a task (a UPID) to finish; throw with its exit status when it did
-   * not end `OK`. Clone, start, stop and destroy are all asynchronous tasks.
-   */
-  async waitTask(node, upid, timeoutMs = 12e4, signal) {
-    const deadline = Date.now() + timeoutMs;
-    for (; ; ) {
-      if (signal?.aborted) throw new ProxmoxError("cancelled");
-      const st = await this.call(
-        "GET",
-        `/nodes/${encodeURIComponent(node)}/tasks/${encodeURIComponent(upid)}/status`
-      );
-      if (st.status === "stopped") {
-        if (st.exitstatus === "OK") return;
-        throw new ProxmoxError(`task ${upid.split(":")[5] ?? ""} failed: ${st.exitstatus ?? "unknown"}`);
-      }
-      if (Date.now() > deadline) throw new ProxmoxError(`task ${upid} still running after ${timeoutMs / 1e3}s`);
-      await sleep(1e3, signal);
-    }
-  }
-  /** The IPv4 address of a running container's first non-loopback interface, or undefined. */
-  async ipv4(node, vmid) {
-    const ifaces = await this.call("GET", `/nodes/${encodeURIComponent(node)}/lxc/${vmid}/interfaces`);
-    for (const i of ifaces ?? []) {
-      if (i.name === "lo") continue;
-      const v4 = i["ip-addresses"]?.find((a) => a["ip-address-type"] === "inet" && !a["ip-address"].startsWith("127."));
-      if (v4) return v4["ip-address"];
-    }
-    return void 0;
-  }
-  async status(node, vmid) {
-    try {
-      const s = await this.call("GET", `/nodes/${encodeURIComponent(node)}/lxc/${vmid}/status/current`);
-      return s.status;
-    } catch (err) {
-      if (err instanceof ProxmoxError && /does not exist|no such|not found/i.test(err.message)) return void 0;
-      throw err;
-    }
-  }
-}
-function sleep(ms, signal) {
-  return new Promise((resolve2, reject) => {
-    const t = setTimeout(resolve2, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(t);
-        reject(new ProxmoxError("cancelled"));
-      },
-      { once: true }
-    );
-  });
-}
-const FIXED_DATE = "1700000000 +0000";
-function git(cwd, args, env = {}) {
-  return new Promise((res, rej) => {
-    execFile(
-      "git",
-      args,
-      {
-        cwd,
-        env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
-        maxBuffer: 64 * 1024 * 1024,
-        windowsHide: true
-      },
-      (err, stdout, stderr) => {
-        if (err) rej(new Error(`git ${args[0]} failed: ${(stderr || err.message).trim()}`));
-        else res(stdout.trim());
-      }
-    );
-  });
-}
-async function repoInfo(cwd) {
-  const root = await git(cwd, ["rev-parse", "--show-toplevel"]);
-  const head = await git(root, ["rev-parse", "HEAD"]);
-  const branch = await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => void 0);
-  const originUrl = await git(root, ["remote", "get-url", "origin"]).catch(() => void 0);
-  return { root: resolve(root), head, branch: branch || void 0, originUrl: originUrl || void 0 };
-}
-async function snapshot(root) {
-  const realIndex = await git(root, ["rev-parse", "--git-path", "index"]);
-  const indexPath = isAbsolute(realIndex) ? realIndex : join(root, realIndex);
-  const dir = await mkdtemp(join(tmpdir(), "dispatch-snap-"));
-  const tmpIndex = join(dir, "index");
-  try {
-    await copyFile(indexPath, tmpIndex).catch(() => {
-    });
-    const env = { GIT_INDEX_FILE: tmpIndex };
-    await git(root, ["add", "-A"], env);
-    const tree = await git(root, ["write-tree"], env);
-    const head = await git(root, ["rev-parse", "HEAD"]);
-    return await git(root, ["commit-tree", tree, "-p", head, "-m", "dispatch: working-tree snapshot"], {
-      GIT_AUTHOR_NAME: "Dispatch",
-      GIT_AUTHOR_EMAIL: "dispatch@localhost",
-      GIT_COMMITTER_NAME: "Dispatch",
-      GIT_COMMITTER_EMAIL: "dispatch@localhost",
-      GIT_AUTHOR_DATE: FIXED_DATE,
-      GIT_COMMITTER_DATE: FIXED_DATE
-    });
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => {
-    });
-  }
-}
-async function localHas(root, shas) {
-  const out = [];
-  for (const sha of shas) {
-    if (!/^[0-9a-f]{40}$/.test(sha)) continue;
-    const ok = await git(root, ["cat-file", "-e", `${sha}^{commit}`]).then(
-      () => true,
-      () => false
-    );
-    if (ok) out.push(sha);
-  }
-  return out;
-}
-function pack(root, tip, exclude, sink) {
-  return new Promise((res, rej) => {
-    const child = spawn("git", ["pack-objects", "--revs", "--stdout", "-q"], {
-      cwd: root,
-      windowsHide: true,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
-    });
-    let bytes = 0;
-    let stderr = "";
-    child.stdout.on("data", (c) => {
-      bytes += c.length;
-    });
-    child.stdout.pipe(sink, { end: true });
-    child.stderr.on("data", (c) => stderr += c.toString());
-    child.on("error", rej);
-    child.on("close", (code) => code === 0 ? res(bytes) : rej(new Error(`git pack-objects: ${stderr.trim() || code}`)));
-    child.stdin.end([tip, ...exclude.map((s) => `^${s}`)].join("\n") + "\n");
-  });
-}
-function remotePathFor(localRoot, localCwd, remoteRoot) {
-  const norm = (p) => resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
-  const root = norm(localRoot);
-  const cwd = norm(localCwd);
-  const same = process.platform === "win32" ? cwd.toLowerCase() === root.toLowerCase() : cwd === root;
-  const inside = process.platform === "win32" ? cwd.toLowerCase().startsWith(root.toLowerCase() + "/") : cwd.startsWith(root + "/");
-  if (same || !inside) return remoteRoot;
-  return `${remoteRoot}/${cwd.slice(root.length + 1)}`;
 }
 var ber = { exports: {} };
 var errors;
@@ -20326,6 +20115,67 @@ var libExports = requireLib();
 function sq(s) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
+function remoteShellCommand(cwd, env) {
+  const exports = Object.entries(env).map(([k, v]) => `export ${k}=${sq(v)};`).join(" ");
+  return `echo "DTPID:$$"; ${exports} cd ${sq(cwd)} 2>/dev/null || cd ~; exec bash --noprofile --norc`;
+}
+class RemoteShell extends EventEmitter {
+  constructor(ch, cwd, killer) {
+    super();
+    this.ch = ch;
+    this.cwd = cwd;
+    this.killer = killer;
+    this.stdin = {
+      write: (chunk) => ch.write(chunk),
+      end: () => ch.end(),
+      on: (_e, l) => {
+        ch.on("error", l);
+      }
+    };
+    ch.on("data", (c) => this.onStdout(c.toString()));
+    ch.stderr.on("data", (c) => this.stderr.emit("data", c.toString()));
+    ch.on("exit", (code) => this.finish(code));
+    ch.on("close", () => this.finish(null));
+    ch.on("error", (err) => this.emit("error", err));
+  }
+  stdout = new EventEmitter();
+  stderr = new EventEmitter();
+  stdin;
+  pid;
+  head = "";
+  exited = false;
+  onStdout(text) {
+    if (this.pid !== void 0) {
+      this.stdout.emit("data", text);
+      return;
+    }
+    this.head += text;
+    const nl = this.head.indexOf("\n");
+    if (nl < 0) return;
+    const m = this.head.slice(0, nl).match(/DTPID:(\d+)/);
+    if (m) this.pid = Number(m[1]);
+    else this.pid = 0;
+    const rest = this.head.slice(m ? nl + 1 : 0);
+    this.head = "";
+    if (rest) this.stdout.emit("data", rest);
+  }
+  finish(code) {
+    if (this.exited) return;
+    this.exited = true;
+    this.emit("exit", code);
+  }
+  kill() {
+    if (this.pid) this.killer(this.pid);
+    try {
+      this.ch.close();
+    } catch {
+    }
+    this.finish(null);
+  }
+}
+function trustProvisioner() {
+  return () => true;
+}
 class SshConnection extends EventEmitter {
   constructor(target) {
     super();
@@ -20336,7 +20186,7 @@ class SshConnection extends EventEmitter {
   get isOpen() {
     return Boolean(this.client) && !this.closed;
   }
-  /** Connect, retrying while sshd comes up in a freshly started container. */
+  /** Connect, retrying while sshd comes up on a freshly started machine. */
   async connect(deadlineMs, signal) {
     const until = Date.now() + deadlineMs;
     let last;
@@ -20347,7 +20197,7 @@ class SshConnection extends EventEmitter {
         return;
       } catch (err) {
         last = err;
-        if (err instanceof Error && /authentication/i.test(err.message)) throw err;
+        if (err instanceof Error && /authentication|host denied/i.test(err.message)) throw err;
         await new Promise((r) => setTimeout(r, 1500));
       }
     }
@@ -20358,17 +20208,12 @@ class SshConnection extends EventEmitter {
       const client2 = new libExports.Client();
       const cfg = {
         host: this.target.host,
-        port: 22,
+        port: this.target.port ?? 22,
         username: this.target.username,
         readyTimeout: 1e4,
         keepaliveInterval: 15e3,
         keepaliveCountMax: 4,
-        // Every container is a fresh linked clone of one template, so they all
-        // present the template's host key and an address DHCP may have handed
-        // to another clone yesterday. There is no stable identity to pin; the
-        // trust anchor is that this plugin created the container a moment ago
-        // through the authenticated Proxmox API and asked it for its address.
-        hostVerifier: () => true,
+        hostVerifier: toSsh2(this.target.hostVerifier ?? trustProvisioner()),
         ...this.target.privateKey ? { privateKey: this.target.privateKey } : {},
         ...this.target.password ? { password: this.target.password } : {}
       };
@@ -20429,17 +20274,10 @@ class SshConnection extends EventEmitter {
     if (r.code !== 0) throw new Error(`remote \`${command.slice(0, 80)}\` exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
     return r.stdout;
   }
-  /**
-   * Start a long-lived bash on an exec channel and adapt it to the handle
-   * Dispatch drives. The shell prints `DTPID:<pid>` first so `kill()` can end
-   * its whole session — the shell AND whatever it started — with `pkill -s`.
-   * sshd makes the exec'd command a session leader, and `exec bash` keeps the
-   * pid, so the session id is that pid.
-   */
+  /** Start a long-lived bash in `cwd` (see {@link remoteShellCommand}). */
   shell(cwd, env) {
     const client2 = this.requireClient();
-    const exports = Object.entries(env).map(([k, v]) => `export ${k}=${sq(v)};`).join(" ");
-    const cmd = `echo "DTPID:$$"; ${exports} cd ${sq(cwd)} 2>/dev/null || cd ~; exec bash --noprofile --norc`;
+    const cmd = remoteShellCommand(cwd, env);
     return new Promise((resolve2, reject) => {
       client2.exec(cmd, (err, ch) => {
         if (err) return reject(err);
@@ -20454,7 +20292,7 @@ class SshConnection extends EventEmitter {
   }
   /**
    * Listen on 127.0.0.1:<ephemeral> and pipe each connection to
-   * 127.0.0.1:<remotePort> inside the container. Resolves with the local port.
+   * 127.0.0.1:<remotePort> on the machine. Resolves with the local port.
    */
   forward(remotePort, remoteHost = "127.0.0.1") {
     return new Promise((resolve2, reject) => {
@@ -20483,272 +20321,138 @@ class SshConnection extends EventEmitter {
     }
   }
 }
-class RemoteShell extends EventEmitter {
-  constructor(ch, cwd, killer) {
-    super();
-    this.ch = ch;
-    this.cwd = cwd;
-    this.killer = killer;
-    this.stdin = {
-      write: (chunk) => ch.write(chunk),
-      end: () => ch.end(),
-      on: (_e, l) => {
-        ch.on("error", l);
-      }
-    };
-    ch.on("data", (c) => this.onStdout(c.toString()));
-    ch.stderr.on("data", (c) => this.stderr.emit("data", c.toString()));
-    ch.on("exit", (code) => this.finish(code));
-    ch.on("close", () => this.finish(null));
-    ch.on("error", (err) => this.emit("error", err));
-  }
-  stdout = new EventEmitter();
-  stderr = new EventEmitter();
-  stdin;
-  pid;
-  head = "";
-  exited = false;
-  onStdout(text) {
-    if (this.pid !== void 0) {
-      this.stdout.emit("data", text);
-      return;
-    }
-    this.head += text;
-    const nl = this.head.indexOf("\n");
-    if (nl < 0) return;
-    const m = this.head.slice(0, nl).match(/DTPID:(\d+)/);
-    if (m) this.pid = Number(m[1]);
-    else this.pid = 0;
-    const rest = this.head.slice(m ? nl + 1 : 0);
-    this.head = "";
-    if (rest) this.stdout.emit("data", rest);
-  }
-  finish(code) {
-    if (this.exited) return;
-    this.exited = true;
-    this.emit("exit", code);
-  }
-  kill() {
-    if (this.pid) this.killer(this.pid);
+function toSsh2(verifier) {
+  return ((key, verify) => {
+    let ret;
     try {
-      this.ch.close();
+      ret = verifier(key);
     } catch {
+      return false;
     }
-    this.finish(null);
+    if (typeof ret === "boolean") return ret;
+    ret.then(verify, () => verify(false));
+    return void 0;
+  });
+}
+const FIXED_DATE = "1700000000 +0000";
+function git(cwd, args, env = {}) {
+  return new Promise((res, rej) => {
+    execFile(
+      "git",
+      args,
+      {
+        cwd,
+        env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
+        maxBuffer: 64 * 1024 * 1024,
+        windowsHide: true
+      },
+      (err, stdout, stderr) => {
+        if (err) rej(new Error(`git ${args[0]} failed: ${(stderr || err.message).trim()}`));
+        else res(stdout.trim());
+      }
+    );
+  });
+}
+async function repoInfo(cwd) {
+  const root = await git(cwd, ["rev-parse", "--show-toplevel"]);
+  const head = await git(root, ["rev-parse", "HEAD"]);
+  const branch = await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => void 0);
+  const originUrl = await git(root, ["remote", "get-url", "origin"]).catch(() => void 0);
+  return { root: resolve(root), head, branch: branch || void 0, originUrl: originUrl || void 0 };
+}
+async function snapshot(root) {
+  const realIndex = await git(root, ["rev-parse", "--git-path", "index"]);
+  const indexPath = isAbsolute(realIndex) ? realIndex : join(root, realIndex);
+  const dir = await mkdtemp(join(tmpdir(), "dispatch-snap-"));
+  const tmpIndex = join(dir, "index");
+  try {
+    await copyFile(indexPath, tmpIndex).catch(() => {
+    });
+    const env = { GIT_INDEX_FILE: tmpIndex };
+    await git(root, ["add", "-A"], env);
+    const tree = await git(root, ["write-tree"], env);
+    const head = await git(root, ["rev-parse", "HEAD"]);
+    return await git(root, ["commit-tree", tree, "-p", head, "-m", "dispatch: working-tree snapshot"], {
+      GIT_AUTHOR_NAME: "Dispatch",
+      GIT_AUTHOR_EMAIL: "dispatch@localhost",
+      GIT_COMMITTER_NAME: "Dispatch",
+      GIT_COMMITTER_EMAIL: "dispatch@localhost",
+      GIT_AUTHOR_DATE: FIXED_DATE,
+      GIT_COMMITTER_DATE: FIXED_DATE
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {
+    });
   }
 }
-const BACKEND_ID = "proxmox";
-const SWEEP_MS = 6e4;
-const RETRY_BASE_MS = 3e4;
-const RETRY_MAX_MS = 30 * 6e4;
-const DESTROY_WAIT_MS = 45e3;
-class ProxmoxTerminalBackend {
-  constructor(deps) {
-    this.deps = deps;
-    this.label = "Proxmox container";
-    this.log = deps.ctx.log;
-  }
-  id = BACKEND_ID;
-  label;
-  shell = "bash";
-  chats = /* @__PURE__ */ new Map();
-  log;
-  get spawnTimeoutMs() {
-    return Math.max(30, this.deps.settings().spawnTimeoutSeconds) * 1e3;
-  }
-  /* ------------------------------------------------------------------ api */
-  async api() {
-    const s = this.deps.settings();
-    if (!s.apiUrl) throw new Error("the proxmox-terminal plugin has no API URL set (Settings → Plugins → Proxmox terminal)");
-    const token = await this.deps.token();
-    if (!token) throw new Error("the PROXMOX_TERMINAL_API_TOKEN secret is not set");
-    return this.deps.proxmox ? this.deps.proxmox(s, token) : new Proxmox({ apiUrl: s.apiUrl, token, caCert: s.caCert, insecureTls: s.insecureTls });
-  }
-  /* --------------------------------------------------------------- spawn */
-  async spawn(info) {
-    const st = await this.stateFor(info.chatId);
-    st.generation++;
-    if (st.idleTimer) clearTimeout(st.idleTimer);
-    st.idleTimer = void 0;
-    st.idleDeadline = void 0;
-    st.lastUsedAt = Date.now();
-    await this.ensureReady(st, info.signal);
-    await this.persist(st);
-    const local = await repoInfo(info.cwd);
-    const repo = await this.ensureRepo(st, local.root, local);
-    await this.sync(st, local.root);
-    const conn = st.conn;
-    const handle = await conn.shell(remotePathFor(local.root, info.cwd, repo.remote), {
-      TERM: "dumb",
-      FORCE_COLOR: "0",
-      DISPATCH_TERMINAL: "proxmox"
-    });
-    st.shells.add(handle);
-    handle.on("exit", () => st.shells.delete(handle));
-    this.startPortWatch(st);
-    return this.syncBeforeEachCommand(st, local.root, handle);
-  }
-  agentNote({ chatId }) {
-    const st = this.chats.get(chatId);
-    const where = st ? `container ${st.hostname} (vmid ${st.vmid})` : "a per-chat Proxmox container";
-    const workDir = this.deps.settings().workDir;
-    return [
-      `- Your terminal runs on ${where}: Debian Linux with its own git checkout of this repo under ${workDir}/.`,
-      `- Edit files LOCALLY as usual. Before every terminal command Dispatch snapshots your local worktree — committed, uncommitted and untracked files alike — and checks it out on the container. Never push to GitHub to get a change over, and don't edit files inside the container: the next command overwrites tracked files there.`,
-      `- Ignored directories (node_modules, dist, build output) are NOT synced; the container keeps its own. A Windows-built node_modules is useless on Linux, so run the install (e.g. \`pnpm install\`) in the terminal once per container, and again when dependencies change.`,
-      `- There is no GitHub token on the container, by design. Do git work locally.`,
-      `- The container stops when the chat goes idle (the next command restarts it) and is destroyed when the chat is deleted. Only installs and build output are lost; your code lives on the Dispatch host.`
-    ].join("\n");
-  }
-  /* ------------------------------------------------------- container state */
-  async stateFor(chatId) {
-    let st = this.chats.get(chatId);
-    if (st) return st;
-    const rec = await this.deps.kv?.get(`chat:${chatId}`);
-    const raced = this.chats.get(chatId);
-    if (raced) return raced;
-    st = {
-      chatId,
-      vmid: rec?.vmid ?? 0,
-      hostname: rec?.hostname ?? hostnameFor(chatId),
-      repos: /* @__PURE__ */ new Map(),
-      syncChain: Promise.resolve(),
-      forwards: /* @__PURE__ */ new Map(),
-      shells: /* @__PURE__ */ new Set(),
-      idleDeadline: rec?.idleDeadline,
-      lastUsedAt: rec?.lastUsedAt,
-      generation: 0,
-      opChain: Promise.resolve()
-    };
-    this.chats.set(chatId, st);
-    if (rec && rec.lastUsedAt === void 0) {
-      st.lastUsedAt = Date.now();
-      await this.persist(st);
-    }
-    return st;
-  }
-  /** Write the chat's record back to kv (only once it has a container). */
-  async persist(st) {
-    if (!st.vmid || !this.deps.kv) return;
-    const prev = await this.deps.kv.get(`chat:${st.chatId}`);
-    await this.deps.kv.set(`chat:${st.chatId}`, {
-      vmid: st.vmid,
-      hostname: st.hostname,
-      createdAt: prev?.createdAt ?? Date.now(),
-      idleDeadline: st.idleDeadline,
-      lastUsedAt: st.lastUsedAt
-    });
-  }
-  /** Run one container operation for a chat, after any already in flight. */
-  serial(st, fn) {
-    const run = st.opChain.then(fn);
-    st.opChain = run.catch(() => {
-    });
-    return run;
-  }
-  /** Make sure the chat's container exists, is running, and has an open SSH connection. */
-  ensureReady(st, signal) {
-    if (st.conn?.isOpen) return Promise.resolve();
-    if (!st.ready) {
-      st.ready = this.serial(st, () => st.conn?.isOpen ? Promise.resolve() : this.bringUp(st, signal)).finally(() => {
-        st.ready = void 0;
-      });
-    }
-    return st.ready;
-  }
-  async bringUp(st, signal) {
-    const s = this.deps.settings();
-    const api = await this.api();
-    let status = st.vmid ? await api.status(s.node, st.vmid) : void 0;
-    if (status && await this.ownership(api, s, st.vmid, st.chatId) !== "ours") {
-      this.log.warn(`vmid ${st.vmid} no longer holds chat ${st.chatId}'s container; making a new one`);
-      status = void 0;
-    }
-    if (!status) {
-      st.vmid = await this.cloneFor(api, s, st, signal);
-      status = "stopped";
-    }
-    if (status !== "running") {
-      this.log.info(`starting container ${st.vmid} for chat ${st.chatId}`);
-      const upid = await api.call("POST", `/nodes/${s.node}/lxc/${st.vmid}/status/start`);
-      await api.waitTask(s.node, upid, 6e4, signal);
-    }
-    st.ip = await this.waitForIp(api, s.node, st.vmid, signal);
-    const auth = await this.deps.sshAuth();
-    if (!auth.privateKey && !auth.password) {
-      throw new Error("no SSH credentials: set the sshKeyPath setting, or the PROXMOX_TERMINAL_SSH_KEY / _SSH_PASSWORD secret");
-    }
-    const conn = this.deps.connect ? this.deps.connect(st.ip, s.sshUser, auth) : new SshConnection({ host: st.ip, username: s.sshUser, ...auth });
-    await conn.connect(6e4, signal);
-    conn.on("close", () => {
-      if (st.conn === conn) this.dropConnection(st);
-    });
-    st.conn = conn;
-  }
-  /** Linked-clone the template into a free vmid, size it, and remember it. */
-  async cloneFor(api, s, st, signal) {
-    const taken = new Set(await this.poolVmids(api, s).catch(() => []));
-    let lastErr;
-    for (let vmid = s.vmidStart; vmid <= s.vmidEnd; vmid++) {
-      if (taken.has(vmid) || vmid === s.templateVmid) continue;
-      try {
-        this.log.info(`cloning template ${s.templateVmid} → ${vmid} (${st.hostname}) for chat ${st.chatId}`);
-        const upid = await api.call("POST", `/nodes/${s.node}/lxc/${s.templateVmid}/clone`, {
-          newid: vmid,
-          hostname: st.hostname,
-          pool: s.pool,
-          description: describe(st.chatId, await this.instanceId())
-        });
-        await api.waitTask(s.node, upid, 18e4, signal);
-      } catch (err) {
-        lastErr = err;
-        if (err instanceof ProxmoxError && /already exists|in use|exists/i.test(err.message)) continue;
-        throw err;
-      }
-      await api.call("PUT", `/nodes/${s.node}/lxc/${vmid}/config`, {
-        cores: s.cores,
-        memory: s.memory,
-        net0: `name=eth0,bridge=${s.bridge},ip=dhcp,type=veth`,
-        tags: "dispatch-terminal"
-      });
-      st.vmid = vmid;
-      await this.persist(st);
-      return vmid;
-    }
-    throw new Error(
-      `no free vmid in ${s.vmidStart}-${s.vmidEnd}` + (lastErr instanceof Error ? ` (last error: ${lastErr.message})` : "")
+async function localHas(root, shas) {
+  const out = [];
+  for (const sha of shas) {
+    if (!/^[0-9a-f]{40}$/.test(sha)) continue;
+    const ok = await git(root, ["cat-file", "-e", `${sha}^{commit}`]).then(
+      () => true,
+      () => false
     );
+    if (ok) out.push(sha);
   }
-  async waitForIp(api, node, vmid, signal) {
-    const until = Date.now() + 6e4;
-    while (Date.now() < until) {
-      const ip = await api.ipv4(node, vmid).catch(() => void 0);
-      if (ip) return ip;
-      await sleep(1e3, signal);
-    }
-    throw new Error(`container ${vmid} got no IPv4 address within 60s (is DHCP serving the ${this.deps.settings().bridge} bridge?)`);
+  return out;
+}
+function pack(root, tip, exclude, sink) {
+  return new Promise((res, rej) => {
+    const child = spawn("git", ["pack-objects", "--revs", "--stdout", "-q"], {
+      cwd: root,
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+    });
+    let bytes = 0;
+    let stderr = "";
+    child.stdout.on("data", (c) => {
+      bytes += c.length;
+    });
+    child.stdout.pipe(sink, { end: true });
+    child.stderr.on("data", (c) => stderr += c.toString());
+    child.on("error", rej);
+    child.on("close", (code) => code === 0 ? res(bytes) : rej(new Error(`git pack-objects: ${stderr.trim() || code}`)));
+    child.stdin.end([tip, ...exclude.map((s) => `^${s}`)].join("\n") + "\n");
+  });
+}
+function remotePathFor(localRoot, localCwd, remoteRoot) {
+  const norm = (p) => resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
+  const root = norm(localRoot);
+  const cwd = norm(localCwd);
+  const same = process.platform === "win32" ? cwd.toLowerCase() === root.toLowerCase() : cwd === root;
+  const inside = process.platform === "win32" ? cwd.toLowerCase().startsWith(root.toLowerCase() + "/") : cwd.startsWith(root + "/");
+  if (same || !inside) return remoteRoot;
+  return `${remoteRoot}/${cwd.slice(root.length + 1)}`;
+}
+class RemoteCheckouts {
+  constructor(opts) {
+    this.opts = opts;
   }
-  /* ---------------------------------------------------------------- code */
+  repos = /* @__PURE__ */ new Map();
+  /** Serialises syncs: several shells in one chat share one checkout. */
+  syncChain = Promise.resolve();
   /**
-   * The container's copy of a local repo: seeded once, from GitHub when the
+   * The machine's copy of a local repo: seeded once, from GitHub when the
    * repo's origin is a public GitHub repo (shallow, so the first pack is just
    * the local delta), otherwise an empty repo the first pack fills.
    */
-  ensureRepo(st, root, local) {
-    const existing = st.repos.get(root);
+  ensure(root, local) {
+    const existing = this.repos.get(root);
     if (existing?.seeded) return existing.seeded.then(() => existing);
-    const remote = `${this.deps.settings().workDir}/${safeName(basename(root))}`;
+    const workDir = this.opts.workDir();
+    const remote = `${workDir}/${safeName(basename(root))}`;
     const entry = { remote };
-    st.repos.set(root, entry);
+    this.repos.set(root, entry);
     entry.seeded = (async () => {
-      const conn = st.conn;
+      const conn = this.opts.conn();
       const has = (await conn.exec(`test -d ${sq(remote)}/.git && echo yes`)).stdout.trim() === "yes";
       if (has) return;
       const https = githubHttps(local.originUrl);
       if (https) {
         const branchArg = local.branch ? `--branch ${sq(local.branch)} ` : "";
         const r = await conn.exec(
-          `mkdir -p ${sq(this.deps.settings().workDir)} && GIT_TERMINAL_PROMPT=0 git clone -q --depth 50 --single-branch ${branchArg}${sq(https)} ${sq(remote)}`,
+          `mkdir -p ${sq(this.opts.workDir())} && GIT_TERMINAL_PROMPT=0 git clone -q --depth 50 --single-branch ${branchArg}${sq(https)} ${sq(remote)}`,
           { timeoutMs: 3e5 }
         );
         if (r.code !== 0 && local.branch) {
@@ -20758,20 +20462,20 @@ class ProxmoxTerminalBackend {
       }
       await conn.run(`mkdir -p ${sq(remote)} && cd ${sq(remote)} && (test -d .git || git init -q)`);
     })().catch((err) => {
-      st.repos.delete(root);
+      this.repos.delete(root);
       throw err;
     });
     return entry.seeded.then(() => entry);
   }
   /**
-   * Bring the container's checkout to the local worktree's current state.
+   * Bring the machine's checkout to the local worktree's current state.
    * Cheap when nothing changed: the snapshot sha is stable, and an unchanged
    * one is a no-op.
    */
-  sync(st, root) {
-    const run = st.syncChain.then(async () => {
-      const entry = st.repos.get(root);
-      const conn = st.conn;
+  sync(root) {
+    const run = this.syncChain.then(async () => {
+      const entry = this.repos.get(root);
+      const conn = this.opts.conn();
       if (!entry || !conn?.isOpen) return;
       const snap = await snapshot(root);
       if (snap === entry.lastSynced) return;
@@ -20784,11 +20488,11 @@ class ProxmoxTerminalBackend {
         },
         timeoutMs: 6e5
       });
-      if (r.code !== 0) throw new Error(`index-pack on the container failed: ${r.stderr.trim()}`);
+      if (r.code !== 0) throw new Error(`index-pack on the remote failed: ${r.stderr.trim()}`);
       await conn.run(`cd ${remote} && git update-ref refs/dispatch/snapshot ${snap} && git checkout -q --force --detach ${snap}`);
       entry.lastSynced = snap;
     });
-    st.syncChain = run.catch(() => {
+    this.syncChain = run.catch(() => {
     });
     return run;
   }
@@ -20799,17 +20503,17 @@ class ProxmoxTerminalBackend {
    * stderr and the command still runs, against the last good snapshot — a
    * silent stale checkout would be worse than a visible one.
    */
-  syncBeforeEachCommand(st, root, h) {
+  syncBeforeEachCommand(root, h) {
     let chain = Promise.resolve();
     const stderr = h.stderr;
     const write = (chunk) => {
       const isProbe = chunk.startsWith("__cm_ec=");
       chain = chain.then(async () => {
         if (!isProbe) {
-          await this.sync(st, root).catch((err) => {
+          await this.sync(root).catch((err) => {
             stderr.emit(
               "data",
-              `[proxmox-terminal] could not sync your local changes (${err instanceof Error ? err.message : String(err)}); this command runs against the last synced snapshot.
+              `[${this.opts.label}] could not sync your local changes (${err instanceof Error ? err.message : String(err)}); this command runs against the last synced snapshot.
 `
             );
           });
@@ -20826,92 +20530,261 @@ class ProxmoxTerminalBackend {
       cwd: h.cwd
     };
   }
-  /* --------------------------------------------------------------- ports */
-  /**
-   * Forward whatever the container is listening on, while it has shells.
-   * Polled, because a dev server announces its port on its own schedule and
-   * the agent should not have to ask.
-   */
-  startPortWatch(st) {
-    if (st.portTimer) return;
+}
+function safeName(s) {
+  return s.replace(/[^A-Za-z0-9._-]/g, "_") || "repo";
+}
+function githubHttps(url) {
+  if (!url) return void 0;
+  const m = url.match(/^https?:\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i) ?? url.match(/^(?:ssh:\/\/)?git@github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
+  return m ? `https://github.com/${m[1]}/${m[2]}.git` : void 0;
+}
+class PortWatch {
+  constructor(opts) {
+    this.opts = opts;
+  }
+  timer;
+  forwards = /* @__PURE__ */ new Map();
+  start() {
+    if (this.timer) return;
+    const { conn: connOf, publish, log, chatId } = this.opts;
+    const probe = this.opts.probe ?? "ss -Htln 2>/dev/null";
+    const parse = this.opts.parse ?? parseListeners;
     const tick = async () => {
-      const conn = st.conn;
+      const conn = connOf();
       if (!conn?.isOpen) return;
-      const r = await conn.exec("ss -Htln 2>/dev/null", { timeoutMs: 1e4 }).catch(() => void 0);
+      const r = await conn.exec(probe, { timeoutMs: 1e4 }).catch(() => void 0);
       if (!r || r.code !== 0) return;
-      const ports = parseListeners(r.stdout);
+      const ports = parse(r.stdout);
       for (const [port, host] of ports) {
-        if (st.forwards.has(port)) continue;
+        if (this.forwards.has(port)) continue;
         try {
           const fwd = await conn.forward(port, host);
-          const withdraw = this.deps.ctx.terminals.publishPort(BACKEND_ID, {
-            chatId: st.chatId,
-            remotePort: port,
-            url: `http://127.0.0.1:${fwd.localPort}`
-          });
-          st.forwards.set(port, { close: fwd.close, withdraw });
-          this.log.info(`forwarding ${st.hostname}:${port} → 127.0.0.1:${fwd.localPort}`);
+          const withdraw = publish({ remotePort: port, url: `http://127.0.0.1:${fwd.localPort}` });
+          this.forwards.set(port, { close: fwd.close, withdraw });
+          log.info(`forwarding ${this.opts.host()}:${port} → 127.0.0.1:${fwd.localPort}`);
         } catch (err) {
-          this.log.warn(`could not forward port ${port} for chat ${st.chatId}: ${String(err)}`);
+          log.warn(`could not forward port ${port} for chat ${chatId}: ${String(err)}`);
         }
       }
-      for (const [port, f] of st.forwards) {
+      for (const [port, f] of this.forwards) {
         if (!ports.has(port)) {
           f.withdraw();
           f.close();
-          st.forwards.delete(port);
+          this.forwards.delete(port);
         }
       }
     };
-    st.portTimer = setInterval(() => void tick(), 3e3);
-    st.portTimer.unref?.();
+    this.timer = setInterval(() => void tick(), this.opts.intervalMs ?? 3e3);
+    this.timer.unref?.();
     void tick();
   }
-  dropConnection(st) {
-    if (st.portTimer) clearInterval(st.portTimer);
-    st.portTimer = void 0;
-    for (const f of st.forwards.values()) {
+  /** Stop polling and withdraw every forward. */
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = void 0;
+    for (const f of this.forwards.values()) {
       f.withdraw();
       f.close();
     }
-    st.forwards.clear();
+    this.forwards.clear();
+  }
+}
+function parseListeners(out) {
+  const ports = /* @__PURE__ */ new Map();
+  for (const line of out.split("\n")) {
+    const cols = line.trim().split(/\s+/);
+    const local = cols[3];
+    if (!local) continue;
+    const cut = local.lastIndexOf(":");
+    const port = Number(local.slice(cut + 1));
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) continue;
+    const addr = local.slice(0, cut).replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+    const host = addr === "*" || addr === "0.0.0.0" || addr === "::" ? "127.0.0.1" : addr;
+    const prev = ports.get(port);
+    if (!prev || host === "127.0.0.1") ports.set(port, host);
+  }
+  return ports;
+}
+function withDeadline(p, ms, signal) {
+  return new Promise((resolve2) => {
+    const t = setTimeout(() => resolve2(void 0), ms);
+    signal?.addEventListener("abort", () => resolve2(void 0), { once: true });
+    void p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve2(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve2(void 0);
+      }
+    );
+  });
+}
+function errText(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+const SWEEP_MS = 6e4;
+const RETRY_BASE_MS = 3e4;
+const RETRY_MAX_MS = 30 * 6e4;
+class RemoteChats {
+  constructor(opts) {
+    this.opts = opts;
+    this.provider = opts.provider;
+    this.log = opts.log;
+  }
+  chats = /* @__PURE__ */ new Map();
+  provider;
+  log;
+  instance;
+  sweepTimer;
+  sweepChain = Promise.resolve();
+  destroying = /* @__PURE__ */ new Map();
+  /** The chat's live state in this process, if any. */
+  peek(chatId) {
+    return this.chats.get(chatId);
+  }
+  /* --------------------------------------------------------------- spawn */
+  /**
+   * A shell on the chat's machine, in the remote twin of `info.cwd`, with the
+   * local worktree synced in before it starts and before every command.
+   */
+  async spawn(info) {
+    const st = await this.stateFor(info.chatId);
+    st.generation++;
+    if (st.idleTimer) clearTimeout(st.idleTimer);
+    st.idleTimer = void 0;
+    st.idleDeadline = void 0;
+    st.lastUsedAt = Date.now();
+    await this.ensureReady(st, info.signal);
+    await this.persist(st);
+    const local = await repoInfo(info.cwd);
+    const repo = await st.checkouts.ensure(local.root, local);
+    await st.checkouts.sync(local.root);
+    const conn = st.conn;
+    const handle = await conn.shell(remotePathFor(local.root, info.cwd, repo.remote), {
+      TERM: "dumb",
+      FORCE_COLOR: "0",
+      DISPATCH_TERMINAL: this.opts.backendId
+    });
+    st.shells.add(handle);
+    handle.on("exit", () => st.shells.delete(handle));
+    st.ports.start();
+    return st.checkouts.syncBeforeEachCommand(local.root, handle);
+  }
+  /* --------------------------------------------------------- chat state */
+  async stateFor(chatId) {
+    let st = this.chats.get(chatId);
+    if (st) return st;
+    const rec = await this.opts.kv?.get(`chat:${chatId}`);
+    const raced = this.chats.get(chatId);
+    if (raced) return raced;
+    const fresh = {
+      chatId,
+      ref: rec ? this.provider.refOf(rec) : void 0,
+      checkouts: new RemoteCheckouts({
+        conn: () => fresh.conn,
+        workDir: () => this.opts.policy().workDir,
+        label: this.opts.label
+      }),
+      ports: new PortWatch({
+        conn: () => fresh.conn,
+        publish: (p) => this.opts.publishPort({ chatId, ...p }),
+        log: this.log,
+        chatId,
+        host: () => fresh.ref ? this.provider.name(fresh.ref) : chatId
+      }),
+      shells: /* @__PURE__ */ new Set(),
+      idleDeadline: rec?.idleDeadline,
+      lastUsedAt: rec?.lastUsedAt,
+      generation: 0,
+      opChain: Promise.resolve()
+    };
+    st = fresh;
+    this.chats.set(chatId, st);
+    if (rec && rec.lastUsedAt === void 0) {
+      st.lastUsedAt = Date.now();
+      await this.persist(st);
+    }
+    return st;
+  }
+  /** Write the chat's record back to kv (only once it has a machine). */
+  async persist(st) {
+    const kv = this.opts.kv;
+    if (!st.ref || !kv) return;
+    const prev = await kv.get(`chat:${st.chatId}`);
+    await kv.set(`chat:${st.chatId}`, {
+      ...st.ref,
+      createdAt: prev?.createdAt ?? Date.now(),
+      idleDeadline: st.idleDeadline,
+      lastUsedAt: st.lastUsedAt
+    });
+  }
+  /** Run one machine operation for a chat, after any already in flight. */
+  serial(st, fn) {
+    const run = st.opChain.then(fn);
+    st.opChain = run.catch(() => {
+    });
+    return run;
+  }
+  /** Make sure the chat's machine exists, is running, and has an open SSH connection. */
+  ensureReady(st, signal) {
+    if (st.conn?.isOpen) return Promise.resolve();
+    if (!st.ready) {
+      st.ready = this.serial(st, () => st.conn?.isOpen ? Promise.resolve() : this.bringUp(st, signal)).finally(() => {
+        st.ready = void 0;
+      });
+    }
+    return st.ready;
+  }
+  async bringUp(st, signal) {
+    const conn = await this.provider.bringUp(
+      {
+        chatId: st.chatId,
+        ref: st.ref,
+        remember: async (ref) => {
+          st.ref = ref;
+          await this.persist(st);
+        }
+      },
+      signal
+    );
+    conn.on("close", () => {
+      if (st.conn === conn) this.dropConnection(st);
+    });
+    st.conn = conn;
+  }
+  dropConnection(st) {
+    st.ports.stop();
     for (const h of [...st.shells]) h.kill();
     st.shells.clear();
     st.conn?.close();
     st.conn = void 0;
   }
   /* ----------------------------------------------------------- lifecycle */
-  //
-  // Everything below survives a Dispatch restart through kv: the idle
-  // deadline, the chat → vmid map, and destroys that have not succeeded yet.
-  // A sweep (at load, then every minute) acts on what is due, so nothing here
-  // depends on a timer or a hook having fired in THIS process.
-  instance;
-  sweepTimer;
-  sweepChain = Promise.resolve();
-  destroying = /* @__PURE__ */ new Map();
   /**
    * This instance's id, minted once into kv. Stable and dev Dispatch share
-   * config/ — so the same settings and the same Proxmox pool — but not data/,
-   * so each has its own kv and its own id. Every clone's description carries
-   * it, and the sweeps only adopt or destroy clones that carry THIS id: the
-   * other instance's containers are never ours to touch.
+   * config/ (so the same settings, and the same machines) but not data/, so
+   * each has its own kv and its own id. The provider tags every machine with
+   * it, and adoption and orphan-destroys only touch machines carrying THIS id:
+   * the other instance's are never ours to touch.
    */
   instanceId() {
     this.instance ??= (async () => {
-      const have = await this.deps.kv?.get("instance");
+      const have = await this.opts.kv?.get("instance");
       if (have) return have;
       const id = randomUUID().replace(/-/g, "").slice(0, 12);
-      await this.deps.kv?.set("instance", id);
+      await this.opts.kv?.set("instance", id);
       return id;
     })();
     return this.instance;
   }
   /**
-   * Called once from activate. Recovers what a restart lost — the chat → vmid
-   * map from kv and the pool, the idle stops that were due, the destroys that
-   * failed — then keeps sweeping. Never throws: Proxmox may be down, and the
-   * next sweep tries again.
+   * Called once from activate. Recovers what a restart lost — the chat →
+   * machine map from kv and the provider, the idle stops that were due, the
+   * destroys that failed — then keeps sweeping. Never throws: the provider may
+   * be down, and the next sweep tries again.
    */
   start() {
     if (!this.sweepTimer) {
@@ -20924,13 +20797,13 @@ class ProxmoxTerminalBackend {
    * One pass over everything this instance owns. Passes queue behind each
    * other, so a reconcile arriving mid-sweep runs after it rather than racing.
    *
-   * - `adopt`: also read the pool, and take back any clone tagged with this
-   *   instance's id that kv has no record of.
-   * - `boot`: a running container with no live shell and no idle deadline is
-   *   one whose chat was busy when Dispatch died without a clean shutdown —
+   * - `adopt`: also ask the provider for machines tagged with this instance's
+   *   id that kv has no record of, and take them back.
+   * - `boot`: a running machine with no live shell and no idle deadline is one
+   *   whose chat was busy when Dispatch died without a clean shutdown —
    *   nothing will ever fire onChatIdle for it again, so stop it now.
-   * - `liveChats`: every chat that still exists. A clone for any other chat is
-   *   destroyed.
+   * - `liveChats`: every chat that still exists. A machine for any other chat
+   *   is destroyed.
    */
   sweep(opts = {}) {
     const run = this.sweepChain.then(() => this.sweepOnce(opts));
@@ -20939,66 +20812,62 @@ class ProxmoxTerminalBackend {
     return run.catch((err) => this.log.warn(`cleanup sweep: ${errText(err)}`));
   }
   async sweepOnce(opts) {
-    const s = this.deps.settings();
-    const kv = this.deps.kv;
-    if (!s.apiUrl || !kv) return;
+    const kv = this.opts.kv;
+    if (!this.provider.configured() || !kv) return;
     for (const key of await kv.list("chat:")) await this.stateFor(key.slice("chat:".length));
-    if (opts.adopt) await this.adopt().catch((err) => this.log.warn(`re-adopting containers: ${errText(err)}`));
+    if (opts.adopt) await this.adopt().catch((err) => this.log.warn(`re-adopting machines: ${errText(err)}`));
     const now = Date.now();
     for (const key of await kv.list("destroy:")) {
       const p = await kv.get(key);
-      if (p && p.nextAt <= now) await this.attemptDestroy(p).catch(() => {
+      if (!p) continue;
+      if (!this.provider.refOf(p)) await kv.delete(key);
+      else if (p.nextAt <= now) await this.attemptDestroy(p).catch(() => {
       });
     }
-    const unusedMs = s.destroyUnusedDays > 0 ? s.destroyUnusedDays * 864e5 : 0;
+    const policy = this.opts.policy();
+    const unusedMs = policy.destroyUnusedDays > 0 ? policy.destroyUnusedDays * 864e5 : 0;
     for (const st of [...this.chats.values()]) {
-      if (!st.vmid) continue;
+      if (!st.ref) continue;
       const busy = st.shells.size > 0 || !!st.ready;
       if (opts.liveChats && !opts.liveChats.has(st.chatId)) {
         await this.enqueueDestroy(st, "its chat no longer exists").catch(() => {
         });
       } else if (unusedMs && !busy && (st.lastUsedAt ?? now) < now - unusedMs) {
-        await this.enqueueDestroy(st, `unused for ${s.destroyUnusedDays} days`).catch(() => {
+        await this.enqueueDestroy(st, `unused for ${policy.destroyUnusedDays} days`).catch(() => {
         });
       } else if (st.idleDeadline !== void 0 && st.idleDeadline <= now) {
-        await this.stopIdle(st, st.generation).catch((err) => this.log.warn(`stopping ${st.vmid}: ${errText(err)}`));
+        await this.stopIdle(st, st.generation).catch((err) => this.log.warn(`stopping ${this.provider.name(st.ref)}: ${errText(err)}`));
       } else if (st.idleDeadline !== void 0) {
         this.armIdleTimer(st);
       } else if (opts.boot && !busy && !st.conn) {
-        await this.stopIdle(st, st.generation).catch((err) => this.log.warn(`stopping ${st.vmid}: ${errText(err)}`));
+        await this.stopIdle(st, st.generation).catch((err) => this.log.warn(`stopping ${this.provider.name(st.ref)}: ${errText(err)}`));
       }
     }
   }
-  /** Take back clones in the pool tagged with this instance whose kv record was lost. */
+  /** Take back machines tagged with this instance whose kv record was lost. */
   async adopt() {
-    const s = this.deps.settings();
-    const api = await this.api();
+    if (!this.provider.discover) return;
     const ours = await this.instanceId();
-    const known = new Set([...this.chats.values()].map((st) => st.vmid));
-    for (const key of await this.deps.kv?.list("destroy:") ?? []) known.add(Number(key.slice("destroy:".length)));
-    for (const vmid of await this.poolVmids(api, s)) {
-      if (known.has(vmid) || !inRange(s, vmid)) continue;
-      const cfg = await this.config(api, s, vmid).catch(() => void 0);
-      if (!cfg || Number(cfg.template) === 1) continue;
-      const d = parseDescription(cfg.description);
-      if (d.instance !== ours || !d.chatId) continue;
-      const st = await this.stateFor(d.chatId);
-      if (st.vmid && st.vmid !== vmid) {
-        await this.recordDestroy({ chatId: d.chatId, vmid, hostname: cfg.hostname ?? "", attempts: 0, nextAt: 0 });
+    const known = /* @__PURE__ */ new Set();
+    for (const st of this.chats.values()) if (st.ref) known.add(this.provider.keyOf(st.ref));
+    for (const key of await this.opts.kv?.list("destroy:") ?? []) known.add(key.slice("destroy:".length));
+    for (const { chatId, ref } of await this.provider.discover(ours, known)) {
+      const st = await this.stateFor(chatId);
+      if (st.ref && this.provider.keyOf(st.ref) !== this.provider.keyOf(ref)) {
+        await this.recordDestroy({ chatId, ...ref, attempts: 0, nextAt: 0 });
         continue;
       }
-      this.log.info(`re-adopting container ${vmid} for chat ${d.chatId} (its kv record was lost)`);
-      st.vmid = vmid;
-      st.hostname = cfg.hostname ?? st.hostname;
+      this.log.info(`re-adopting ${this.provider.name(ref)} for chat ${chatId} (its kv record was lost)`);
+      st.ref = ref;
       st.lastUsedAt ??= Date.now();
       await this.persist(st);
     }
   }
   onChatIdle({ chatId }) {
     return (async () => {
-      const st = this.chats.get(chatId) ?? (await this.deps.kv?.get(`chat:${chatId}`) ? await this.stateFor(chatId) : void 0);
-      if (!st?.vmid) return;
-      const minutes = this.deps.settings().idleStopMinutes;
+      const st = this.chats.get(chatId) ?? (await this.opts.kv?.get(`chat:${chatId}`) ? await this.stateFor(chatId) : void 0);
+      if (!st?.ref) return;
+      const minutes = this.opts.policy().idleStopMinutes;
       if (minutes < 0) return;
       const gen = st.generation;
       st.idleDeadline = Date.now() + minutes * 6e4;
@@ -21012,35 +20881,27 @@ class ProxmoxTerminalBackend {
     if (st.idleTimer) clearTimeout(st.idleTimer);
     st.idleTimer = setTimeout(() => {
       st.idleTimer = void 0;
-      void this.stopIdle(st, gen).catch((err) => this.log.warn(`stopping ${st.vmid} failed: ${errText(err)}`));
+      void this.stopIdle(st, gen).catch(
+        (err) => this.log.warn(`stopping ${st.ref ? this.provider.name(st.ref) : st.chatId} failed: ${errText(err)}`)
+      );
     }, Math.max(0, st.idleDeadline - Date.now()));
     st.idleTimer.unref?.();
   }
   /**
-   * Stop the chat's container, unless a spawn has happened since the stop was
-   * decided (`gen`). The next spawn starts it again.
+   * Stop the chat's machine, unless a spawn has happened since the stop was
+   * decided (`gen`). The next spawn starts it again. Ends its shells first.
    */
   stopIdle(st, gen) {
     return this.serial(st, async () => {
-      if (st.generation !== gen || !st.vmid) return;
-      await this.stop(st);
+      if (st.generation !== gen || !st.ref) return;
+      this.dropConnection(st);
+      await this.provider.stop(st.chatId, st.ref);
       st.idleDeadline = void 0;
       await this.persist(st);
     });
   }
-  /** Stop a chat's container. Ends its shells; checks the vmid is still this chat's first. */
-  async stop(st) {
-    this.dropConnection(st);
-    const s = this.deps.settings();
-    const api = await this.api();
-    if (await api.status(s.node, st.vmid) !== "running") return;
-    if (await this.ownership(api, s, st.vmid, st.chatId) !== "ours") return;
-    this.log.info(`stopping idle container ${st.vmid} (chat ${st.chatId})`);
-    const upid = await api.call("POST", `/nodes/${s.node}/lxc/${st.vmid}/status/shutdown`, { timeout: 30, forceStop: 1 });
-    await api.waitTask(s.node, upid, 9e4);
-  }
   /**
-   * Destroy the chat's container. Resolves only once it is gone (or was never
+   * Destroy the chat's machine. Resolves only once it is gone (or was never
    * made); REJECTS when it could not be destroyed, so a core that retries
    * chat cleanup knows to. Either way the attempt is recorded and the sweep
    * keeps retrying with backoff, so an older core that does not wait on this
@@ -21049,17 +20910,18 @@ class ProxmoxTerminalBackend {
   async onChatDeleted({ chatId }) {
     const pending = await this.pendingFor(chatId);
     const st = await this.stateFor(chatId);
-    if (st.vmid) await this.enqueueDestroy(st, "its chat was deleted");
+    if (st.ref) await this.enqueueDestroy(st, "its chat was deleted");
     else this.forget(st);
     for (const p of pending) await this.attemptDestroy(p);
   }
-  /** Forget the chat's container and destroy it: pending in kv first, then one attempt now. */
+  /** Forget the chat's machine and destroy it: pending in kv first, then one attempt now. */
   async enqueueDestroy(st, why) {
-    const p = { chatId: st.chatId, vmid: st.vmid, hostname: st.hostname, attempts: 0, nextAt: 0 };
-    this.log.info(`destroying container ${p.vmid} (chat ${p.chatId}): ${why}`);
+    const ref = st.ref;
+    const p = { chatId: st.chatId, ...ref, attempts: 0, nextAt: 0 };
+    this.log.info(`destroying ${this.provider.name(ref)} (chat ${p.chatId}): ${why}`);
     await this.recordDestroy(p);
     this.forget(st);
-    await this.deps.kv?.delete(`chat:${st.chatId}`);
+    await this.opts.kv?.delete(`chat:${st.chatId}`);
     await this.attemptDestroy(p);
   }
   forget(st) {
@@ -21069,27 +20931,32 @@ class ProxmoxTerminalBackend {
     this.dropConnection(st);
     if (this.chats.get(st.chatId) === st) this.chats.delete(st.chatId);
   }
+  keyOfPending(p) {
+    return this.provider.keyOf(this.provider.refOf(p));
+  }
   async recordDestroy(p) {
-    await this.deps.kv?.set(`destroy:${p.vmid}`, p);
+    await this.opts.kv?.set(`destroy:${this.keyOfPending(p)}`, p);
   }
   async pendingFor(chatId) {
-    const kv = this.deps.kv;
+    const kv = this.opts.kv;
     if (!kv) return [];
     const out = [];
     for (const key of await kv.list("destroy:")) {
       const p = await kv.get(key);
-      if (p?.chatId === chatId) out.push(p);
+      if (p?.chatId === chatId && this.provider.refOf(p)) out.push(p);
     }
     return out;
   }
   /** One destroy attempt for a pending record; on failure, back off and rethrow. */
   attemptDestroy(p, opts = {}) {
-    const inflight = this.destroying.get(p.vmid);
+    const ref = this.provider.refOf(p);
+    const key = this.provider.keyOf(ref);
+    const inflight = this.destroying.get(key);
     if (inflight) return inflight;
     const run = (async () => {
       try {
-        await this.destroyVm(p.vmid, p.chatId, opts);
-        await this.deps.kv?.delete(`destroy:${p.vmid}`);
+        await this.provider.destroy(p.chatId, ref, opts);
+        await this.opts.kv?.delete(`destroy:${key}`);
       } catch (err) {
         p.attempts++;
         p.nextAt = Date.now() + Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (p.attempts - 1));
@@ -21097,13 +20964,460 @@ class ProxmoxTerminalBackend {
         await this.recordDestroy(p).catch(() => {
         });
         this.log.warn(
-          `destroying container ${p.vmid} (chat ${p.chatId}) failed, attempt ${p.attempts}; retrying after ${new Date(p.nextAt).toISOString()}: ${p.lastError}`
+          `destroying ${this.provider.name(ref)} (chat ${p.chatId}) failed, attempt ${p.attempts}; retrying after ${new Date(p.nextAt).toISOString()}: ${p.lastError}`
         );
         throw err;
       }
-    })().finally(() => this.destroying.delete(p.vmid));
-    this.destroying.set(p.vmid, run);
+    })().finally(() => this.destroying.delete(key));
+    this.destroying.set(key, run);
     return run;
+  }
+  /**
+   * Startup reconcile (core's module hook): `chats` is every chat that
+   * exists, archived included. A machine for any other chat is destroyed;
+   * idle ones are stopped.
+   */
+  reconcile({ chats }) {
+    const ids = /* @__PURE__ */ new Set();
+    for (const c of chats) ids.add(typeof c === "string" ? c : c.id);
+    return this.sweep({ adopt: true, boot: true, liveChats: ids });
+  }
+  /**
+   * Timed shutdown (core hook).
+   * - `restart`: leave machines running — they are reused when Dispatch is
+   *   back. Busy chats get an idle deadline written down, so one whose chat
+   *   never comes back is still stopped by the boot sweep in time.
+   * - `stop` / `disable`: nothing will manage the machines for a while, so
+   *   ask the provider to stop each one, without waiting for it to finish.
+   * - `uninstall`: destroy every machine this instance made, waiting as long
+   *   as the deadline allows. Whatever is left is logged by key.
+   */
+  async onShutdown(e) {
+    const left = () => e.deadline ? Math.max(1e3, e.deadline - Date.now()) : 6e4;
+    await this.noteDeadlines().catch(() => {
+    });
+    if (e.reason === "restart") return this.closeAll();
+    const kv = this.opts.kv;
+    if (!this.provider.configured() || !kv) return this.closeAll();
+    for (const key of await kv.list("chat:")) await this.stateFor(key.slice("chat:".length)).catch(() => void 0);
+    const chats = [...this.chats.values()].filter((st) => st.ref);
+    this.closeAll();
+    await this.provider.preflight?.();
+    if (e.reason === "uninstall") {
+      await this.adopt().catch(() => {
+      });
+      for (const st of [...this.chats.values()]) {
+        if (st.ref) await this.recordDestroy({ chatId: st.chatId, ...st.ref, attempts: 0, nextAt: 0 });
+      }
+      this.chats.clear();
+      const pending = [];
+      for (const key of await kv.list("destroy:")) {
+        const p = await kv.get(key);
+        if (p && this.provider.refOf(p)) pending.push(p);
+      }
+      const results = await withDeadline(
+        Promise.allSettled(pending.map((p) => this.attemptDestroy(p, { timeoutMs: left() }))),
+        left(),
+        e.signal
+      );
+      const failed = pending.filter((_, i) => results?.[i]?.status !== "fulfilled").map((p) => this.keyOfPending(p));
+      if (failed.length) this.log.warn(`uninstall: could not destroy ${failed.join(", ")} in time; remove them by hand`);
+      for (const key of await kv.list("chat:")) await kv.delete(key);
+      return;
+    }
+    const release = this.provider.release?.bind(this.provider);
+    if (!release) return;
+    const reason = e.reason;
+    await withDeadline(Promise.allSettled(chats.map((st) => release(st.chatId, st.ref, reason))), left(), e.signal);
+  }
+  /**
+   * A chat busy at shutdown has no idle deadline, and nothing will fire
+   * onChatIdle for it after the restart. Give it one now, so the boot sweep
+   * leaves it running for a normal idle period — reusable if the chat comes
+   * back — rather than treating it like a crash's leftovers.
+   */
+  async noteDeadlines() {
+    const minutes = this.opts.policy().idleStopMinutes;
+    if (minutes < 0) return;
+    for (const st of this.chats.values()) {
+      if (!st.ref || st.idleDeadline !== void 0 || !st.conn) continue;
+      st.idleDeadline = Date.now() + minutes * 6e4;
+      await this.persist(st);
+    }
+  }
+  closeAll() {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = void 0;
+    for (const st of this.chats.values()) {
+      if (st.idleTimer) clearTimeout(st.idleTimer);
+      st.idleTimer = void 0;
+      this.dropConnection(st);
+    }
+  }
+  /**
+   * Plugin switched off, or Dispatch shutting down on a core without
+   * onShutdown: close connections, leave machines as they are. The idle
+   * deadlines written here are what lets the next load stop them on time.
+   */
+  async dispose() {
+    await this.noteDeadlines().catch(() => {
+    });
+    this.closeAll();
+    this.chats.clear();
+  }
+}
+function normaliseKey(raw) {
+  const t = raw.trim();
+  const pem = t.match(/^(-----BEGIN [A-Z ]+-----)\s*([\s\S]*?)\s*(-----END [A-Z ]+-----)$/);
+  if (pem) return `${pem[1]}
+${pem[2].replace(/\s+/g, "\n")}
+${pem[3]}
+`;
+  const decoded = Buffer.from(t, "base64").toString("utf8");
+  return decoded.includes("-----BEGIN") ? decoded.trim() + "\n" : t;
+}
+function sshAuthFrom(opts) {
+  return async () => {
+    const password = await opts.secret(opts.passwordSecret) || void 0;
+    const secretKey = await opts.secret(opts.keySecret);
+    if (secretKey) return { privateKey: normaliseKey(secretKey), password };
+    const path = opts.keyPath().replace(/^~(?=$|[\\/])/, homedir());
+    if (path) {
+      try {
+        return { privateKey: await readFile(path, "utf8"), password };
+      } catch (err) {
+        if (!password) throw new Error(`cannot read the SSH key at ${path}: ${err.message}`);
+      }
+    }
+    return { password };
+  };
+}
+function coerceSettings(defaults, raw) {
+  const out = { ...defaults };
+  const base = defaults;
+  for (const key of Object.keys(base)) {
+    const v = raw[key];
+    if (v === void 0 || v === null || v === "") continue;
+    const d = base[key];
+    if (typeof d === "number") {
+      const n = Number(v);
+      if (Number.isFinite(n)) out[key] = n;
+    } else if (typeof d === "boolean") {
+      out[key] = v === true || v === "true";
+    } else {
+      out[key] = String(v).trim();
+    }
+  }
+  return out;
+}
+class ProxmoxError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+class Proxmox {
+  constructor(opts) {
+    this.opts = opts;
+  }
+  /** One API call. `params` is a query string for GET/DELETE and a form body otherwise. */
+  async call(method, path, params = {}) {
+    const form = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v === void 0) continue;
+      form.set(k, typeof v === "boolean" ? v ? "1" : "0" : String(v));
+    }
+    const base = new URL(this.opts.apiUrl.replace(/\/+$/, "") + "/api2/json" + path);
+    const body = method === "GET" || method === "DELETE" ? void 0 : form.toString();
+    if (!body && form.toString()) base.search = form.toString();
+    return new Promise((resolve2, reject) => {
+      const req = request(
+        base,
+        {
+          method,
+          headers: {
+            Authorization: `PVEAPIToken=${this.opts.token}`,
+            ...body ? { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(body) } : {}
+          },
+          ca: this.opts.caCert || void 0,
+          rejectUnauthorized: !this.opts.insecureTls,
+          timeout: this.opts.timeoutMs ?? 2e4
+        },
+        (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            const status = res.statusCode ?? 0;
+            if (status < 200 || status >= 300) {
+              let detail = res.statusMessage ?? "";
+              try {
+                const parsed = JSON.parse(text);
+                if (parsed.errors) detail += ` ${JSON.stringify(parsed.errors)}`;
+                if (parsed.message) detail += ` ${parsed.message}`;
+              } catch {
+              }
+              reject(new ProxmoxError(`Proxmox ${method} ${path} → ${status} ${detail}`.trim(), status));
+              return;
+            }
+            try {
+              resolve2(JSON.parse(text).data);
+            } catch {
+              reject(new ProxmoxError(`Proxmox ${method} ${path}: unreadable response`));
+            }
+          });
+        }
+      );
+      req.on("timeout", () => req.destroy(new ProxmoxError(`Proxmox ${method} ${path}: no answer from ${base.host}`)));
+      req.on(
+        "error",
+        (err) => reject(err instanceof ProxmoxError ? err : new ProxmoxError(`Proxmox API unreachable (${base.host}): ${err.message}`))
+      );
+      if (body) req.write(body);
+      req.end();
+    });
+  }
+  /**
+   * Wait for a task (a UPID) to finish; throw with its exit status when it did
+   * not end `OK`. Clone, start, stop and destroy are all asynchronous tasks.
+   */
+  async waitTask(node, upid, timeoutMs = 12e4, signal) {
+    const deadline = Date.now() + timeoutMs;
+    for (; ; ) {
+      if (signal?.aborted) throw new ProxmoxError("cancelled");
+      const st = await this.call(
+        "GET",
+        `/nodes/${encodeURIComponent(node)}/tasks/${encodeURIComponent(upid)}/status`
+      );
+      if (st.status === "stopped") {
+        if (st.exitstatus === "OK") return;
+        throw new ProxmoxError(`task ${upid.split(":")[5] ?? ""} failed: ${st.exitstatus ?? "unknown"}`);
+      }
+      if (Date.now() > deadline) throw new ProxmoxError(`task ${upid} still running after ${timeoutMs / 1e3}s`);
+      await sleep(1e3, signal);
+    }
+  }
+  /** The IPv4 address of a running container's first non-loopback interface, or undefined. */
+  async ipv4(node, vmid) {
+    const ifaces = await this.call("GET", `/nodes/${encodeURIComponent(node)}/lxc/${vmid}/interfaces`);
+    for (const i of ifaces ?? []) {
+      if (i.name === "lo") continue;
+      const v4 = i["ip-addresses"]?.find((a) => a["ip-address-type"] === "inet" && !a["ip-address"].startsWith("127."));
+      if (v4) return v4["ip-address"];
+    }
+    return void 0;
+  }
+  async status(node, vmid) {
+    try {
+      const s = await this.call("GET", `/nodes/${encodeURIComponent(node)}/lxc/${vmid}/status/current`);
+      return s.status;
+    } catch (err) {
+      if (err instanceof ProxmoxError && /does not exist|no such|not found/i.test(err.message)) return void 0;
+      throw err;
+    }
+  }
+}
+function sleep(ms, signal) {
+  return new Promise((resolve2, reject) => {
+    const t = setTimeout(resolve2, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(t);
+        reject(new ProxmoxError("cancelled"));
+      },
+      { once: true }
+    );
+  });
+}
+const BACKEND_ID = "proxmox";
+const DESTROY_WAIT_MS = 45e3;
+class ProxmoxTerminalBackend {
+  constructor(deps) {
+    this.deps = deps;
+    this.chats = new RemoteChats({
+      backendId: BACKEND_ID,
+      label: "proxmox-terminal",
+      provider: new ProxmoxProvider(deps, () => this.chats.instanceId()),
+      kv: deps.kv,
+      log: deps.ctx.log,
+      publishPort: (p) => deps.ctx.terminals.publishPort(BACKEND_ID, p),
+      policy: () => {
+        const s = deps.settings();
+        return { idleStopMinutes: s.idleStopMinutes, destroyUnusedDays: s.destroyUnusedDays, workDir: s.workDir };
+      }
+    });
+  }
+  id = BACKEND_ID;
+  label = "Proxmox container";
+  shell = "bash";
+  chats;
+  get spawnTimeoutMs() {
+    return Math.max(30, this.deps.settings().spawnTimeoutSeconds) * 1e3;
+  }
+  spawn(info) {
+    return this.chats.spawn(info);
+  }
+  agentNote({ chatId }) {
+    const st = this.chats.peek(chatId);
+    const where = st ? `container ${st.ref?.hostname ?? hostnameFor(chatId)} (vmid ${st.ref?.vmid ?? 0})` : "a per-chat Proxmox container";
+    const workDir = this.deps.settings().workDir;
+    return [
+      `- Your terminal runs on ${where}: Debian Linux with its own git checkout of this repo under ${workDir}/.`,
+      `- Edit files LOCALLY as usual. Before every terminal command Dispatch snapshots your local worktree — committed, uncommitted and untracked files alike — and checks it out on the container. Never push to GitHub to get a change over, and don't edit files inside the container: the next command overwrites tracked files there.`,
+      `- Ignored directories (node_modules, dist, build output) are NOT synced; the container keeps its own. A Windows-built node_modules is useless on Linux, so run the install (e.g. \`pnpm install\`) in the terminal once per container, and again when dependencies change.`,
+      `- There is no GitHub token on the container, by design. Do git work locally.`,
+      `- The container stops when the chat goes idle (the next command restarts it) and is destroyed when the chat is deleted. Only installs and build output are lost; your code lives on the Dispatch host.`
+    ].join("\n");
+  }
+  onChatIdle(e) {
+    return this.chats.onChatIdle(e);
+  }
+  onChatDeleted(e) {
+    return this.chats.onChatDeleted(e);
+  }
+  /** This instance's id; every clone's description carries it. */
+  instanceId() {
+    return this.chats.instanceId();
+  }
+  /** Called once from activate: the boot sweep, then one a minute. Never throws. */
+  start() {
+    return this.chats.start();
+  }
+  sweep(opts) {
+    return this.chats.sweep(opts);
+  }
+  /** Startup reconcile (core's module hook, forwarded by server.ts). */
+  reconcile(e) {
+    return this.chats.reconcile(e);
+  }
+  /** Timed shutdown (core's module hook, forwarded by server.ts). */
+  onShutdown(e) {
+    return this.chats.onShutdown(e);
+  }
+  dispose() {
+    return this.chats.dispose();
+  }
+}
+class ProxmoxProvider {
+  constructor(deps, instanceId) {
+    this.deps = deps;
+    this.instanceId = instanceId;
+  }
+  get log() {
+    return this.deps.ctx.log;
+  }
+  async api() {
+    const s = this.deps.settings();
+    if (!s.apiUrl) throw new Error("the proxmox-terminal plugin has no API URL set (Settings → Plugins → Proxmox terminal)");
+    const token = await this.deps.token();
+    if (!token) throw new Error("the PROXMOX_TERMINAL_API_TOKEN secret is not set");
+    return this.deps.proxmox ? this.deps.proxmox(s, token) : new Proxmox({ apiUrl: s.apiUrl, token, caCert: s.caCert, insecureTls: s.insecureTls });
+  }
+  configured() {
+    return Boolean(this.deps.settings().apiUrl);
+  }
+  refOf(rec) {
+    const vmid = Number(rec.vmid);
+    return vmid > 0 ? { vmid, hostname: String(rec.hostname ?? "") } : void 0;
+  }
+  keyOf(ref) {
+    return String(ref.vmid);
+  }
+  name(ref) {
+    return `container ${ref.vmid}`;
+  }
+  async preflight() {
+    await this.api();
+  }
+  async bringUp(chat, signal) {
+    const s = this.deps.settings();
+    const api = await this.api();
+    let vmid = chat.ref?.vmid ?? 0;
+    const hostname = chat.ref?.hostname ?? hostnameFor(chat.chatId);
+    let status = vmid ? await api.status(s.node, vmid) : void 0;
+    if (status && await this.ownership(api, s, vmid, chat.chatId) !== "ours") {
+      this.log.warn(`vmid ${vmid} no longer holds chat ${chat.chatId}'s container; making a new one`);
+      status = void 0;
+    }
+    if (!status) {
+      vmid = await this.cloneFor(api, s, chat, hostname, signal);
+      status = "stopped";
+    }
+    if (status !== "running") {
+      this.log.info(`starting container ${vmid} for chat ${chat.chatId}`);
+      const upid = await api.call("POST", `/nodes/${s.node}/lxc/${vmid}/status/start`);
+      await api.waitTask(s.node, upid, 6e4, signal);
+    }
+    const ip = await this.waitForIp(api, s.node, vmid, signal);
+    const auth = await this.deps.sshAuth();
+    if (!auth.privateKey && !auth.password) {
+      throw new Error("no SSH credentials: set the sshKeyPath setting, or the PROXMOX_TERMINAL_SSH_KEY / _SSH_PASSWORD secret");
+    }
+    const conn = this.deps.connect ? this.deps.connect(ip, s.sshUser, auth) : new SshConnection({ host: ip, username: s.sshUser, ...auth });
+    await conn.connect(6e4, signal);
+    return conn;
+  }
+  /** Linked-clone the template into a free vmid, size it, and remember it. */
+  async cloneFor(api, s, chat, hostname, signal) {
+    const taken = new Set(await this.poolVmids(api, s).catch(() => []));
+    let lastErr;
+    for (let vmid = s.vmidStart; vmid <= s.vmidEnd; vmid++) {
+      if (taken.has(vmid) || vmid === s.templateVmid) continue;
+      try {
+        this.log.info(`cloning template ${s.templateVmid} → ${vmid} (${hostname}) for chat ${chat.chatId}`);
+        const upid = await api.call("POST", `/nodes/${s.node}/lxc/${s.templateVmid}/clone`, {
+          newid: vmid,
+          hostname,
+          pool: s.pool,
+          description: describe(chat.chatId, await this.instanceId())
+        });
+        await api.waitTask(s.node, upid, 18e4, signal);
+      } catch (err) {
+        lastErr = err;
+        if (err instanceof ProxmoxError && /already exists|in use|exists/i.test(err.message)) continue;
+        throw err;
+      }
+      await api.call("PUT", `/nodes/${s.node}/lxc/${vmid}/config`, {
+        cores: s.cores,
+        memory: s.memory,
+        net0: `name=eth0,bridge=${s.bridge},ip=dhcp,type=veth`,
+        tags: "dispatch-terminal"
+      });
+      await chat.remember({ vmid, hostname });
+      return vmid;
+    }
+    throw new Error(
+      `no free vmid in ${s.vmidStart}-${s.vmidEnd}` + (lastErr instanceof Error ? ` (last error: ${lastErr.message})` : "")
+    );
+  }
+  async waitForIp(api, node, vmid, signal) {
+    const until = Date.now() + 6e4;
+    while (Date.now() < until) {
+      const ip = await api.ipv4(node, vmid).catch(() => void 0);
+      if (ip) return ip;
+      await sleep(1e3, signal);
+    }
+    throw new Error(`container ${vmid} got no IPv4 address within 60s (is DHCP serving the ${this.deps.settings().bridge} bridge?)`);
+  }
+  /** Stop a chat's container, after checking the vmid is still this chat's. */
+  async stop(chatId, ref) {
+    const s = this.deps.settings();
+    const api = await this.api();
+    if (await api.status(s.node, ref.vmid) !== "running") return;
+    if (await this.ownership(api, s, ref.vmid, chatId) !== "ours") return;
+    this.log.info(`stopping idle container ${ref.vmid} (chat ${chatId})`);
+    const upid = await api.call("POST", `/nodes/${s.node}/lxc/${ref.vmid}/status/shutdown`, { timeout: 30, forceStop: 1 });
+    await api.waitTask(s.node, upid, 9e4);
+  }
+  /** Ask a running container of the chat's to shut down; don't wait for the task. */
+  async release(chatId, ref, reason) {
+    const s = this.deps.settings();
+    const api = await this.api();
+    if (await api.status(s.node, ref.vmid) !== "running") return;
+    if (await this.ownership(api, s, ref.vmid, chatId) !== "ours") return;
+    this.log.info(`shutting down container ${ref.vmid} (chat ${chatId}): Dispatch is ${reason === "stop" ? "stopping" : "disabling the plugin"}`);
+    await api.call("POST", `/nodes/${s.node}/lxc/${ref.vmid}/status/shutdown`, { timeout: 30, forceStop: 1 });
   }
   /**
    * Stop and destroy one container — only after checking it is a clone in the
@@ -21111,7 +21425,8 @@ class ProxmoxTerminalBackend {
    * Anything else is treated as already gone: never destroy what we can't
    * prove is ours.
    */
-  async destroyVm(vmid, chatId, opts = {}) {
+  async destroy(chatId, ref, opts = {}) {
+    const vmid = ref.vmid;
     const s = this.deps.settings();
     const api = await this.api();
     const own = await this.ownership(api, s, vmid, chatId);
@@ -21127,6 +21442,21 @@ class ProxmoxTerminalBackend {
     });
     await api.waitTask(s.node, upid, opts.timeoutMs ?? DESTROY_WAIT_MS);
     this.log.info(`destroyed container ${vmid} (chat ${chatId})`);
+  }
+  /** Clones in the pool tagged with `instance` whose vmid is not in `known`. */
+  async discover(instance, known) {
+    const s = this.deps.settings();
+    const api = await this.api();
+    const out = [];
+    for (const vmid of await this.poolVmids(api, s)) {
+      if (known.has(String(vmid)) || !inRange(s, vmid)) continue;
+      const cfg = await this.config(api, s, vmid).catch(() => void 0);
+      if (!cfg || Number(cfg.template) === 1) continue;
+      const d = parseDescription(cfg.description);
+      if (d.instance !== instance || !d.chatId) continue;
+      out.push({ chatId: d.chatId, ref: { vmid, hostname: cfg.hostname ?? hostnameFor(d.chatId) } });
+    }
+    return out;
   }
   async config(api, s, vmid) {
     try {
@@ -21155,105 +21485,6 @@ class ProxmoxTerminalBackend {
     const all = await api.call("GET", "/cluster/resources", { type: "vm" });
     return (all ?? []).filter((m) => m.pool === s.pool && m.type === "lxc").map((m) => m.vmid).filter((v) => typeof v === "number");
   }
-  /**
-   * Startup reconcile (core's module hook, forwarded by server.ts): `chats`
-   * is every chat that exists, archived included. A
-   * clone for any other chat is destroyed; idle ones are stopped.
-   */
-  reconcile({ chats }) {
-    const ids = /* @__PURE__ */ new Set();
-    for (const c of chats) ids.add(typeof c === "string" ? c : c.id);
-    return this.sweep({ adopt: true, boot: true, liveChats: ids });
-  }
-  /**
-   * Timed shutdown (core hook).
-   * - `restart`: leave containers running — they are reused when Dispatch is
-   *   back. Busy chats get an idle deadline written down, so one whose chat
-   *   never comes back is still stopped by the boot sweep in time.
-   * - `stop` / `disable`: nothing will manage the containers for a while, so
-   *   ask Proxmox to shut each one down, without waiting for it to finish.
-   * - `uninstall`: destroy every clone this instance made, waiting as long as
-   *   the deadline allows. Whatever is left is logged by vmid.
-   */
-  async onShutdown(e) {
-    const left = () => e.deadline ? Math.max(1e3, e.deadline - Date.now()) : 6e4;
-    await this.noteDeadlines().catch(() => {
-    });
-    if (e.reason === "restart") return this.closeAll();
-    const s = this.deps.settings();
-    if (!s.apiUrl || !this.deps.kv) return this.closeAll();
-    for (const key of await this.deps.kv.list("chat:")) await this.stateFor(key.slice("chat:".length)).catch(() => void 0);
-    const chats = [...this.chats.values()].filter((st) => st.vmid);
-    this.closeAll();
-    const api = await this.api();
-    if (e.reason === "uninstall") {
-      await this.adopt().catch(() => {
-      });
-      for (const st of [...this.chats.values()]) if (st.vmid) await this.recordDestroy({ chatId: st.chatId, vmid: st.vmid, hostname: st.hostname, attempts: 0, nextAt: 0 });
-      this.chats.clear();
-      const pending = [];
-      for (const key of await this.deps.kv.list("destroy:")) {
-        const p = await this.deps.kv.get(key);
-        if (p) pending.push(p);
-      }
-      const results = await withDeadline(
-        Promise.allSettled(pending.map((p) => this.attemptDestroy(p, { timeoutMs: left() }))),
-        left(),
-        e.signal
-      );
-      const failed = pending.filter((_, i) => results?.[i]?.status !== "fulfilled").map((p) => p.vmid);
-      if (failed.length) this.log.warn(`uninstall: could not destroy ${failed.join(", ")} in time; remove them by hand`);
-      for (const key of await this.deps.kv.list("chat:")) await this.deps.kv.delete(key);
-      return;
-    }
-    await withDeadline(
-      Promise.allSettled(
-        chats.map(async (st) => {
-          if (await api.status(s.node, st.vmid) !== "running") return;
-          if (await this.ownership(api, s, st.vmid, st.chatId) !== "ours") return;
-          this.log.info(`shutting down container ${st.vmid} (chat ${st.chatId}): Dispatch is ${e.reason === "stop" ? "stopping" : "disabling the plugin"}`);
-          await api.call("POST", `/nodes/${s.node}/lxc/${st.vmid}/status/shutdown`, { timeout: 30, forceStop: 1 });
-        })
-      ),
-      left(),
-      e.signal
-    );
-  }
-  /**
-   * A chat busy at shutdown has no idle deadline, and nothing will fire
-   * onChatIdle for it after the restart. Give it one now, so the boot sweep
-   * leaves it running for a normal idle period — reusable if the chat comes
-   * back — rather than treating it like a crash's leftovers.
-   */
-  async noteDeadlines() {
-    const minutes = this.deps.settings().idleStopMinutes;
-    if (minutes < 0) return;
-    for (const st of this.chats.values()) {
-      if (!st.vmid || st.idleDeadline !== void 0 || !st.conn) continue;
-      st.idleDeadline = Date.now() + minutes * 6e4;
-      await this.persist(st);
-    }
-  }
-  closeAll() {
-    if (this.sweepTimer) clearInterval(this.sweepTimer);
-    this.sweepTimer = void 0;
-    for (const st of this.chats.values()) {
-      if (st.idleTimer) clearTimeout(st.idleTimer);
-      st.idleTimer = void 0;
-      this.dropConnection(st);
-    }
-  }
-  /**
-   * Plugin switched off, or Dispatch shutting down on a core without
-   * onShutdown: close connections, leave containers as they are. The idle
-   * deadlines written here are what lets the next load stop them on time.
-   */
-  async dispose() {
-    await this.noteDeadlines().catch(() => {
-    });
-    this.closeAll();
-    this.chats.clear();
-  }
 }
 const GONE = /does not exist|no such|not found/i;
 function inRange(s, vmid) {
@@ -21269,52 +21500,9 @@ function parseDescription(text) {
     instance: t.match(/instance ([a-z0-9]+)\)/)?.[1]
   };
 }
-function errText(err) {
-  return err instanceof Error ? err.message : String(err);
-}
-function withDeadline(p, ms, signal) {
-  return new Promise((resolve2) => {
-    const t = setTimeout(() => resolve2(void 0), ms);
-    signal?.addEventListener("abort", () => resolve2(void 0), { once: true });
-    void p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve2(v);
-      },
-      () => {
-        clearTimeout(t);
-        resolve2(void 0);
-      }
-    );
-  });
-}
 function hostnameFor(chatId) {
   const slug = chatId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) || "chat";
   return `dt-${slug}`;
-}
-function safeName(s) {
-  return s.replace(/[^A-Za-z0-9._-]/g, "_") || "repo";
-}
-function githubHttps(url) {
-  if (!url) return void 0;
-  const m = url.match(/^https?:\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i) ?? url.match(/^(?:ssh:\/\/)?git@github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
-  return m ? `https://github.com/${m[1]}/${m[2]}.git` : void 0;
-}
-function parseListeners(out) {
-  const ports = /* @__PURE__ */ new Map();
-  for (const line of out.split("\n")) {
-    const cols = line.trim().split(/\s+/);
-    const local = cols[3];
-    if (!local) continue;
-    const cut = local.lastIndexOf(":");
-    const port = Number(local.slice(cut + 1));
-    if (!Number.isInteger(port) || port < 1024 || port > 65535) continue;
-    const addr = local.slice(0, cut).replace(/^\[|\]$/g, "").replace(/%.*$/, "");
-    const host = addr === "*" || addr === "0.0.0.0" || addr === "::" ? "127.0.0.1" : addr;
-    const prev = ports.get(port);
-    if (!prev || host === "127.0.0.1") ports.set(port, host);
-  }
-  return ports;
 }
 const DEFAULTS = {
   apiUrl: "",
@@ -21336,35 +21524,11 @@ const DEFAULTS = {
   insecureTls: false
 };
 function readSettings(raw) {
-  const out = { ...DEFAULTS };
-  for (const key of Object.keys(DEFAULTS)) {
-    const v = raw[key];
-    if (v === void 0 || v === null || v === "") continue;
-    const d = DEFAULTS[key];
-    if (typeof d === "number") {
-      const n = Number(v);
-      if (Number.isFinite(n)) out[key] = n;
-    } else if (typeof d === "boolean") {
-      out[key] = v === true || v === "true";
-    } else {
-      out[key] = String(v).trim();
-    }
-  }
-  return out;
+  return coerceSettings(DEFAULTS, raw);
 }
 const TOKEN = "PROXMOX_TERMINAL_API_TOKEN";
 const KEY = "PROXMOX_TERMINAL_SSH_KEY";
 const PASSWORD = "PROXMOX_TERMINAL_SSH_PASSWORD";
-function normaliseKey(raw) {
-  const t = raw.trim();
-  const pem = t.match(/^(-----BEGIN [A-Z ]+-----)\s*([\s\S]*?)\s*(-----END [A-Z ]+-----)$/);
-  if (pem) return `${pem[1]}
-${pem[2].replace(/\s+/g, "\n")}
-${pem[3]}
-`;
-  const decoded = Buffer.from(t, "base64").toString("utf8");
-  return decoded.includes("-----BEGIN") ? decoded.trim() + "\n" : t;
-}
 let backend;
 const plugin = definePlugin({
   deactivate() {
@@ -21381,20 +21545,12 @@ const plugin = definePlugin({
       kv: ctx.kv,
       settings,
       token: async () => (await ctx.secrets?.get(TOKEN))?.trim() || void 0,
-      sshAuth: async () => {
-        const password = await ctx.secrets?.get(PASSWORD) || void 0;
-        const secretKey = await ctx.secrets?.get(KEY);
-        if (secretKey) return { privateKey: normaliseKey(secretKey), password };
-        const path = settings().sshKeyPath.replace(/^~(?=$|[\\/])/, homedir());
-        if (path) {
-          try {
-            return { privateKey: await readFile(path, "utf8"), password };
-          } catch (err) {
-            if (!password) throw new Error(`cannot read the SSH key at ${path}: ${err.message}`);
-          }
-        }
-        return { password };
-      }
+      sshAuth: sshAuthFrom({
+        secret: async (name) => ctx.secrets?.get(name),
+        keySecret: KEY,
+        passwordSecret: PASSWORD,
+        keyPath: () => settings().sshKeyPath
+      })
     });
     ctx.terminals.registerBackend(backend);
     ctx.log.info('registered terminal backend "proxmox"');
@@ -21411,6 +21567,5 @@ const hooks = {
 };
 const server = Object.assign(plugin, hooks);
 export {
-  server as default,
-  normaliseKey
+  server as default
 };
