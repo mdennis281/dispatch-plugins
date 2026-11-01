@@ -3,11 +3,11 @@
  * index is untouched" is a claim about git, not about this code.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { remotePathFor, snapshot } from "../src/index.js";
+import { localHas, remotePathFor, snapshot } from "../src/index.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -52,6 +52,42 @@ describe("snapshot", () => {
     const dir = gitRepo();
     writeFileSync(join(dir, "a.txt"), "dirty\n");
     expect(await snapshot(dir)).toBe(await snapshot(dir));
+  });
+});
+
+describe("localHas", () => {
+  it("says which shas are commits here, in order, asking git once", async () => {
+    const dir = gitRepo();
+    const g = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" }).toString().trim();
+    const first = g("rev-parse", "HEAD");
+    const tree = g("rev-parse", "HEAD^{tree}");
+    g("tag", "-a", "v1", "-m", "a tag object", first);
+    const tag = g("rev-parse", "v1");
+    writeFileSync(join(dir, "b.txt"), "b\n");
+    g("add", "-A");
+    g("commit", "-qm", "two");
+    const second = g("rev-parse", "HEAD");
+    const missing = "0123456789abcdef0123456789abcdef01234567";
+    // GIT_TRACE logs every git process started; the sync asks about every ref
+    // the remote has, and one process per sha was seconds per command on Windows.
+    const traceDir = mkdtempSync(join(tmpdir(), "rc-trace-"));
+    dirs.push(traceDir);
+    const trace = join(traceDir, "trace.log");
+    process.env.GIT_TRACE = trace;
+    let has: string[];
+    try {
+      has = await localHas(dir, [second, missing, tree, first, "not-a-sha", tag, second]);
+    } finally {
+      delete process.env.GIT_TRACE;
+    }
+    // A tag peels to its commit; a tree is not one; duplicates stay duplicates.
+    expect(has).toEqual([second, first, tag, second]);
+    const started = existsSync(trace) ? readFileSync(trace, "utf8").split("\n").filter((l) => /built-in: git cat-file/.test(l)) : [];
+    expect(started).toHaveLength(1);
+  });
+
+  it("starts no git at all for nothing to ask", async () => {
+    expect(await localHas(process.cwd(), ["not-a-sha"])).toEqual([]);
   });
 });
 

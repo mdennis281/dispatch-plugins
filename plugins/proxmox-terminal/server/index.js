@@ -20335,9 +20335,9 @@ function toSsh2(verifier) {
   });
 }
 const FIXED_DATE = "1700000000 +0000";
-function git(cwd, args, env = {}) {
+function git(cwd, args, env = {}, input) {
   return new Promise((res, rej) => {
-    execFile(
+    const child = execFile(
       "git",
       args,
       {
@@ -20351,6 +20351,7 @@ function git(cwd, args, env = {}) {
         else res(stdout.trim());
       }
     );
+    if (input !== void 0) child.stdin?.end(input);
   });
 }
 async function repoInfo(cwd) {
@@ -20386,16 +20387,11 @@ async function snapshot(root) {
   }
 }
 async function localHas(root, shas) {
-  const out = [];
-  for (const sha of shas) {
-    if (!/^[0-9a-f]{40}$/.test(sha)) continue;
-    const ok = await git(root, ["cat-file", "-e", `${sha}^{commit}`]).then(
-      () => true,
-      () => false
-    );
-    if (ok) out.push(sha);
-  }
-  return out;
+  const asked = shas.filter((sha) => /^[0-9a-f]{40}$/.test(sha));
+  if (!asked.length) return [];
+  const lines = (await git(root, ["cat-file", "--batch-check"], {}, asked.map((sha) => `${sha}^{commit}
+`).join(""))).split("\n");
+  return asked.filter((_, i) => / commit \d+$/.test(lines[i] ?? ""));
 }
 function pack(root, tip, exclude, sink) {
   return new Promise((res, rej) => {

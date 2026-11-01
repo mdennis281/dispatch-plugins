@@ -108,9 +108,7 @@ describe("a new connection", () => {
     const repo = gitRepo();
     const first = fakeConn();
     const synced = () => first.remote.map((cmd) => cmd.match(/--detach ([0-9a-f]{40})/)?.[1]).find(Boolean);
-    const second = fakeConn({ exec: (cmd) => (cmd.includes("test -d") ? { code: 0, stdout: `yes
-${synced()}
-` } : undefined) });
+    const second = fakeConn({ exec: (cmd) => (cmd.includes("test -d") ? { code: 0, stdout: `yes\n${synced()}\n` } : undefined) });
     const conns = [first, second];
     const { c } = chats(fakeProvider({}, { conn: () => conns.shift()!.conn }));
     await c.spawn(info(repo));
