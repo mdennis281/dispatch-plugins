@@ -3,6 +3,7 @@
  * Dispatch drives.
  */
 import { EventEmitter } from "node:events";
+import { StringDecoder } from "node:string_decoder";
 import type { ClientChannel } from "ssh2";
 import type { TerminalBackendHandle } from "@dispatch/plugin-sdk";
 import { sq } from "./quote.js";
@@ -31,6 +32,13 @@ export class RemoteShell extends EventEmitter implements TerminalBackendHandle {
   private pid?: number;
   private head = "";
   private exited = false;
+  /**
+   * One decoder per stream: the channel hands over bytes in whatever pieces
+   * the transport made, and a multi-byte character cut in two decoded as two
+   * U+FFFD when each piece was decoded on its own.
+   */
+  private readonly outText = new StringDecoder("utf8");
+  private readonly errText = new StringDecoder("utf8");
 
   constructor(
     private readonly ch: ClientChannel,
@@ -45,14 +53,19 @@ export class RemoteShell extends EventEmitter implements TerminalBackendHandle {
         ch.on("error", l);
       },
     };
-    ch.on("data", (c: Buffer) => this.onStdout(c.toString()));
-    ch.stderr.on("data", (c: Buffer) => this.stderr.emit("data", c.toString()));
+    ch.on("data", (c: Buffer) => this.onStdout(this.outText.write(c)));
+    ch.stderr.on("data", (c: Buffer) => this.onStderr(this.errText.write(c)));
     ch.on("exit", (code: number | null) => this.finish(code));
     ch.on("close", () => this.finish(null));
     ch.on("error", (err: Error) => this.emit("error", err));
   }
 
+  private onStderr(text: string): void {
+    if (text) this.stderr.emit("data", text);
+  }
+
   private onStdout(text: string): void {
+    if (!text) return;
     if (this.pid !== undefined) {
       this.stdout.emit("data", text);
       return;
@@ -71,6 +84,10 @@ export class RemoteShell extends EventEmitter implements TerminalBackendHandle {
   private finish(code: number | null): void {
     if (this.exited) return;
     this.exited = true;
+    // Whatever the decoders still hold (a character the shell never finished)
+    // goes out before the exit, not after it.
+    this.onStdout(this.outText.end());
+    this.onStderr(this.errText.end());
     this.emit("exit", code);
   }
 
