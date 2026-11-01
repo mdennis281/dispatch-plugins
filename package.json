@@ -4,7 +4,7 @@
   "type": "module",
   "description": "A collection of Dispatch plugins, each installable on its own.",
   "scripts": {
-    "pnpm:devPreinstall": "node scripts/link-dispatch-sdk.mjs",
+    "pnpm:devPreinstall": "node scripts/copy-dispatch-sdk.mjs",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test"

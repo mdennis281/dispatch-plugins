@@ -1,6 +1,6 @@
 node_modules/
-# A link to a Dispatch checkout's packages/plugin-sdk, made by
-# scripts/link-dispatch-sdk.mjs on `pnpm install`. Machine-specific.
+# A COPY of a Dispatch checkout's packages/plugin-sdk (never a link), made by
+# scripts/copy-dispatch-sdk.mjs on `pnpm install`. Machine-specific.
 /.dispatch-sdk
 # plugins/*/server/ is COMMITTED: the URL installer copies a plugin's directory
 # as-is and never builds.
