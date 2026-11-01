@@ -8,7 +8,7 @@
  */
 export { SshConnection, type ExecResult, type SshAuth, type SshTarget } from "./ssh/connection.js";
 export { hostKeyFingerprint, pinnedHostKey, tofuHostKey, trustProvisioner, type HostVerifier } from "./ssh/host-verifier.js";
-export { NO_CWD_EXIT, RemoteShell, ShellStartError, remoteShellCommand } from "./shell/remote-shell.js";
+export { NO_CWD_EXIT, RemoteShell, ShellStartError, remoteShellCommand, signalName } from "./shell/remote-shell.js";
 export { sq } from "./shell/quote.js";
 export { git, localHas, pack, remotePathFor, repoInfo, snapshot, type RepoInfo } from "./sync/snapshot.js";
 export { RemoteCheckouts, githubHttps, type RemoteCheckoutsOptions } from "./sync/remote-repo.js";
