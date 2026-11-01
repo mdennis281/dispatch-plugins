@@ -20370,10 +20370,13 @@ function git(cwd, args, env = {}, input) {
 }
 async function repoInfo(cwd) {
   const root = await git(cwd, ["rev-parse", "--show-toplevel"]);
-  const head = await git(root, ["rev-parse", "HEAD"]);
+  const head = await headOf(root);
   const branch = await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => void 0);
   const originUrl = await git(root, ["remote", "get-url", "origin"]).catch(() => void 0);
   return { root: resolve(root), head, branch: branch || void 0, originUrl: originUrl || void 0 };
+}
+async function headOf(root) {
+  return await git(root, ["rev-parse", "-q", "--verify", "HEAD^{commit}"]).catch(() => "") || void 0;
 }
 async function snapshot(root) {
   const realIndex = await git(root, ["rev-parse", "--git-path", "index"]);
@@ -20386,8 +20389,9 @@ async function snapshot(root) {
     const env = { GIT_INDEX_FILE: tmpIndex };
     await git(root, ["add", "-A"], env);
     const tree = await git(root, ["write-tree"], env);
-    const head = await git(root, ["rev-parse", "HEAD"]);
-    return await git(root, ["commit-tree", tree, "-p", head, "-m", "dispatch: working-tree snapshot"], {
+    const head = await headOf(root);
+    const parent = head ? ["-p", head] : [];
+    return await git(root, ["commit-tree", tree, ...parent, "-m", "dispatch: working-tree snapshot"], {
       GIT_AUTHOR_NAME: "Dispatch",
       GIT_AUTHOR_EMAIL: "dispatch@localhost",
       GIT_COMMITTER_NAME: "Dispatch",

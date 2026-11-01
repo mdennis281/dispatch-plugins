@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { localHas, remotePathFor, snapshot } from "../src/index.js";
+import { localHas, remotePathFor, repoInfo, snapshot } from "../src/index.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -52,6 +52,33 @@ describe("snapshot", () => {
     const dir = gitRepo();
     writeFileSync(join(dir, "a.txt"), "dirty\n");
     expect(await snapshot(dir)).toBe(await snapshot(dir));
+  });
+});
+
+describe("a repository with no commits yet", () => {
+  // `git init` and some files, nothing committed: HEAD names a branch that
+  // does not exist. A fresh project is exactly this, and its terminal must work.
+  function unborn(): string {
+    const dir = mkdtempSync(join(tmpdir(), "rc-unborn-"));
+    dirs.push(dir);
+    execFileSync("git", ["init", "-q", "-b", "trunk"], { cwd: dir, stdio: "pipe" });
+    writeFileSync(join(dir, "a.txt"), "first\n");
+    return dir;
+  }
+
+  it("repoInfo names the unborn branch and no head", async () => {
+    const dir = unborn();
+    const info = await repoInfo(dir);
+    expect(info).toMatchObject({ branch: "trunk", head: undefined });
+  });
+
+  it("snapshots the worktree as a commit with no parent", async () => {
+    const dir = unborn();
+    const sha = await snapshot(dir);
+    const g = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" }).toString().trim();
+    expect(g("show", `${sha}:a.txt`)).toBe("first");
+    expect(g("rev-list", "--parents", "-n", "1", sha)).toBe(sha);
+    expect(await snapshot(dir)).toBe(sha);
   });
 });
 
