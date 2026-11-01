@@ -20436,18 +20436,26 @@ class RemoteCheckouts {
    * The machine's copy of a local repo: seeded once, from GitHub when the
    * repo's origin is a public GitHub repo (shallow, so the first pack is just
    * the local delta), otherwise an empty repo the first pack fills.
+   *
+   * Checked again on every new connection. A connection after a drop may
+   * reach a different disk (a machine re-provisioned for the chat, or wiped),
+   * and what this process remembers — that the checkout exists, which
+   * snapshot it holds — is only true of the old one. Trusting it skipped the
+   * seed and the sync, and the next shell started in a directory that wasn't
+   * there.
    */
   ensure(root, local) {
+    const conn = this.opts.conn();
     const existing = this.repos.get(root);
-    if (existing?.seeded) return existing.seeded.then(() => existing);
-    const workDir = this.opts.workDir();
-    const remote = `${workDir}/${safeName(basename(root))}`;
-    const entry = { remote };
+    if (existing?.seeded && existing.on === conn) return existing.seeded.then(() => existing);
+    const remote = existing?.remote ?? `${this.opts.workDir()}/${safeName(basename(root))}`;
+    const entry = existing ?? { remote };
+    entry.on = conn;
     this.repos.set(root, entry);
     entry.seeded = (async () => {
-      const conn = this.opts.conn();
-      const has = (await conn.exec(`test -d ${sq(remote)}/.git && echo yes`)).stdout.trim() === "yes";
-      if (has) return;
+      const [mark, head] = (await conn.exec(`test -d ${sq(remote)}/.git && echo yes && git -C ${sq(remote)} rev-parse -q --verify HEAD`)).stdout.trim().split(/\s+/);
+      if (entry.lastSynced && head !== entry.lastSynced) entry.lastSynced = void 0;
+      if (mark === "yes") return;
       const https = githubHttps(local.originUrl);
       if (https) {
         const branchArg = local.branch ? `--branch ${sq(local.branch)} ` : "";
