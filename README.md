@@ -60,15 +60,17 @@ packages/<name>/             code two or more plugins share (none yet)
 
 ## Develop
 
-The plugin SDK (`@dispatch/plugin-sdk`) is not on npm. Each plugin `link:`s it from a Dispatch checkout cloned **beside** this repository as `claude-manager`. Edit the `link:` path in that plugin's `package.json` if yours lives elsewhere.
+The plugin SDK (`@dispatch/plugin-sdk`) is not on npm. Packages here depend on it as `link:../../.dispatch-sdk`. That is a gitignored link to a Dispatch checkout's `packages/plugin-sdk`, which `pnpm install` makes (`scripts/link-dispatch-sdk.mjs`). It uses `DISPATCH_REPO` when set. Otherwise it uses a checkout named `claude-manager` or `dispatch` **beside** this repository's primary checkout, which git worktrees of this repository find too.
 
 ```bash
 git clone https://github.com/mdennis281/dispatch claude-manager
 cd claude-manager && pnpm install && pnpm --filter @dispatch/shared --filter @dispatch/plugin-sdk build && cd ..
 git clone https://github.com/mdennis281/dispatch-plugins && cd dispatch-plugins
-pnpm install
-pnpm typecheck && pnpm test && pnpm build      # every plugin; or run them inside plugins/<name>
+pnpm install                                   # also links .dispatch-sdk
+pnpm typecheck && pnpm build && pnpm test      # every plugin; build first, because the tests load the built bundle
 ```
+
+CI (`.github/workflows/ci.yml`) does the same against a pinned Dispatch commit, and fails when a committed `server/index.js` differs from its rebuild.
 
 ## License
 

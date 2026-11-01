@@ -1,0 +1,110 @@
+# dispatch-plugins CI.
+#
+# WHAT IT GUARDS. Every plugin's server/index.js is COMMITTED build output.
+# Dispatch's URL installer copies a plugin's directory as-is and never builds,
+# and its update check hashes only that directory. So a source change, or a
+# change to a packages/* package that a plugin bundles, reaches users only
+# through a rebuilt and committed bundle. This job rebuilds every plugin and
+# fails when a committed bundle differs from its rebuild.
+#
+# WHERE THE SDK COMES FROM. @dispatch/plugin-sdk is not on npm (Dispatch core
+# E30). The job checks Dispatch out beside this repository, builds
+# @dispatch/shared and @dispatch/plugin-sdk there, and points DISPATCH_REPO at
+# it; scripts/link-dispatch-sdk.mjs (the root pnpm:devPreinstall) does the rest.
+#
+# GitHub-hosted runners only. This repository is public, and a self-hosted
+# runner would run any fork's pull request on the home network.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Dispatch commit the SDK is built from. Pinned, so a change on Dispatch's
+  # main can't turn this repository red on its own. Move it when a plugin needs
+  # newer SDK types or hooks, and commit the rebuilt bundles in the same PR.
+  DISPATCH_REF: 1a3b458a0dbce13068cbf20b934c93c93d4b7f6c
+
+jobs:
+  plugins:
+    name: typecheck, build, bundles fresh, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out dispatch-plugins
+        uses: actions/checkout@v4
+        with:
+          path: dispatch-plugins
+
+      - name: Check out Dispatch (for the plugin SDK)
+        uses: actions/checkout@v4
+        with:
+          repository: mdennis281/dispatch
+          ref: ${{ env.DISPATCH_REF }}
+          path: dispatch
+
+      # pnpm before setup-node. Pinned to what Dispatch pins: its
+      # pnpm-workspace.yaml uses settings older pnpm rejects.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      # Dispatch's floor, and the Node the plugins are built for (`node24`).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build @dispatch/shared and @dispatch/plugin-sdk
+        working-directory: dispatch
+        run: |
+          pnpm install --frozen-lockfile --filter "@dispatch/plugin-sdk..."
+          pnpm --filter @dispatch/shared --filter @dispatch/plugin-sdk build
+
+      - name: Install
+        working-directory: dispatch-plugins
+        env:
+          DISPATCH_REPO: ${{ github.workspace }}/dispatch
+        run: |
+          pnpm install --frozen-lockfile
+          test -f .dispatch-sdk/dist/index.js
+
+      - name: Typecheck
+        working-directory: dispatch-plugins
+        run: pnpm typecheck
+
+      - name: Build
+        working-directory: dispatch-plugins
+        run: pnpm build
+
+      # The whole tree, not a pathspec: after install and build the checkout
+      # must be exactly what was committed. A modified, deleted or new file
+      # under a plugin's server/ means its bundle is not what its sources
+      # build. (A wildcard pathspec like 'plugins/*/server' matches no file
+      # under it, which is how this check once passed a stale bundle.)
+      - name: Committed bundles match the rebuild
+        working-directory: dispatch-plugins
+        run: |
+          stale="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$stale" ]; then
+            echo "$stale"
+            git --no-pager diff --stat
+            echo "::error::The rebuild changed committed files. Run pnpm build in each plugin listed and commit its server/index.js."
+            exit 1
+          fi
+
+      # After the freshness check: test/server.test.ts imports the committed
+      # bundle, which by now is known to be the rebuild.
+      - name: Test
+        working-directory: dispatch-plugins
+        run: pnpm test

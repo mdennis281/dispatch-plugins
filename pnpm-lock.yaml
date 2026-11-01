@@ -15,8 +15,8 @@ importers:
         version: 1.17.0
     devDependencies:
       '@dispatch/plugin-sdk':
-        specifier: link:../../../claude-manager/packages/plugin-sdk
-        version: link:../../../claude-manager/packages/plugin-sdk
+        specifier: link:../../.dispatch-sdk
+        version: link:../../.dispatch-sdk
       '@types/node':
         specifier: ^26.1.0
         version: 26.6.5
