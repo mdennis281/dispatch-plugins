@@ -27,9 +27,10 @@ import { isAbsolute, join, resolve } from "node:path";
 /** Pinned so identical trees produce identical commits (see header). */
 const FIXED_DATE = "1700000000 +0000";
 
-export function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}): Promise<string> {
+/** Run git in `cwd`; resolves with its trimmed stdout. `input`, when given, is written to its stdin. */
+export function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}, input?: string): Promise<string> {
   return new Promise((res, rej) => {
-    execFile(
+    const child = execFile(
       "git",
       args,
       {
@@ -43,6 +44,7 @@ export function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}): P
         else res(stdout.trim());
       },
     );
+    if (input !== undefined) child.stdin?.end(input);
   });
 }
 
@@ -94,18 +96,19 @@ export async function snapshot(root: string): Promise<string> {
   }
 }
 
-/** Which of `shas` this repository has as commits. */
+/**
+ * Which of `shas` this repository has as commits (a tag counts as the commit
+ * it points at), in the order asked. ONE `git cat-file --batch-check` for the
+ * lot: the sync asks about every ref the remote has, and a git process per
+ * sha cost seconds per command on Windows.
+ */
 export async function localHas(root: string, shas: string[]): Promise<string[]> {
-  const out: string[] = [];
-  for (const sha of shas) {
-    if (!/^[0-9a-f]{40}$/.test(sha)) continue;
-    const ok = await git(root, ["cat-file", "-e", `${sha}^{commit}`]).then(
-      () => true,
-      () => false,
-    );
-    if (ok) out.push(sha);
-  }
-  return out;
+  const asked = shas.filter((sha) => /^[0-9a-f]{40}$/.test(sha));
+  if (!asked.length) return [];
+  // One answer line per question, in order: `<sha> commit <size>`, or
+  // `<question> missing` for an unknown object or one that is not a commit.
+  const lines = (await git(root, ["cat-file", "--batch-check"], {}, asked.map((sha) => `${sha}^{commit}\n`).join(""))).split("\n");
+  return asked.filter((_, i) => / commit \d+$/.test(lines[i] ?? ""));
 }
 
 /**
