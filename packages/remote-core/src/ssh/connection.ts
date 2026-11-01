@@ -109,8 +109,9 @@ export class SshConnection extends EventEmitter {
     return new Promise((resolve, reject) => {
       client.exec(command, (err, ch) => {
         if (err) return reject(err);
-        let stdout = "";
-        let stderr = "";
+        // Bytes, decoded once at the end: a chunk may end mid-character.
+        const stdout: Buffer[] = [];
+        const stderr: Buffer[] = [];
         let code: number | null = null;
         const timer = opts.timeoutMs
           ? setTimeout(() => {
@@ -118,12 +119,12 @@ export class SshConnection extends EventEmitter {
               reject(new Error(`remote command timed out after ${opts.timeoutMs}ms: ${command.slice(0, 80)}`));
             }, opts.timeoutMs)
           : undefined;
-        ch.on("data", (c: Buffer) => (stdout += c.toString()));
-        ch.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
+        ch.on("data", (c: Buffer) => stdout.push(c));
+        ch.stderr.on("data", (c: Buffer) => stderr.push(c));
         ch.on("exit", (c: number | null) => (code = c));
         ch.on("close", () => {
           if (timer) clearTimeout(timer);
-          resolve({ code, stdout, stderr });
+          resolve({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
         });
         if (opts.stdin) {
           opts.stdin(ch).catch((e: unknown) => {

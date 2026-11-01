@@ -19,6 +19,7 @@ import require$$2 from "dns";
 import require$$0$6 from "events";
 import require$$0$5 from "util";
 import require$$1$2 from "zlib";
+import { StringDecoder } from "node:string_decoder";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { mkdtemp, copyFile, rm, readFile } from "node:fs/promises";
@@ -20132,8 +20133,8 @@ class RemoteShell extends EventEmitter {
         ch.on("error", l);
       }
     };
-    ch.on("data", (c) => this.onStdout(c.toString()));
-    ch.stderr.on("data", (c) => this.stderr.emit("data", c.toString()));
+    ch.on("data", (c) => this.onStdout(this.outText.write(c)));
+    ch.stderr.on("data", (c) => this.onStderr(this.errText.write(c)));
     ch.on("exit", (code) => this.finish(code));
     ch.on("close", () => this.finish(null));
     ch.on("error", (err) => this.emit("error", err));
@@ -20144,7 +20145,18 @@ class RemoteShell extends EventEmitter {
   pid;
   head = "";
   exited = false;
+  /**
+   * One decoder per stream: the channel hands over bytes in whatever pieces
+   * the transport made, and a multi-byte character cut in two decoded as two
+   * U+FFFD when each piece was decoded on its own.
+   */
+  outText = new StringDecoder("utf8");
+  errText = new StringDecoder("utf8");
+  onStderr(text) {
+    if (text) this.stderr.emit("data", text);
+  }
   onStdout(text) {
+    if (!text) return;
     if (this.pid !== void 0) {
       this.stdout.emit("data", text);
       return;
@@ -20162,6 +20174,8 @@ class RemoteShell extends EventEmitter {
   finish(code) {
     if (this.exited) return;
     this.exited = true;
+    this.onStdout(this.outText.end());
+    this.onStderr(this.errText.end());
     this.emit("exit", code);
   }
   kill() {
@@ -20243,19 +20257,19 @@ class SshConnection extends EventEmitter {
     return new Promise((resolve2, reject) => {
       client2.exec(command, (err, ch) => {
         if (err) return reject(err);
-        let stdout = "";
-        let stderr = "";
+        const stdout = [];
+        const stderr = [];
         let code = null;
         const timer = opts.timeoutMs ? setTimeout(() => {
           ch.close();
           reject(new Error(`remote command timed out after ${opts.timeoutMs}ms: ${command.slice(0, 80)}`));
         }, opts.timeoutMs) : void 0;
-        ch.on("data", (c) => stdout += c.toString());
-        ch.stderr.on("data", (c) => stderr += c.toString());
+        ch.on("data", (c) => stdout.push(c));
+        ch.stderr.on("data", (c) => stderr.push(c));
         ch.on("exit", (c) => code = c);
         ch.on("close", () => {
           if (timer) clearTimeout(timer);
-          resolve2({ code, stdout, stderr });
+          resolve2({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
         });
         if (opts.stdin) {
           opts.stdin(ch).catch((e) => {
