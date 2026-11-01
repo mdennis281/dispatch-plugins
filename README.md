@@ -60,13 +60,15 @@ packages/<name>/             code two or more plugins share (none yet)
 
 ## Develop
 
-The plugin SDK (`@dispatch/plugin-sdk`) is not on npm. Packages here depend on it as `link:../../.dispatch-sdk`. That is a gitignored link to a Dispatch checkout's `packages/plugin-sdk`, which `pnpm install` makes (`scripts/link-dispatch-sdk.mjs`). It uses `DISPATCH_REPO` when set. Otherwise it uses a checkout named `claude-manager` or `dispatch` **beside** this repository's primary checkout, which git worktrees of this repository find too.
+The plugin SDK (`@dispatch/plugin-sdk`) is not on npm. Packages here depend on it as `link:../../.dispatch-sdk`. That is a gitignored **copy** of a built Dispatch checkout's `packages/plugin-sdk` (plus `@dispatch/shared` and what they load), which `pnpm install` makes (`scripts/copy-dispatch-sdk.mjs`). The script uses `DISPATCH_REPO` when set. Otherwise it uses a checkout named `claude-manager` or `dispatch` **beside** this repository's primary checkout, which git worktrees of this repository find too. After rebuilding the SDK in Dispatch, run `pnpm install` here again.
+
+It is a copy and not a link on purpose. On Windows, `git worktree remove` walks into junctions, so a worktree holding a link to the Dispatch checkout deleted that checkout's SDK when the worktree was removed. Nothing in this repository may link outside it.
 
 ```bash
 git clone https://github.com/mdennis281/dispatch claude-manager
 cd claude-manager && pnpm install && pnpm --filter @dispatch/shared --filter @dispatch/plugin-sdk build && cd ..
 git clone https://github.com/mdennis281/dispatch-plugins && cd dispatch-plugins
-pnpm install                                   # also links .dispatch-sdk
+pnpm install                                   # also copies the SDK into .dispatch-sdk
 pnpm typecheck && pnpm build && pnpm test      # every plugin; build first, because the tests load the built bundle
 ```
 

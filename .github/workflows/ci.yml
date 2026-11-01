@@ -10,7 +10,7 @@
 # WHERE THE SDK COMES FROM. @dispatch/plugin-sdk is not on npm (Dispatch core
 # E30). The job checks Dispatch out beside this repository, builds
 # @dispatch/shared and @dispatch/plugin-sdk there, and points DISPATCH_REPO at
-# it; scripts/link-dispatch-sdk.mjs (the root pnpm:devPreinstall) does the rest.
+# it; scripts/copy-dispatch-sdk.mjs (the root pnpm:devPreinstall) does the rest.
 #
 # GitHub-hosted runners only. This repository is public, and a self-hosted
 # runner would run any fork's pull request on the home network.
