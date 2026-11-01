@@ -2,7 +2,7 @@
   "name": "@dispatch-plugins/proxmox-terminal",
   "private": true,
   "type": "module",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Run Dispatch chat terminals in a per-chat Proxmox LXC.",
   "scripts": {
     "build": "vite build -c vite.server.config.mjs",

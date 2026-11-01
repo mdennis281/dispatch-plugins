@@ -8,7 +8,7 @@ import { EventEmitter } from "node:events";
 import { createServer, type AddressInfo, type Server } from "node:net";
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2";
 import type { TerminalBackendHandle } from "@dispatch/plugin-sdk";
-import { RemoteShell, remoteShellCommand } from "../shell/remote-shell.js";
+import { RemoteShell, ShellStartError, remoteShellCommand } from "../shell/remote-shell.js";
 import { trustProvisioner, type HostVerifier } from "./host-verifier.js";
 
 export interface SshAuth {
@@ -145,14 +145,42 @@ export class SshConnection extends EventEmitter {
     return r.stdout;
   }
 
-  /** Start a long-lived bash in `cwd` (see {@link remoteShellCommand}). */
-  shell(cwd: string, env: Record<string, string>): Promise<TerminalBackendHandle> {
+  /**
+   * Start a long-lived bash in `cwd` (see {@link remoteShellCommand}).
+   * Resolves once it runs there. REJECTS when `cwd` is missing, the shell
+   * dies first, or it hasn't started within `startTimeoutMs`: a terminal that
+   * can't start where it was asked starts nowhere.
+   */
+  shell(cwd: string, env: Record<string, string>, startTimeoutMs = 30_000): Promise<TerminalBackendHandle> {
     const client = this.requireClient();
     const cmd = remoteShellCommand(cwd, env);
+    const host = this.target.host;
     return new Promise((resolve, reject) => {
       client.exec(cmd, (err, ch) => {
         if (err) return reject(err);
-        resolve(new RemoteShell(ch, cwd, (pid) => this.killSession(pid)));
+        const sh = new RemoteShell(ch, cwd, (pid) => this.killSession(pid));
+        const timer = setTimeout(() => {
+          sh.kill();
+          reject(new Error(`the shell on ${host} did not start within ${startTimeoutMs / 1000}s`));
+        }, startTimeoutMs);
+        sh.ready.then(
+          () => {
+            clearTimeout(timer);
+            resolve(sh);
+          },
+          (e: unknown) => {
+            clearTimeout(timer);
+            sh.kill();
+            reject(
+              e instanceof ShellStartError && e.reason === "no-cwd"
+                ? new Error(
+                    `${cwd} does not exist on ${host}, so the terminal was not started (a directory that is empty ` +
+                      `or git-ignored locally is not synced)`,
+                  )
+                : new Error(`the shell on ${host} ${e instanceof Error ? e.message.replace(/^the shell /, "") : String(e)}`),
+            );
+          },
+        );
       });
     });
   }

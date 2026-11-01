@@ -20116,9 +20116,18 @@ var libExports = requireLib();
 function sq(s) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
+const NO_CWD_EXIT = 97;
 function remoteShellCommand(cwd, env) {
   const exports = Object.entries(env).map(([k, v]) => `export ${k}=${sq(v)};`).join(" ");
-  return `echo "DTPID:$$"; ${exports} cd ${sq(cwd)} 2>/dev/null || cd ~; exec bash --noprofile --norc`;
+  return `${exports} cd ${sq(cwd)} 2>/dev/null || { echo "DTERR:cwd"; exit ${NO_CWD_EXIT}; }; echo "DTPID:$$"; exec bash --noprofile --norc`;
+}
+class ShellStartError extends Error {
+  constructor(reason, code, message) {
+    super(message);
+    this.reason = reason;
+    this.code = code;
+    this.name = "ShellStartError";
+  }
 }
 class RemoteShell extends EventEmitter {
   constructor(ch, cwd, killer) {
@@ -20126,6 +20135,9 @@ class RemoteShell extends EventEmitter {
     this.ch = ch;
     this.cwd = cwd;
     this.killer = killer;
+    this.ready = new Promise((resolve2, reject) => this.settle = { resolve: resolve2, reject });
+    this.ready.catch(() => {
+    });
     this.stdin = {
       write: (chunk) => ch.write(chunk),
       end: () => ch.end(),
@@ -20142,6 +20154,12 @@ class RemoteShell extends EventEmitter {
   stdout = new EventEmitter();
   stderr = new EventEmitter();
   stdin;
+  /**
+   * Settles on the start command's first line: resolves once the shell runs
+   * in `cwd`, rejects with a {@link ShellStartError} when it never will.
+   */
+  ready;
+  settle;
   pid;
   head = "";
   exited = false;
@@ -20164,11 +20182,19 @@ class RemoteShell extends EventEmitter {
     this.head += text;
     const nl = this.head.indexOf("\n");
     if (nl < 0) return;
-    const m = this.head.slice(0, nl).match(/DTPID:(\d+)/);
+    const first = this.head.slice(0, nl);
+    if (/DTERR:cwd/.test(first)) {
+      this.pid = 0;
+      this.head = "";
+      this.settle.reject(new ShellStartError("no-cwd", null, `${this.cwd} does not exist`));
+      return;
+    }
+    const m = first.match(/DTPID:(\d+)/);
     if (m) this.pid = Number(m[1]);
     else this.pid = 0;
     const rest = this.head.slice(m ? nl + 1 : 0);
     this.head = "";
+    this.settle.resolve();
     if (rest) this.stdout.emit("data", rest);
   }
   finish(code) {
@@ -20176,6 +20202,7 @@ class RemoteShell extends EventEmitter {
     this.exited = true;
     this.onStdout(this.outText.end());
     this.onStderr(this.errText.end());
+    this.settle.reject(new ShellStartError("exited", code, `the shell exited before it started (exit ${code ?? "unknown"})`));
     this.emit("exit", code);
   }
   kill() {
@@ -20288,14 +20315,39 @@ class SshConnection extends EventEmitter {
     if (r.code !== 0) throw new Error(`remote \`${command.slice(0, 80)}\` exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
     return r.stdout;
   }
-  /** Start a long-lived bash in `cwd` (see {@link remoteShellCommand}). */
-  shell(cwd, env) {
+  /**
+   * Start a long-lived bash in `cwd` (see {@link remoteShellCommand}).
+   * Resolves once it runs there. REJECTS when `cwd` is missing, the shell
+   * dies first, or it hasn't started within `startTimeoutMs`: a terminal that
+   * can't start where it was asked starts nowhere.
+   */
+  shell(cwd, env, startTimeoutMs = 3e4) {
     const client2 = this.requireClient();
     const cmd = remoteShellCommand(cwd, env);
+    const host = this.target.host;
     return new Promise((resolve2, reject) => {
       client2.exec(cmd, (err, ch) => {
         if (err) return reject(err);
-        resolve2(new RemoteShell(ch, cwd, (pid) => this.killSession(pid)));
+        const sh = new RemoteShell(ch, cwd, (pid) => this.killSession(pid));
+        const timer = setTimeout(() => {
+          sh.kill();
+          reject(new Error(`the shell on ${host} did not start within ${startTimeoutMs / 1e3}s`));
+        }, startTimeoutMs);
+        sh.ready.then(
+          () => {
+            clearTimeout(timer);
+            resolve2(sh);
+          },
+          (e) => {
+            clearTimeout(timer);
+            sh.kill();
+            reject(
+              e instanceof ShellStartError && e.reason === "no-cwd" ? new Error(
+                `${cwd} does not exist on ${host}, so the terminal was not started (a directory that is empty or git-ignored locally is not synced)`
+              ) : new Error(`the shell on ${host} ${e instanceof Error ? e.message.replace(/^the shell /, "") : String(e)}`)
+            );
+          }
+        );
       });
     });
   }

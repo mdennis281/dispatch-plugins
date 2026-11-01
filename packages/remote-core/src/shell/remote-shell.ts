@@ -8,27 +8,54 @@ import type { ClientChannel } from "ssh2";
 import type { TerminalBackendHandle } from "@dispatch/plugin-sdk";
 import { sq } from "./quote.js";
 
+/** How the start command exits when its directory is missing. */
+export const NO_CWD_EXIT = 97;
+
 /**
- * The command that starts the shell. It prints `DTPID:<pid>` first so `kill()`
- * can end its whole session — the shell AND whatever it started — with
- * `pkill -s`. sshd makes the exec'd command a session leader, and `exec bash`
- * keeps the pid, so the session id is that pid.
+ * The command that starts the shell in `cwd`, or refuses to.
+ *
+ * It prints `DTPID:<pid>` once it is in `cwd`, so `kill()` can end its whole
+ * session — the shell AND whatever it started — with `pkill -s`. sshd makes
+ * the exec'd command a session leader, and `exec bash` keeps the pid, so the
+ * session id is that pid.
+ *
+ * A missing `cwd` prints `DTERR:cwd` and exits, and nothing else runs. It
+ * used to `cd ~` instead, and the agent's next command — `rm -rf build`, say
+ * — ran in the home directory.
  */
 export function remoteShellCommand(cwd: string, env: Record<string, string>): string {
   const exports = Object.entries(env)
     .map(([k, v]) => `export ${k}=${sq(v)};`)
     .join(" ");
-  return `echo "DTPID:$$"; ${exports} cd ${sq(cwd)} 2>/dev/null || cd ~; exec bash --noprofile --norc`;
+  return `${exports} cd ${sq(cwd)} 2>/dev/null || { echo "DTERR:cwd"; exit ${NO_CWD_EXIT}; }; echo "DTPID:$$"; exec bash --noprofile --norc`;
+}
+
+/** Why a shell did not start. */
+export class ShellStartError extends Error {
+  constructor(
+    readonly reason: "no-cwd" | "exited",
+    readonly code: number | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ShellStartError";
+  }
 }
 
 /**
  * An exec channel as a `TerminalBackendHandle`. Holds back stdout until the
- * `DTPID:` line has been read, so Dispatch never sees it.
+ * start command's first line has been read, so Dispatch never sees it.
  */
 export class RemoteShell extends EventEmitter implements TerminalBackendHandle {
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
   readonly stdin: TerminalBackendHandle["stdin"];
+  /**
+   * Settles on the start command's first line: resolves once the shell runs
+   * in `cwd`, rejects with a {@link ShellStartError} when it never will.
+   */
+  readonly ready: Promise<void>;
+  private settle!: { resolve: () => void; reject: (err: ShellStartError) => void };
   private pid?: number;
   private head = "";
   private exited = false;
@@ -46,6 +73,8 @@ export class RemoteShell extends EventEmitter implements TerminalBackendHandle {
     private readonly killer: (pid: number) => void,
   ) {
     super();
+    this.ready = new Promise((resolve, reject) => (this.settle = { resolve, reject }));
+    this.ready.catch(() => {}); // a caller that never awaits it must not crash the host
     this.stdin = {
       write: (chunk: string) => ch.write(chunk),
       end: () => ch.end(),
@@ -73,11 +102,19 @@ export class RemoteShell extends EventEmitter implements TerminalBackendHandle {
     this.head += text;
     const nl = this.head.indexOf("\n");
     if (nl < 0) return;
-    const m = this.head.slice(0, nl).match(/DTPID:(\d+)/);
+    const first = this.head.slice(0, nl);
+    if (/DTERR:cwd/.test(first)) {
+      this.pid = 0;
+      this.head = "";
+      this.settle.reject(new ShellStartError("no-cwd", null, `${this.cwd} does not exist`));
+      return;
+    }
+    const m = first.match(/DTPID:(\d+)/);
     if (m) this.pid = Number(m[1]);
     else this.pid = 0;
     const rest = this.head.slice(m ? nl + 1 : 0);
     this.head = "";
+    this.settle.resolve();
     if (rest) this.stdout.emit("data", rest);
   }
 
@@ -88,6 +125,8 @@ export class RemoteShell extends EventEmitter implements TerminalBackendHandle {
     // goes out before the exit, not after it.
     this.onStdout(this.outText.end());
     this.onStderr(this.errText.end());
+    // A no-op once ready has settled.
+    this.settle.reject(new ShellStartError("exited", code, `the shell exited before it started (exit ${code ?? "unknown"})`));
     this.emit("exit", code);
   }
 
