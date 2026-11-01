@@ -1,5 +1,5 @@
 /**
- * One SSH connection per container (ssh2, pure JS — no `ssh.exe`, no OpenSSH
+ * One SSH connection per machine (ssh2, pure JS — no `ssh.exe`, no OpenSSH
  * on the Windows host required). Everything rides it as separate channels:
  * each terminal's shell, every sync's upload, the port probe, and each
  * forwarded TCP connection.
@@ -8,23 +8,27 @@ import { EventEmitter } from "node:events";
 import { createServer, type AddressInfo, type Server } from "node:net";
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2";
 import type { TerminalBackendHandle } from "@dispatch/plugin-sdk";
+import { RemoteShell, remoteShellCommand } from "../shell/remote-shell.js";
+import { trustProvisioner, type HostVerifier } from "./host-verifier.js";
 
-export interface SshTarget {
-  host: string;
-  username: string;
+export interface SshAuth {
   privateKey?: string;
   password?: string;
+}
+
+export interface SshTarget extends SshAuth {
+  host: string;
+  /** Default 22. */
+  port?: number;
+  username: string;
+  /** Whether the key the host presents is the host we meant. Default {@link trustProvisioner}. */
+  hostVerifier?: HostVerifier;
 }
 
 export interface ExecResult {
   code: number | null;
   stdout: string;
   stderr: string;
-}
-
-/** Quote one argument for a POSIX shell. */
-export function sq(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 export class SshConnection extends EventEmitter {
@@ -39,7 +43,7 @@ export class SshConnection extends EventEmitter {
     return Boolean(this.client) && !this.closed;
   }
 
-  /** Connect, retrying while sshd comes up in a freshly started container. */
+  /** Connect, retrying while sshd comes up on a freshly started machine. */
   async connect(deadlineMs: number, signal?: AbortSignal): Promise<void> {
     const until = Date.now() + deadlineMs;
     let last: unknown;
@@ -50,8 +54,9 @@ export class SshConnection extends EventEmitter {
         return;
       } catch (err) {
         last = err;
-        // Auth failures will not fix themselves by waiting.
-        if (err instanceof Error && /authentication/i.test(err.message)) throw err;
+        // Auth failures will not fix themselves by waiting, and a host key
+        // the verifier refused means this address is some other machine.
+        if (err instanceof Error && /authentication|host denied/i.test(err.message)) throw err;
         await new Promise((r) => setTimeout(r, 1_500));
       }
     }
@@ -63,17 +68,12 @@ export class SshConnection extends EventEmitter {
       const client = new Client();
       const cfg: ConnectConfig = {
         host: this.target.host,
-        port: 22,
+        port: this.target.port ?? 22,
         username: this.target.username,
         readyTimeout: 10_000,
         keepaliveInterval: 15_000,
         keepaliveCountMax: 4,
-        // Every container is a fresh linked clone of one template, so they all
-        // present the template's host key and an address DHCP may have handed
-        // to another clone yesterday. There is no stable identity to pin; the
-        // trust anchor is that this plugin created the container a moment ago
-        // through the authenticated Proxmox API and asked it for its address.
-        hostVerifier: () => true,
+        hostVerifier: toSsh2(this.target.hostVerifier ?? trustProvisioner()),
         ...(this.target.privateKey ? { privateKey: this.target.privateKey } : {}),
         ...(this.target.password ? { password: this.target.password } : {}),
       };
@@ -144,19 +144,10 @@ export class SshConnection extends EventEmitter {
     return r.stdout;
   }
 
-  /**
-   * Start a long-lived bash on an exec channel and adapt it to the handle
-   * Dispatch drives. The shell prints `DTPID:<pid>` first so `kill()` can end
-   * its whole session — the shell AND whatever it started — with `pkill -s`.
-   * sshd makes the exec'd command a session leader, and `exec bash` keeps the
-   * pid, so the session id is that pid.
-   */
+  /** Start a long-lived bash in `cwd` (see {@link remoteShellCommand}). */
   shell(cwd: string, env: Record<string, string>): Promise<TerminalBackendHandle> {
     const client = this.requireClient();
-    const exports = Object.entries(env)
-      .map(([k, v]) => `export ${k}=${sq(v)};`)
-      .join(" ");
-    const cmd = `echo "DTPID:$$"; ${exports} cd ${sq(cwd)} 2>/dev/null || cd ~; exec bash --noprofile --norc`;
+    const cmd = remoteShellCommand(cwd, env);
     return new Promise((resolve, reject) => {
       client.exec(cmd, (err, ch) => {
         if (err) return reject(err);
@@ -172,7 +163,7 @@ export class SshConnection extends EventEmitter {
 
   /**
    * Listen on 127.0.0.1:<ephemeral> and pipe each connection to
-   * 127.0.0.1:<remotePort> inside the container. Resolves with the local port.
+   * 127.0.0.1:<remotePort> on the machine. Resolves with the local port.
    */
   forward(remotePort: number, remoteHost = "127.0.0.1"): Promise<{ localPort: number; close: () => void }> {
     return new Promise((resolve, reject) => {
@@ -205,66 +196,20 @@ export class SshConnection extends EventEmitter {
 }
 
 /**
- * An exec channel as a `TerminalBackendHandle`. Holds back stdout until the
- * `DTPID:` line has been read, so Dispatch never sees it.
+ * ssh2's verifier takes `(key, verify)` and accepts a boolean return; a
+ * promise has to answer through `verify`. A verifier that throws or rejects
+ * refuses the host.
  */
-class RemoteShell extends EventEmitter implements TerminalBackendHandle {
-  readonly stdout = new EventEmitter();
-  readonly stderr = new EventEmitter();
-  readonly stdin: TerminalBackendHandle["stdin"];
-  private pid?: number;
-  private head = "";
-  private exited = false;
-
-  constructor(
-    private readonly ch: ClientChannel,
-    readonly cwd: string,
-    private readonly killer: (pid: number) => void,
-  ) {
-    super();
-    this.stdin = {
-      write: (chunk: string) => ch.write(chunk),
-      end: () => ch.end(),
-      on: (_e: "error", l: (err: Error) => void) => {
-        ch.on("error", l);
-      },
-    };
-    ch.on("data", (c: Buffer) => this.onStdout(c.toString()));
-    ch.stderr.on("data", (c: Buffer) => this.stderr.emit("data", c.toString()));
-    ch.on("exit", (code: number | null) => this.finish(code));
-    ch.on("close", () => this.finish(null));
-    ch.on("error", (err: Error) => this.emit("error", err));
-  }
-
-  private onStdout(text: string): void {
-    if (this.pid !== undefined) {
-      this.stdout.emit("data", text);
-      return;
-    }
-    this.head += text;
-    const nl = this.head.indexOf("\n");
-    if (nl < 0) return;
-    const m = this.head.slice(0, nl).match(/DTPID:(\d+)/);
-    if (m) this.pid = Number(m[1]);
-    else this.pid = 0;
-    const rest = this.head.slice(m ? nl + 1 : 0);
-    this.head = "";
-    if (rest) this.stdout.emit("data", rest);
-  }
-
-  private finish(code: number | null): void {
-    if (this.exited) return;
-    this.exited = true;
-    this.emit("exit", code);
-  }
-
-  kill(): void {
-    if (this.pid) this.killer(this.pid);
+function toSsh2(verifier: HostVerifier): ConnectConfig["hostVerifier"] {
+  return ((key: Buffer, verify: (ok: boolean) => void) => {
+    let ret: boolean | Promise<boolean>;
     try {
-      this.ch.close();
+      ret = verifier(key);
     } catch {
-      /* already closed */
+      return false;
     }
-    this.finish(null);
-  }
+    if (typeof ret === "boolean") return ret;
+    ret.then(verify, () => verify(false));
+    return undefined;
+  }) as ConnectConfig["hostVerifier"];
 }

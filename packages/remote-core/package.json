@@ -1,0 +1,26 @@
+{
+  "name": "@dispatch-plugins/remote-core",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "What a Dispatch terminal backend on a remote machine needs: one SSH connection per machine, a synced checkout, port forwarding and a crash-proof cleanup lifecycle.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./vite": "./vite/ssh2.mjs"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ssh2": "^1.16.0"
+  },
+  "devDependencies": {
+    "@dispatch/plugin-sdk": "link:../../.dispatch-sdk",
+    "@types/node": "^26.1.0",
+    "@types/ssh2": "^1.15.4",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT"
+}

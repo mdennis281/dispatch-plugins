@@ -3,6 +3,10 @@
  * outage and a chat that is gone. Proxmox is a stateful fake (containers with
  * a status and a config), so "it was stopped" and "it was never touched" are
  * claims about that state, not about which calls were made.
+ *
+ * The lifecycle itself is remote-core's RemoteChats, tested there against a
+ * fake provider. These run it end to end through the Proxmox provider: the
+ * ownership checks, instance tags and pool listing are Proxmox's.
  */
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -10,10 +14,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { createTestContext } from "@dispatch/plugin-sdk/testing";
+import type { SshConnection } from "@dispatch-plugins/remote-core";
 import { ProxmoxTerminalBackend, describe as describeClone } from "../src/backend.js";
 import { ProxmoxError, type Proxmox } from "../src/proxmox.js";
 import { readSettings } from "../src/settings.js";
-import type { SshConnection } from "../src/ssh.js";
 
 interface Ct {
   status: "running" | "stopped";

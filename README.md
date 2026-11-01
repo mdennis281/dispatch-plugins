@@ -50,7 +50,8 @@ Settings, the enabled switch, secrets and the plugin's kv store (which records t
 dispatch-plugins.yaml        which directories are plugins; Dispatch lists exactly these
 plugins/<name>/              one plugin: plugin.yaml, README, LICENSE, src/, test/, and
   server/index.js            its BUILT server module, committed
-packages/<name>/             code two or more plugins share (none yet)
+packages/<name>/             code two or more plugins share; remote-core is the SSH,
+                             sync, ports and cleanup half of a remote terminal backend
 ```
 
 - **A plugin directory stands alone.** Dispatch installs it with no `node_modules` and nothing from outside it, so it carries its own `README.md` and `LICENSE`, and its built output.

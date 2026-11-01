@@ -8,7 +8,7 @@ importers:
 
   .: {}
 
-  plugins/proxmox-terminal:
+  packages/remote-core:
     dependencies:
       ssh2:
         specifier: ^1.16.0
@@ -23,6 +23,25 @@ importers:
       '@types/ssh2':
         specifier: ^1.15.4
         version: 1.15.6
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.12(@types/node@26.6.5)(vite@6.4.5(@types/node@26.6.5))
+
+  plugins/proxmox-terminal:
+    dependencies:
+      '@dispatch-plugins/remote-core':
+        specifier: workspace:*
+        version: link:../../packages/remote-core
+    devDependencies:
+      '@dispatch/plugin-sdk':
+        specifier: link:../../.dispatch-sdk
+        version: link:../../.dispatch-sdk
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.6.5
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
