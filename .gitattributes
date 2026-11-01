@@ -1,0 +1,14 @@
+# Check text files out with LF everywhere, Windows included.
+#
+# plugins/*/server/index.js is committed build output, and CI rebuilds it on
+# Linux and fails when the two differ. With core.autocrlf=true and no
+# attributes, a Windows checkout turned the sources and the committed bundle
+# CRLF while vite writes LF, so a rebuild that matched the commit byte for byte
+# still showed as modified. LF on every checkout makes the local rebuild the
+# same file CI builds.
+* text=auto eol=lf
+
+*.png binary
+
+# Built output: collapsed in GitHub's diffs, left out of language stats.
+plugins/*/server/index.js linguist-generated=true

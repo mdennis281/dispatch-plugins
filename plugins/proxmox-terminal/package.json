@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@dispatch/plugin-sdk": "link:../../../claude-manager/packages/plugin-sdk",
+    "@dispatch/plugin-sdk": "link:../../.dispatch-sdk",
     "@types/node": "^26.1.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
