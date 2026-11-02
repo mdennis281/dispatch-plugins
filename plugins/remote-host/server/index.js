@@ -22173,9 +22173,9 @@ async function unkeep(root, env, only) {
     const tag2 = item[0];
     if (!tag2 || item[1] !== " " || tag2 === tag2.toUpperCase() && tag2 !== "S") continue;
     const p = item.slice(2);
-    if (only && !only.has(p) || await onDisk(root, p) !== "file") continue;
+    if (only && !only.has(p)) continue;
     if (tag2 !== tag2.toUpperCase()) assumed.push(p);
-    if (tag2.toUpperCase() === "S") skipped.push(p);
+    if (tag2.toUpperCase() === "S" && await onDisk(root, p) === "file") skipped.push(p);
   }
   if (assumed.length) await git(root, ["update-index", "--no-assume-unchanged", "-z", "--stdin"], env, assumed.join("\0") + "\0");
   if (skipped.length) await git(root, ["update-index", "--no-skip-worktree", "-z", "--stdin"], env, skipped.join("\0") + "\0");
@@ -22200,7 +22200,10 @@ async function snapshotWorktree(root, opts) {
     }
     const left = [...tooBig.map((b) => b.path), ...opts.exclude ?? []];
     const spec = [".", ...left.map((p) => `:(exclude,literal)${p}`)].join("\0") + "\0";
-    await git(root, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], env, spec);
+    const add = (more) => git(root, ["add", "-A", ...more, "--pathspec-from-file=-", "--pathspec-file-nul"], env, spec);
+    if (await git(root, ["config", "--bool", "core.sparseCheckout"]).catch(() => "") === "true") {
+      await add(["--sparse"]).catch((err) => /unknown option|usage: git add/i.test(String(err)) ? add([]) : Promise.reject(err));
+    } else await add([]);
     const overlay = new Map(Object.entries(opts.overlay ?? {}));
     const pins = new Map(Object.entries(opts.pins ?? {}));
     const pinned = [];

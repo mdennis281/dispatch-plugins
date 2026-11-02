@@ -583,6 +583,25 @@ describe.skipIf(!SH)("never losing a file", () => {
     expect(g(t.local, "ls-files", "-v", "cfg.json", "sw.json")).toBe("h cfg.json\nS sw.json");
   });
 
+  it("never overwrites a local edit to a file outside a sparse checkout's cone", async () => {
+    const t = setup();
+    mkdirSync(join(t.local, "docs"));
+    writeFileSync(join(t.local, "docs", "x.md"), "doc\n");
+    g(t.local, "add", "docs/x.md");
+    g(t.local, "commit", "-qm", "docs");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    g(t.local, "sparse-checkout", "set", "--cone", "src");
+    expect(existsSync(join(t.local, "docs", "x.md"))).toBe(false);
+    // Brought back by hand, and edited.
+    mkdirSync(join(t.local, "docs"), { recursive: true });
+    writeFileSync(join(t.local, "docs", "x.md"), "my edit\n");
+    writeFileSync(`${t.work}/docs/x.md`, "machine\n");
+    expect(text(await s.afterRun(after(r1)))).toMatch(/won't run until this is settled/);
+    expect(read(join(t.local, "docs", "x.md"))).toBe("my edit\n");
+  });
+
   it("rebuilds a checkout that lost its HEAD before checking anything out over it", async () => {
     const t = setup();
     const s = t.mk();

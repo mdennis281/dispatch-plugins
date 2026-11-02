@@ -112,11 +112,11 @@ async function withTempIndex<T>(fn: (env: { GIT_INDEX_FILE: string }) => Promise
 }
 
 /**
- * In a temp index, take assume-unchanged and skip-worktree off each entry
- * whose file is on disk (of `only`, when given). With them `add` trusts the
- * entry, so a local edit to a file kept out of commits that way would read
- * as unchanged, and be overwritten. A skip-worktree entry with no file (a
- * sparse checkout) keeps its bit, so it doesn't read as deleted.
+ * In a temp index, take assume-unchanged off each entry, and skip-worktree
+ * off each whose file is on disk (of `only`, when given). With them `add`
+ * trusts the entry, so a local edit to a file kept out of commits that way
+ * would read as unchanged, and be overwritten. A skip-worktree entry with no
+ * file (a sparse checkout) keeps its bit, so it doesn't read as deleted.
  */
 async function unkeep(root: string, env: { GIT_INDEX_FILE: string }, only?: ReadonlySet<string>): Promise<void> {
   const assumed: string[] = [];
@@ -126,9 +126,9 @@ async function unkeep(root: string, env: { GIT_INDEX_FILE: string }, only?: Read
     const tag = item[0];
     if (!tag || item[1] !== " " || (tag === tag.toUpperCase() && tag !== "S")) continue;
     const p = item.slice(2);
-    if ((only && !only.has(p)) || (await onDisk(root, p)) !== "file") continue;
+    if (only && !only.has(p)) continue;
     if (tag !== tag.toUpperCase()) assumed.push(p);
-    if (tag.toUpperCase() === "S") skipped.push(p);
+    if (tag.toUpperCase() === "S" && (await onDisk(root, p)) === "file") skipped.push(p);
   }
   if (assumed.length) await git(root, ["update-index", "--no-assume-unchanged", "-z", "--stdin"], env, assumed.join("\0") + "\0");
   if (skipped.length) await git(root, ["update-index", "--no-skip-worktree", "-z", "--stdin"], env, skipped.join("\0") + "\0");
@@ -159,7 +159,12 @@ export async function snapshotWorktree(root: string, opts: SnapshotOptions): Pro
     }
     const left = [...tooBig.map((b) => b.path), ...(opts.exclude ?? [])];
     const spec = [".", ...left.map((p) => `:(exclude,literal)${p}`)].join("\0") + "\0";
-    await git(root, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], env, spec);
+    const add = (more: string[]) => git(root, ["add", "-A", ...more, "--pathspec-from-file=-", "--pathspec-file-nul"], env, spec);
+    // In a sparse checkout `add` leaves paths outside the cone alone, even a
+    // file there edited by hand: --sparse (git 2.34+; older git has no cone).
+    if ((await git(root, ["config", "--bool", "core.sparseCheckout"]).catch(() => "")) === "true") {
+      await add(["--sparse"]).catch((err: unknown) => (/unknown option|usage: git add/i.test(String(err)) ? add([]) : Promise.reject(err)));
+    } else await add([]);
 
     const overlay = new Map(Object.entries(opts.overlay ?? {}));
     const pins = new Map(Object.entries(opts.pins ?? {}));
