@@ -111,9 +111,9 @@ jobs:
 
   # dispatch-host runs on the user's Macs, so its process handling (BSD ps,
   # pgrep -s, lsof, /bin/bash 3.2, shasum) is tested on macOS too, not only
-  # on Linux, and so is remote-host's end-to-end test (a real SSH server and
-  # dispatch-host) and the scripts it runs there under zsh. The bundles are
-  # checked above.
+  # on Linux. So are remote-host's end-to-end test (a real SSH server and
+  # dispatch-host) and its authorized_keys scripts; the pasted one-liner is
+  # also run under zsh, macOS's login shell. The bundles are checked above.
   host-agent-macos:
     name: host-agent and remote-host on macOS
     runs-on: macos-latest
