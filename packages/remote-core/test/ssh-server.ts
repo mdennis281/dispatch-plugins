@@ -38,6 +38,8 @@ export interface TestSshServerOptions {
   exec?: (req: ExecRequest) => void;
   /** Allow `direct-tcpip` (local forwards) to 127.0.0.1. Default true. */
   allowForwards?: boolean;
+  /** Refuse a session past this many open at once on one connection, like sshd's `MaxSessions` (10). Default: no limit. */
+  maxSessions?: number;
 }
 
 export interface TestSshServer {
@@ -103,9 +105,13 @@ export async function startTestSshServer(opts: TestSshServerOptions = {}): Promi
           return ctx.reject(methods);
       }
     });
+    let sessions = 0;
     client.on("ready", () => {
-      client.on("session", (acceptSession) => {
+      client.on("session", (acceptSession, rejectSession) => {
+        if (opts.maxSessions !== undefined && sessions >= opts.maxSessions) return rejectSession();
+        sessions++;
         const session = acceptSession();
+        session.once("close", () => sessions--);
         session.on("exec", (accept, _reject, info) => {
           const channel = accept();
           execs.push(info.command);

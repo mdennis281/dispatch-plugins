@@ -29,6 +29,11 @@ export interface SshTarget extends SshAuth {
    * key per type, and which one it shows depends on what was negotiated.
    */
   algorithms?: ConnectConfig["algorithms"];
+  /**
+   * How quickly a silent connection is given up on: a keepalive every
+   * `intervalMs`, dropped after `countMax` unanswered. Default 15 s × 4.
+   */
+  keepalive?: { intervalMs: number; countMax: number };
 }
 
 export interface ExecResult {
@@ -82,8 +87,8 @@ export class SshConnection extends EventEmitter {
         port: this.target.port ?? 22,
         username: this.target.username,
         readyTimeout: 10_000,
-        keepaliveInterval: 15_000,
-        keepaliveCountMax: 4,
+        keepaliveInterval: this.target.keepalive?.intervalMs ?? 15_000,
+        keepaliveCountMax: this.target.keepalive?.countMax ?? 4,
         hostVerifier: toSsh2(this.target.hostVerifier ?? trustProvisioner()),
         ...(this.target.algorithms ? { algorithms: this.target.algorithms } : {}),
         ...(this.target.privateKey ? { privateKey: this.target.privateKey } : {}),
