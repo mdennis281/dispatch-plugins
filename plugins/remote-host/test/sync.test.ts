@@ -7,12 +7,12 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TerminalAfterRunInfo, TerminalRunInfo } from "@dispatch/plugin-sdk";
-import { within } from "../src/backend.js";
+import { repoTop, within } from "../src/backend.js";
 import { ChatSync, type ChatSyncDeps } from "../src/sync/chat-sync.js";
-import { batches, parseRawDiff } from "../src/sync/local.js";
+import { batches, parseRawDiff, pathProblem } from "../src/sync/local.js";
 import { SH, localRemote } from "./local-remote.js";
 
 const win = process.platform === "win32";
@@ -196,7 +196,7 @@ describe.skipIf(!SH)("bringing changes back", () => {
     const r1 = run();
     await s.beforeRun(r1);
     writeFileSync(`${t.work}/trace.json`, Buffer.alloc(8192, 50));
-    expect(text(await s.afterRun(after(r1)))).toMatch(/too big to bring back \(over 1 KB\), and stay only there: trace\.json \(8 KB\)/);
+    expect(text(await s.afterRun(after(r1)))).toMatch(/not brought back, and left as they are on both sides: trace\.json \(too big to bring back, 8 KB\)/);
     expect(existsSync(join(t.local, "trace.json"))).toBe(false);
     writeFileSync(join(t.local, "a.txt"), "push something\n");
     expect(await s.beforeRun(run())).toEqual({});
@@ -258,6 +258,112 @@ describe.skipIf(!SH)("conflicts", () => {
   });
 });
 
+describe.skipIf(!SH)("never losing a file", () => {
+  it("leaves alone a file the machine makes where this computer has an ignored one", async () => {
+    const t = setup();
+    writeFileSync(join(t.local, ".git", "info", "exclude"), "secret.env\n");
+    writeFileSync(join(t.local, "secret.env"), "TOKEN=local-real\n");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/secret.env`, "TOKEN=placeholder\n");
+    expect(text(await s.afterRun(after(r1)))).toMatch(/not brought back.*secret\.env \(here it is a file that isn't synced/);
+    expect(read(join(t.local, "secret.env"))).toBe("TOKEN=local-real\n");
+    writeFileSync(join(t.local, "a.txt"), "push something\n");
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+    expect(readFileSync(`${t.work}/secret.env`, "utf8")).toBe("TOKEN=placeholder\n");
+  });
+
+  it("leaves alone a file the machine makes where this computer has one too big to send", async () => {
+    const t = setup();
+    writeFileSync(join(t.local, "data.db"), Buffer.alloc(8192, 7));
+    const s = t.mk({ capBytes: 1024 });
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/data.db`, "small\n");
+    expect(text(await s.afterRun(after(r1)))).toMatch(/not brought back.*data\.db/);
+    expect(readFileSync(join(t.local, "data.db"))).toEqual(Buffer.alloc(8192, 7));
+  });
+
+  it("never overwrites an edit made here while the machine's changes were on their way", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run({ command: "fmt" });
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/a.txt`, "formatted there\n");
+    t.remote.before = (script) => {
+      if (script.includes("pack-objects --stdout") && !script.includes("--revs")) writeFileSync(join(t.local, "a.txt"), "edited here meanwhile\n");
+    };
+    const a = await s.afterRun(after(r1));
+    t.remote.before = undefined;
+    expect(read(join(t.local, "a.txt"))).toBe("edited here meanwhile\n");
+    expect(read(join(t.local, "a.txt.from-test-mac"))).toBe("formatted there\n");
+    expect(text(a)).toMatch(/next command won't run until this is settled/);
+  });
+
+  it("never replaces a file here with a directory from there, or the reverse", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    // There, the file becomes a directory; here, the file is edited.
+    rmSync(`${t.work}/a.txt`);
+    mkdirSync(`${t.work}/a.txt`);
+    writeFileSync(`${t.work}/a.txt/inner.txt`, "inside\n");
+    writeFileSync(join(t.local, "a.txt"), "my edit\n");
+    const a = await s.afterRun(after(r1));
+    expect(text(a)).toMatch(/a\.txt\/inner\.txt \(a\.txt is a file here\)/);
+    expect(read(join(t.local, "a.txt"))).toBe("my edit\n");
+    // The push doesn't flatten their directory either: it says what to rename.
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toMatch(/already on the machine, outside the sync: a\.txt \(a directory there\)/);
+    expect(readFileSync(`${t.work}/a.txt/inner.txt`, "utf8")).toBe("inside\n");
+  });
+
+  it("turns a file the machine has outside the sync (ignored there) into a conflict instead of overwriting it", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    writeFileSync(`${t.work}/.git/info/exclude`, "local.env\n");
+    writeFileSync(`${t.work}/local.env`, "THEIRS=1\n");
+    writeFileSync(join(t.local, "local.env"), "MINE=1\n");
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toMatch(/^Not run: a conflict with Test Mac.*`local\.env` \(theirs: `local\.env\.from-test-mac`\)/s);
+    expect(readFileSync(`${t.work}/local.env`, "utf8")).toBe("THEIRS=1\n");
+    expect(read(join(t.local, "local.env.from-test-mac"))).toBe("THEIRS=1\n");
+    rmSync(join(t.local, "local.env.from-test-mac"));
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+    expect(readFileSync(`${t.work}/local.env`, "utf8")).toBe("MINE=1\n");
+  });
+
+  it("sends a file made there back unchanged, CRLF and all", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/run.bat`, "echo hi\r\necho there\r\n");
+    await s.afterRun(after(r1));
+    writeFileSync(join(t.local, "a.txt"), "push something\n");
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+    expect(readFileSync(`${t.work}/run.bat`, "utf8")).toBe("echo hi\r\necho there\r\n");
+    expect(await s.beforeRun(run())).toEqual({});
+  });
+
+  it("rebuilds a checkout whose .git a command removed, keeping what changed there", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/a.txt`, "edited there\n");
+    rmSync(`${t.work}/.git`, { recursive: true, force: true });
+    const a = await s.afterRun(after(r1));
+    expect(text(a)).toMatch(/\.git there was gone .* rebuilt/);
+    expect(read(join(t.local, "a.txt"))).toBe("edited there\n");
+  });
+});
+
 describe.skipIf(!SH)("the checkout lock", () => {
   it("refuses a command in another terminal while one runs in the foreground, and not after", async () => {
     const t = setup();
@@ -269,6 +375,26 @@ describe.skipIf(!SH)("the checkout lock", () => {
     // A background command doesn't hold it.
     expect((await s.beforeRun(run({ terminal: "server", background: true }))).refuse).toBeUndefined();
     expect((await s.beforeRun(run({ terminal: "main" }))).refuse).toBeUndefined();
+  });
+
+  it("is kept while a command that timed out may still be running, until its shell ends", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run({ terminal: "main", command: "pnpm build" });
+    await s.beforeRun(r1);
+    await s.afterRun({ ...after(r1), outcome: "timed-out" });
+    expect((await s.beforeRun(run({ terminal: "server" }))).refuse).toMatch(/"main", `pnpm build` timed out and may still be running/);
+    s.releaseTerminal("main");
+    expect((await s.beforeRun(run({ terminal: "server" }))).refuse).toBeUndefined();
+  });
+
+  it("isn't taken by a run core gave up on while it synced", async () => {
+    const t = setup();
+    const s = t.mk();
+    const ac = new AbortController();
+    ac.abort();
+    expect((await s.beforeRun(run({ terminal: "main", signal: ac.signal }))).refuse).toMatch(/cancelled/);
+    expect((await s.beforeRun(run({ terminal: "server" }))).refuse).toBeUndefined();
   });
 });
 
@@ -322,6 +448,26 @@ describe("pieces", () => {
     expect(within(r, r)).toBe("");
     expect(within(r, join(tmpdir(), "repo-other"))).toBe("");
     expect(within(r, tmpdir())).toBe("");
+  });
+
+  it("refuses paths that can't be written here safely", async () => {
+    const r = mkdtempSync(join(tmpdir(), "rh-paths-"));
+    dirs.push(r);
+    writeFileSync(join(r, "file"), "x");
+    for (const p of [".git/config", "src/.GIT/x", "GIT~1/HEAD", "../out", "a//b", "/abs"]) expect(await pathProblem(r, p, false), p).toBeDefined();
+    for (const p of ["a:b.txt", "con.txt", "dir/NUL", "foo.", "bar ", "q?x"]) expect(await pathProblem(r, p, true), p).toMatch(/Windows/);
+    expect(await pathProblem(r, "file/inner", false)).toBe("file is a file here");
+    expect(await pathProblem(r, "src/new.ts", false)).toBeUndefined();
+    expect(await pathProblem(r, "a:b.txt", false)).toBeUndefined();
+  });
+
+  it("syncs a repository from its top, and nothing outside one", async () => {
+    const t = setup();
+    expect(await repoTop(join(t.local, "src"))).toBe(resolve(t.local));
+    const plain = mkdtempSync(join(tmpdir(), "rh-plain-"));
+    dirs.push(plain);
+    expect(await repoTop(plain)).toBeUndefined();
+    expect(await repoTop(undefined)).toBeUndefined();
   });
 
   it("batches by size, never leaving a batch empty", () => {

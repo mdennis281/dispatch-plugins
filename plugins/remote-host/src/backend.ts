@@ -11,7 +11,7 @@
  * starts there, and a command whose files can't be synced doesn't run.
  */
 import { randomBytes } from "node:crypto";
-import { isAbsolute, posix, relative } from "node:path";
+import { isAbsolute, posix, relative, resolve } from "node:path";
 import type {
   PluginContext,
   PluginLog,
@@ -24,7 +24,7 @@ import type {
   TerminalSpawnInfo,
 } from "@dispatch/plugin-sdk";
 import { assertId, chatWorktreePath, instanceLayout, sq, type ProbeResult } from "@dispatch-plugins/host-agent";
-import { errText } from "@dispatch-plugins/remote-core";
+import { errText, git } from "@dispatch-plugins/remote-core";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
 import type { HostLink } from "./link.js";
@@ -73,7 +73,7 @@ export class HostBackend implements TerminalBackend {
     // In a repository, the shell starts at the same place in the chat's
     // checkout there. The checkout itself is filled by the first command's
     // sync, not here: spawn stays quick.
-    const root = info.worktreePath ?? info.repoPath;
+    const root = await repoTop(info.worktreePath ?? info.repoPath);
     const cwd = root
       ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, info.cwd))
       : chatDir(linked.paths, this.deps.instanceId, chatId);
@@ -99,6 +99,8 @@ export class HostBackend implements TerminalBackend {
     this.shells.set(key, sh);
     sh.on("exit", () => {
       if (this.shells.get(key) === sh) this.shells.delete(key);
+      // Whatever it was running is over, so it no longer holds the checkout.
+      this.syncs.get(chatId)?.releaseTerminal(info.name);
     });
     return sh;
   }
@@ -173,6 +175,17 @@ export class HostBackend implements TerminalBackend {
 /** A chat's directory on the machine: its checkouts are inside, and a chat outside a repository starts here. */
 export function chatDir(paths: HostPaths, instanceId: string, chatId: string): string {
   return posix.join(instanceLayout(paths.root, instanceId).chatsDir, assertId("chat", chatId));
+}
+
+/**
+ * The top of the git repository `dir` is in, or undefined outside one: a
+ * chat with no repository (or a project folder that isn't one) isn't synced,
+ * and a sub-directory never stands in for its repository.
+ */
+export async function repoTop(dir: string | undefined): Promise<string | undefined> {
+  if (!dir) return undefined;
+  const top = await git(dir, ["rev-parse", "--show-toplevel"]).catch(() => "");
+  return top ? resolve(top) : undefined;
 }
 
 /** `cwd` relative to `root`, POSIX-style; "" for the root itself or anywhere outside it. */

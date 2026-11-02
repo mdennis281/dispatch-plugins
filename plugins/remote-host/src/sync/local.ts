@@ -11,7 +11,7 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
@@ -48,6 +48,19 @@ export interface Snapshot {
   tree: string;
   /** Untracked files left out for being over the size cap. */
   tooBig: Array<{ path: string; size: number }>;
+  /** Pins that applied (their file is still as written); the rest are stale. */
+  pinned: string[];
+}
+
+/**
+ * A file written here from the machine's blob that hashes differently here
+ * (CRLF content under autocrlf, say). While the file still hashes to `local`,
+ * the snapshot says `host`: it is the same file, and sending it back would
+ * rewrite the machine's.
+ */
+export interface Pin {
+  local: string;
+  host: string;
 }
 
 export interface SnapshotOptions {
@@ -57,6 +70,7 @@ export interface SnapshotOptions {
   exclude?: readonly string[];
   /** Modes the local filesystem can't hold (an exec bit, a symlink on Windows), by path. */
   overlay?: Readonly<Record<string, string>>;
+  pins?: Readonly<Record<string, Pin>>;
 }
 
 export function isAbsent(e: Entry): boolean {
@@ -122,22 +136,104 @@ export async function snapshotWorktree(root: string, opts: SnapshotOptions): Pro
     const spec = [".", ...left.map((p) => `:(exclude,literal)${p}`)].join("\0") + "\0";
     await git(root, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], env, spec);
 
-    const overlay = Object.entries(opts.overlay ?? {});
-    if (overlay.length) {
-      const want = new Map(overlay);
+    const overlay = new Map(Object.entries(opts.overlay ?? {}));
+    const pins = new Map(Object.entries(opts.pins ?? {}));
+    const pinned: string[] = [];
+    if (overlay.size || pins.size) {
       const listed = (await git(root, ["ls-files", "-s", "-z"], env)).split("\0").filter(Boolean);
       const fix: string[] = [];
       for (const line of listed) {
         const m = line.match(/^(\d{6}) ([0-9a-f]{40}) \d\t([\s\S]*)$/);
         if (!m) continue;
-        const mode = want.get(m[3]!);
-        if (mode && mode !== m[1]) fix.push(`${mode} ${m[2]}\t${m[3]}`);
+        const [, mode0, sha0, path] = m as unknown as [string, string, string, string];
+        const pin = pins.get(path);
+        const sha = pin && pin.local === sha0 ? pin.host : sha0;
+        if (sha !== sha0) pinned.push(path);
+        const mode = overlay.get(path) ?? mode0;
+        if (mode !== mode0 || sha !== sha0) fix.push(`${mode} ${sha}\t${path}`);
       }
       if (fix.length) await git(root, ["update-index", "-z", "--index-info"], env, fix.join("\0") + "\0");
     }
     const tree = await git(root, ["write-tree"], env);
-    return { tree, commit: await commitFor(root, tree), tooBig };
+    return { tree, commit: await commitFor(root, tree), tooBig, pinned };
   });
+}
+
+/**
+ * Why `p`, a path the machine reported, can't be written or deleted here
+ * safely; undefined when it can. Git refuses some of these itself, but a
+ * delete is ours, and a machine is not trusted to keep to git's rules.
+ */
+export async function pathProblem(root: string, p: string, win = process.platform === "win32"): Promise<string | undefined> {
+  const parts = p.split("/");
+  if (!p || p.startsWith("/") || parts.some((s) => s === "" || s === "." || s === "..")) return "not a plain relative path";
+  if (parts.some((s) => /^\.git$/i.test(s) || /^git~\d+$/i.test(s))) return "inside .git";
+  if (win) {
+    const bad = parts.find(
+      (s) => /[<>:"|?*\\\x00-\x1f]/.test(s) || /[. ]$/.test(s) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(s),
+    );
+    if (bad !== undefined) return `"${bad}" is not a valid file name on Windows`;
+  }
+  // Every directory on the way must be a real directory (or not there yet):
+  // never write or delete through a symlink, never replace a file by a folder.
+  let at = resolve(root);
+  for (const s of parts.slice(0, -1)) {
+    at = join(at, s);
+    const st = await lstat(at).catch(() => undefined);
+    if (!st) break;
+    if (st.isSymbolicLink()) return `${relPosix(root, at)} is a symlink here`;
+    if (!st.isDirectory()) return `${relPosix(root, at)} is a file here`;
+  }
+  const st = await lstat(join(root, ...parts)).catch(() => undefined);
+  if (st?.isDirectory()) return "it is a directory here";
+  return undefined;
+}
+
+function relPosix(root: string, abs: string): string {
+  return abs.slice(resolve(root).length + 1).split(sep).join("/");
+}
+
+/**
+ * What each path holds here right now, as the blob `git add` would make of it
+ * (null when there is nothing there, "dir" for a directory). Read at the last
+ * moment before a write, so an edit made since the snapshot is seen.
+ */
+export async function localBlobs(root: string, paths: readonly string[]): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const files: string[] = [];
+  for (const p of paths) {
+    const st = await lstat(join(root, ...p.split("/"))).catch(() => undefined);
+    if (!st) out.set(p, null);
+    else if (st.isDirectory()) out.set(p, "dir");
+    else if (st.isSymbolicLink()) out.set(p, blobSha(Buffer.from(await readlink(join(root, ...p.split("/"))))));
+    else files.push(p);
+  }
+  if (files.length) {
+    const shas = (await git(root, ["hash-object", "--stdin-paths"], {}, files.join("\n") + "\n")).split("\n");
+    files.forEach((p, i) => out.set(p, shas[i] ?? null));
+  }
+  return out;
+}
+
+function blobSha(content: Buffer): string {
+  return createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
+}
+
+/** Which of `paths` this worktree's ignore rules ignore. */
+export async function ignoredPaths(root: string, paths: readonly string[]): Promise<Set<string>> {
+  if (!paths.length) return new Set();
+  // Exit 1 means "none ignored", which `git()` would call a failure.
+  const out = await git(root, ["check-ignore", "-z", "--no-index", "--stdin"], {}, paths.join("\0") + "\0").catch(() => "");
+  return new Set(out.split("\0").filter(Boolean));
+}
+
+/** Give `p` the exec bit of `mode` here (a filesystem that holds one). */
+export async function setExec(root: string, p: string, mode: string): Promise<void> {
+  const abs = inside(root, p);
+  const st = await lstat(abs).catch(() => undefined);
+  if (!st?.isFile()) return;
+  const m = st.mode & 0o777;
+  await chmod(abs, mode === "100755" ? m | ((m & 0o444) >> 2) : m & ~0o111);
 }
 
 export async function diffTrees(root: string, a: string, b: string): Promise<Change[]> {
@@ -254,16 +350,31 @@ export function inside(root: string, p: string): string {
 /**
  * Write the blobs of `writes` into the worktree the way a checkout would
  * (line endings, symlinks as this filesystem allows), and delete `deletes`.
- * Through a temp index: the real one is never touched.
+ * Through a temp index: the real one is never touched. Returns what couldn't
+ * be done, path by path, rather than failing the lot.
  */
-export async function writeWorktree(root: string, writes: ReadonlyArray<{ path: string } & Entry>, deletes: readonly string[]): Promise<void> {
-  for (const p of deletes) await rm(inside(root, p), { force: true });
-  if (!writes.length) return;
+export async function writeWorktree(
+  root: string,
+  writes: ReadonlyArray<{ path: string } & Entry>,
+  deletes: readonly string[],
+): Promise<Array<{ path: string; why: string }>> {
+  const failed: Array<{ path: string; why: string }> = [];
+  for (const p of deletes) {
+    await rm(inside(root, p), { force: true }).catch((err: unknown) => failed.push({ path: p, why: String((err as Error).message ?? err) }));
+  }
+  if (!writes.length) return failed;
   for (const w of writes) inside(root, w.path);
-  await withTempIndex(async (env) => {
-    await git(root, ["update-index", "-z", "--index-info"], env, writes.map((w) => `${w.mode} ${w.sha}\t${w.path}`).join("\0") + "\0");
-    await git(root, ["checkout-index", "-f", "-z", "--stdin"], env, writes.map((w) => w.path).join("\0") + "\0");
-  });
+  const checkout = (ws: ReadonlyArray<{ path: string } & Entry>) =>
+    withTempIndex(async (env) => {
+      await git(root, ["update-index", "-z", "--index-info"], env, ws.map((w) => `${w.mode} ${w.sha}\t${w.path}`).join("\0") + "\0");
+      await git(root, ["checkout-index", "-f", "-z", "--stdin"], env, ws.map((w) => w.path).join("\0") + "\0");
+    });
+  try {
+    await checkout(writes);
+  } catch {
+    for (const w of writes) await checkout([w]).catch((err: unknown) => failed.push({ path: w.path, why: String((err as Error).message ?? err) }));
+  }
+  return failed;
 }
 
 /** A blob as a checkout would write it at `path`, saved at `to` instead. */

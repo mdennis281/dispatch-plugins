@@ -62,16 +62,18 @@ A chat working in a git repository gets its own checkout on the machine, `~/.dis
 - One bare repository per local repository is shared by every chat's checkout on that machine, so a second chat sends almost nothing.
 
 **When it refuses (the command doesn't run, and the agent is told why):**
-- **A conflict.** A file changed both there and here since the last sync. The machine's version is saved beside yours as `<file>.from-<machine>`, which is never synced. Merge what you want into your file and delete the copy; your version then goes there. To keep the machine's version, move the copy over your file.
-- **The checkout is busy.** Another terminal of the same chat is running a command there, so files can't change under it. Background commands (dev servers, watchers) don't hold it.
+- **A conflict.** A file changed both there and here since the last sync. The machine's version is saved beside yours as `<file>.from-<machine>`, which is never synced. Merge what you want into your file and delete the copy; your version then goes there. To keep the machine's version, move the copy over your file. The same happens when your files add a path the machine already has outside the sync (a file ignored there, say): it is never overwritten.
+- **The checkout is busy.** Another terminal of the same chat is running a command there, so files can't change under it. A command that timed out or was cancelled still holds it, because it may still be running, until that terminal runs something else or its shell ends. Background commands (dev servers, watchers) don't hold it.
 - **A file changed there mid-sync.** It is never overwritten; run the command again and it comes back first.
 - **The sync failed**, or the machine is offline.
+
+**Never overwritten, on either side:** each file is checked against what it holds at the moment of writing, not only against the snapshot. An edit made here while the machine's changes were on their way becomes a conflict. Some changes there are set aside instead: left as they are on both sides, and reported once. That covers a file here that git doesn't sync (ignored, or too big to send), a directory where a file goes or the reverse, a name Windows can't hold, and anything inside `.git`.
 
 **Limits:**
 - Untracked files over 50 MB aren't sent, and new files over 50 MB made on the machine aren't brought back. Each is reported once.
 - Transfers go in batches of up to 32 MB, and the machine keeps each batch it receives. A connection lost mid-way costs one batch: the next command sends only what is still missing. The first sync, which sends the whole worktree, runs in the first command's sync, not in starting the shell.
 - Submodules and Git LFS objects aren't synced yet.
-- On Windows, where files can't carry an exec bit or be symlinks, the plugin remembers those modes from the machine so they survive the round trip.
+- On Windows, where files can't carry an exec bit or be symlinks, the plugin remembers those modes from the machine so they survive the round trip. A file made there that git would store differently here (CRLF line endings under `core.autocrlf`) goes back exactly as it came.
 
 ## Removing a machine
 

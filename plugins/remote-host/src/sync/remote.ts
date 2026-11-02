@@ -53,6 +53,8 @@ const PRELUDE = [
 
 export type CheckoutStatus =
   | { state: "missing" }
+  /** The checkout's directory is there but its `.git` isn't (a command removed it, or it was never made). */
+  | { state: "nogit" }
   | {
       state: "ok";
       tree: string;
@@ -73,7 +75,8 @@ export async function checkoutStatus(remote: RemoteSide, p: RemotePaths, baseTre
   const script = [
     PRELUDE,
     `W=${sq(p.work)}; B=${sq(baseTree ?? "")}`,
-    `cd "$W" 2>/dev/null && [ -d .git ] || { echo missing; exit 0; }`,
+    `cd "$W" 2>/dev/null || { echo missing; exit 0; }`,
+    `[ -d .git ] || { echo nogit; exit 0; }`,
     `I=.git/dispatch-status.$$`,
     `cp .git/index "$I" 2>/dev/null || rm -f "$I"`,
     `if ! GIT_INDEX_FILE=$I git add -A >/dev/null; then rm -f "$I"; exit 3; fi`,
@@ -94,6 +97,7 @@ export async function checkoutStatus(remote: RemoteSide, p: RemotePaths, baseTre
   if (r.code !== 0) throw new Error(`reading the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
   const out = r.stdout;
   if (/^missing\s*$/.test(out)) return { state: "missing" };
+  if (/^nogit\s*$/.test(out)) return { state: "nogit" };
   const tree = out.match(/^tree ([0-9a-f]{40})$/m)?.[1];
   if (!tree) throw new Error(`reading the checkout failed: unexpected answer ${JSON.stringify(out.slice(0, 120))}`);
   const head = out.match(/^head ([0-9a-f]{40})$/m)?.[1];
@@ -179,7 +183,22 @@ export async function checkoutCommit(remote: RemoteSide, p: RemotePaths, chatId:
     `git --git-dir="$R" update-ref ${sq(`refs/dispatch/chats/${chatId}`)} "$C" || exit 1`,
     `if git rev-parse -q --verify HEAD >/dev/null; then`,
     `  git update-index -q --refresh >/dev/null 2>&1`,
-    `  git read-tree -m -u HEAD "$C" || exit 4`,
+    // A path the snapshot adds that is already there, untracked (ignored
+    // there, too big to bring back, made since): read-tree would overwrite an
+    // ignored one without a word. Name them instead.
+    `  L=.git/dispatch-added.$$`,
+    `  git -c core.quotepath=off diff-tree -r --diff-filter=A --name-only HEAD "$C" > "$L" || { rm -f "$L"; exit 1; }`,
+    `  clash=`,
+    `  while IFS= read -r f; do if [ -e "$f" ] || [ -L "$f" ]; then printf 'clash %s\\n' "$f"; clash=1; fi; done < "$L"`,
+    `  rm -f "$L"`,
+    `  [ -z "$clash" ] || exit 5`,
+    `  E=.git/dispatch-rt.$$`,
+    `  if ! git read-tree -m -u HEAD "$C" 2>"$E"; then`,
+    `    cat "$E" >&2`,
+    `    if grep -q 'not uptodate' "$E"; then rm -f "$E"; exit 4; fi`,
+    `    rm -f "$E"; exit 6`,
+    `  fi`,
+    `  rm -f "$E"`,
     `  git update-ref --no-deref HEAD "$C" || exit 1`,
     `else`,
     `  git checkout -q --force --detach "$C" || exit 1`,
@@ -187,14 +206,56 @@ export async function checkoutCommit(remote: RemoteSide, p: RemotePaths, chatId:
     `git update-ref refs/dispatch/base "$C"`,
   ].join("\n");
   const r = await remote.run(script, { timeoutMs: 10 * 60_000 });
-  if (r.code === 4) {
-    const file = r.stderr.match(/Entry '([^']+)'/)?.[1];
-    throw new Error(
+  if (r.code === 5) throw new ClashError([...r.stdout.matchAll(/^clash (.*)$/gm)].map((m) => m[1]!));
+  if (r.code === 4) throw new StaleError(r.stderr.match(/Entry '([^']+)'/)?.[1]);
+  if (r.code !== 0) throw new Error(`checking your files out on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+
+/** A file the push would change had changed on the machine since the last look. */
+export class StaleError extends Error {
+  constructor(readonly file: string | undefined) {
+    super(
       `${file ? `\`${file}\`` : "a file"} changed on the machine while your files were being sent, so nothing was overwritten. ` +
         `Run the command again: the change comes back first.`,
     );
   }
-  if (r.code !== 0) throw new Error(`checking your files out on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+
+/** Files the snapshot adds are already on the machine, outside the sync. */
+export class ClashError extends Error {
+  constructor(readonly paths: string[]) {
+    super(`already on the machine, outside the sync: ${paths.join(", ")}`);
+  }
+}
+
+/** What the machine holds at each of `paths`, outside the sync: a blob (kept in the checkout), or why not. */
+export async function hashThere(
+  remote: RemoteSide,
+  p: RemotePaths,
+  paths: readonly string[],
+): Promise<Map<string, ({ size: number } & { mode: string; sha: string }) | "dir" | "other">> {
+  const script = [
+    `cd ${sq(p.work)} || exit 1`,
+    `while IFS= read -r f; do`,
+    `  if [ -L "$f" ]; then echo "other $f"`,
+    `  elif [ -d "$f" ]; then echo "dir $f"`,
+    `  elif [ -f "$f" ]; then`,
+    `    s=$(git hash-object -w -- "$f") || exit 1`,
+    `    if [ -x "$f" ]; then m=100755; else m=100644; fi`,
+    `    echo "file $m $s $(wc -c < "$f" | tr -d ' ') $f"`,
+    `  else echo "other $f"; fi`,
+    `done`,
+  ].join("\n");
+  const r = await remote.run(script, { input: paths.join("\n") + "\n", timeoutMs: 10 * 60_000 });
+  if (r.code !== 0) throw new Error(`reading files on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+  const out = new Map<string, ({ size: number } & { mode: string; sha: string }) | "dir" | "other">();
+  for (const line of r.stdout.split("\n")) {
+    const f = line.match(/^file (\d{6}) ([0-9a-f]{40}) (\d+) (.*)$/);
+    if (f) out.set(f[4]!, { mode: f[1]!, sha: f[2]!, size: Number(f[3]) });
+    const o = line.match(/^(dir|other) (.*)$/);
+    if (o) out.set(o[2]!, o[1] as "dir" | "other");
+  }
+  return out;
 }
 
 /**
