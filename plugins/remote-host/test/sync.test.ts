@@ -5,7 +5,20 @@
  * exec bits, no symlinks.
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -215,6 +228,134 @@ describe.skipIf(!SH)("bringing changes back", () => {
     expect(readFileSync(`${t.work}/src/b.ts`, "utf8")).toBe("export const b = 'mine';\n");
   });
 
+  it("brings back an edit there to a file committed with CRLF, hashing it as the snapshot does", async () => {
+    const t = setup();
+    writeFileSync(join(t.local, "win.txt"), "a\r\nb\r\n");
+    g(t.local, "-c", "core.autocrlf=false", "add", "win.txt");
+    g(t.local, "commit", "-qm", "crlf");
+    g(t.local, "config", "core.autocrlf", "true");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    expect(readFileSync(`${t.work}/win.txt`, "utf8")).toBe("a\r\nb\r\n");
+    writeFileSync(`${t.work}/win.txt`, "a\r\nb\r\nc\r\n");
+    const a = await s.afterRun(after(r1));
+    expect(text(a)).toMatch(/M win\.txt/);
+    expect(text(a)).not.toMatch(/settled/);
+    expect(readFileSync(join(t.local, "win.txt"), "utf8")).toBe("a\r\nb\r\nc\r\n");
+    expect(await s.beforeRun(run())).toEqual({});
+  });
+
+  it("brings back a regenerated and then a deleted file that it pinned here", async () => {
+    const t = setup();
+    g(t.local, "config", "core.autocrlf", "true");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    // Made there with CRLF: it hashes differently here, so it is pinned.
+    writeFileSync(`${t.work}/run.bat`, "echo hi\r\n");
+    await s.afterRun(after(r1));
+    expect(readFileSync(join(t.local, "run.bat"), "utf8")).toBe("echo hi\r\n");
+
+    const r2 = run({ command: "gen" });
+    expect(await s.beforeRun(r2)).toEqual({});
+    writeFileSync(`${t.work}/run.bat`, "echo hi\r\necho again\r\n");
+    const a2 = await s.afterRun(after(r2));
+    expect(text(a2)).toMatch(/M run\.bat/);
+    expect(text(a2)).not.toMatch(/settled/);
+    expect(readFileSync(join(t.local, "run.bat"), "utf8")).toBe("echo hi\r\necho again\r\n");
+
+    const r3 = run({ command: "clean" });
+    expect(await s.beforeRun(r3)).toEqual({});
+    rmSync(`${t.work}/run.bat`);
+    const a3 = await s.afterRun(after(r3));
+    expect(text(a3)).toMatch(/D run\.bat/);
+    expect(existsSync(join(t.local, "run.bat"))).toBe(false);
+  });
+
+  it("brings back a directory there that became a file", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    rmSync(`${t.work}/src`, { recursive: true });
+    writeFileSync(`${t.work}/src`, "now a file\n");
+    const a = await s.afterRun(after(r1));
+    expect(text(a)).toMatch(/D src\/b\.ts/);
+    expect(text(a)).toMatch(/A src(,|$)/m);
+    expect(read(join(t.local, "src"))).toBe("now a file\n");
+    expect(await s.beforeRun(run())).toEqual({});
+  });
+
+  it("doesn't fetch again what it set aside", async () => {
+    const t = setup();
+    writeFileSync(join(t.local, ".git", "info", "exclude"), "cfg.local\n");
+    writeFileSync(join(t.local, "cfg.local"), "mine\n");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/cfg.local`, "theirs\n");
+    await s.afterRun(after(r1));
+    const fetches = () => t.remote.scripts.filter((x) => x.includes("pack-objects --stdout") && !x.includes("--revs")).length;
+    const was = fetches();
+    const r2 = run();
+    await s.beforeRun(r2);
+    await s.afterRun(after(r2));
+    expect(fetches()).toBe(was);
+    // Once the file here is gone, theirs comes back.
+    rmSync(join(t.local, "cfg.local"));
+    expect(text(await s.beforeRun(run()))).toMatch(/A cfg\.local/);
+    expect(read(join(t.local, "cfg.local"))).toBe("theirs\n");
+  });
+
+  it.skipIf(win || process.getuid?.() === 0)("isn't stopped by a file there it can't read", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/locked.txt`, "secret\n");
+    chmodSync(`${t.work}/locked.txt`, 0);
+    writeFileSync(`${t.work}/gen.ts`, "x\n");
+    const a = await s.afterRun(after(r1));
+    chmodSync(`${t.work}/locked.txt`, 0o644);
+    expect(text(a)).toMatch(/A gen\.ts/);
+    expect(existsSync(join(t.local, "locked.txt"))).toBe(false);
+  });
+
+  it("still sends your files when it can't check for changes there", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    writeFileSync(join(t.local, "a.txt"), "mine\n");
+    t.remote.before = (script) => {
+      if (script.includes("dispatch-status")) throw new Error("status broke");
+    };
+    const b = await s.beforeRun(run());
+    t.remote.before = undefined;
+    expect(b.refuse).toBeUndefined();
+    expect(text(b)).toMatch(/Could not check for changes made there \(.*status broke.*\)/);
+    expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("mine\n");
+  });
+
+  it("doesn't trust a report from the machine that doesn't start from the last sync", async () => {
+    const t = setup();
+    const lying = {
+      ...t.remote,
+      run: async (script: string, o?: { input?: string; timeoutMs?: number }) => {
+        const r = await t.remote.run(script, o);
+        return script.includes("dispatch-status") ? { ...r, stdout: r.stdout.replace(/^(:100644 100644 )[0-9a-f]{40}/m, `$1${"1".repeat(40)}`) } : r;
+      },
+    };
+    const s = t.mk({ remote: lying });
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/a.txt`, "changed there\n");
+    expect(text(await s.afterRun(after(r1)))).toMatch(/don't start from the last sync \(a\.txt\)/);
+    expect(read(join(t.local, "a.txt"))).toBe("one\ntwo\n");
+  });
+
   it.skipIf(win)("keeps an exec bit set there, even for a local checkout that can't hold one", async () => {
     const t = setup();
     g(t.local, "config", "core.filemode", "false");
@@ -255,6 +396,38 @@ describe.skipIf(!SH)("conflicts", () => {
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("merged\n");
     // The copy was never sent.
     expect(existsSync(`${t.work}/a.txt.from-test-mac`)).toBe(false);
+  });
+
+  it("send the machine's version back unchanged when its copy is moved over yours", async () => {
+    const t = setup();
+    g(t.local, "config", "core.autocrlf", "true");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/a.txt`, "theirs\r\n");
+    writeFileSync(join(t.local, "a.txt"), "mine\n");
+    await s.afterRun(after(r1));
+    renameSync(join(t.local, "a.txt.from-test-mac"), join(t.local, "a.txt"));
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toBeUndefined();
+    expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("theirs\r\n");
+    expect(await s.beforeRun(run())).toEqual({});
+  });
+
+  it.skipIf(win)("replace a symlink where the copy goes, never writing through it", async () => {
+    const t = setup();
+    const outside = join(t.local, "..", "outside.txt");
+    writeFileSync(outside, "precious\n");
+    symlinkSync(outside, join(t.local, "a.txt.from-test-mac"));
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/a.txt`, "theirs\n");
+    writeFileSync(join(t.local, "a.txt"), "mine\n");
+    expect(text(await s.afterRun(after(r1)))).toMatch(/won't run until this is settled/);
+    expect(readFileSync(outside, "utf8")).toBe("precious\n");
+    expect(lstatSync(join(t.local, "a.txt.from-test-mac")).isSymbolicLink()).toBe(false);
+    expect(read(join(t.local, "a.txt.from-test-mac"))).toBe("theirs\n");
   });
 });
 
@@ -338,6 +511,54 @@ describe.skipIf(!SH)("never losing a file", () => {
     expect(readFileSync(`${t.work}/local.env`, "utf8")).toBe("MINE=1\n");
   });
 
+  it("leaves alone an ignored file here even when the machine makes the same one", async () => {
+    const t = setup();
+    writeFileSync(join(t.local, ".git", "info", "exclude"), "same.env\n");
+    writeFileSync(join(t.local, "same.env"), "X=1\n");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/same.env`, "X=1\n");
+    await s.afterRun(after(r1));
+    writeFileSync(join(t.local, "a.txt"), "push something\n");
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+    // Nor is the machine's deleted by the push.
+    expect(readFileSync(`${t.work}/same.env`, "utf8")).toBe("X=1\n");
+    expect(read(join(t.local, "same.env"))).toBe("X=1\n");
+  });
+
+  it("lets a file the machine has outside the sync join it when yours is the same", async () => {
+    const t = setup();
+    const name = win ? "same.cfg" : "same\nname.cfg";
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    writeFileSync(`${t.work}/.git/info/exclude`, "*.cfg\n");
+    writeFileSync(`${t.work}/${name}`, "k=v\n");
+    writeFileSync(join(t.local, name), "k=v\n");
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+    expect(existsSync(join(t.local, `${name}.from-test-mac`))).toBe(false);
+    expect(await s.beforeRun(run())).toEqual({});
+  });
+
+  it("never overwrites files already where the checkout goes, on the first sync", async () => {
+    const t = setup();
+    mkdirSync(`${t.work}/src`, { recursive: true });
+    writeFileSync(`${t.work}/a.txt`, "left there\n");
+    writeFileSync(`${t.work}/src/b.ts`, "export const b = 1;\n");
+    const s = t.mk();
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toMatch(/^Not run: a conflict with Test Mac.*`a\.txt` \(theirs: `a\.txt\.from-test-mac`\)/s);
+    // The same file there just joins.
+    expect(b.refuse).not.toMatch(/src\/b\.ts/);
+    expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("left there\n");
+    expect(read(join(t.local, "a.txt.from-test-mac"))).toBe("left there\n");
+    rmSync(join(t.local, "a.txt.from-test-mac"));
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+    expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("one\ntwo\n");
+  });
+
   it("sends a file made there back unchanged, CRLF and all", async () => {
     const t = setup();
     const s = t.mk();
@@ -386,6 +607,17 @@ describe.skipIf(!SH)("the checkout lock", () => {
     expect((await s.beforeRun(run({ terminal: "server" }))).refuse).toMatch(/"main", `pnpm build` timed out and may still be running/);
     s.releaseTerminal("main");
     expect((await s.beforeRun(run({ terminal: "server" }))).refuse).toBeUndefined();
+  });
+
+  it("is kept from a timed-out command's own terminal too, until the shell there says it ended", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run({ terminal: "main", command: "pnpm build" });
+    await s.beforeRun(r1);
+    await s.afterRun({ ...after(r1), outcome: "timed-out" });
+    expect((await s.beforeRun(run({ terminal: "main" }))).refuse).toMatch(/`pnpm build` timed out and may still be running/);
+    s.runEnded(r1.runId);
+    expect((await s.beforeRun(run({ terminal: "main" }))).refuse).toBeUndefined();
   });
 
   it("isn't taken by a run core gave up on while it synced", async () => {
@@ -467,6 +699,7 @@ describe("pieces", () => {
     const plain = mkdtempSync(join(tmpdir(), "rh-plain-"));
     dirs.push(plain);
     expect(await repoTop(plain)).toBeUndefined();
+    expect(await repoTop(join(plain, "gone"))).toBeUndefined();
     expect(await repoTop(undefined)).toBeUndefined();
   });
 

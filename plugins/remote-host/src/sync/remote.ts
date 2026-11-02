@@ -47,7 +47,8 @@ export function remotePaths(root: string, instance: string, chatId: string, repo
 }
 
 const PRELUDE = [
-  "export GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1",
+  // C: git's messages are matched below, and file names are bytes.
+  "export LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1",
   "export GIT_AUTHOR_NAME=Dispatch GIT_AUTHOR_EMAIL=dispatch@localhost GIT_COMMITTER_NAME=Dispatch GIT_COMMITTER_EMAIL=dispatch@localhost",
 ].join("\n");
 
@@ -79,7 +80,10 @@ export async function checkoutStatus(remote: RemoteSide, p: RemotePaths, baseTre
     `[ -d .git ] || { echo nogit; exit 0; }`,
     `I=.git/dispatch-status.$$`,
     `cp .git/index "$I" 2>/dev/null || rm -f "$I"`,
-    `if ! GIT_INDEX_FILE=$I git add -A >/dev/null; then rm -f "$I"; exit 3; fi`,
+    // A file there that can't be read (exit 1) is left as the base has it, so
+    // it reads as unchanged; it never stops the rest from syncing.
+    `GIT_INDEX_FILE=$I git add -A --ignore-errors >/dev/null 2>&1; rc=$?`,
+    `if [ "$rc" -gt 1 ]; then rm -f "$I"; echo "git add -A failed (exit $rc)" >&2; exit 3; fi`,
     `T=$(GIT_INDEX_FILE=$I git write-tree) || { rm -f "$I"; exit 3; }`,
     `rm -f "$I"`,
     `echo "tree $T"`,
@@ -171,7 +175,8 @@ export async function sendObjects(remote: RemoteSide, p: RemotePaths, shas: read
 
 /**
  * Check `commit` out in the chat's checkout. A first checkout writes
- * everything. After that it is a two-way merge from HEAD, which refuses (and
+ * everything, once no file it would write is there already (`ClashError`
+ * names those). After that it is a two-way merge from HEAD, which refuses (and
  * says which file) rather than overwrite a change the machine made since the
  * last look: the command then doesn't run, and the next sync brings that
  * change back first.
@@ -181,17 +186,18 @@ export async function checkoutCommit(remote: RemoteSide, p: RemotePaths, chatId:
     PRELUDE,
     `R=${sq(p.repo)}; C=${sq(commit)}; cd ${sq(p.work)} || exit 1`,
     `git --git-dir="$R" update-ref ${sq(`refs/dispatch/chats/${chatId}`)} "$C" || exit 1`,
-    `if git rev-parse -q --verify HEAD >/dev/null; then`,
-    `  git update-index -q --refresh >/dev/null 2>&1`,
+    `if git rev-parse -q --verify HEAD >/dev/null; then H=1; git update-index -q --refresh >/dev/null 2>&1; else H=; fi`,
     // A path the snapshot adds that is already there, untracked (ignored
-    // there, too big to bring back, made since): read-tree would overwrite an
-    // ignored one without a word. Name them instead.
-    `  L=.git/dispatch-added.$$`,
-    `  git -c core.quotepath=off diff-tree -r --diff-filter=A --name-only HEAD "$C" > "$L" || { rm -f "$L"; exit 1; }`,
-    `  clash=`,
-    `  while IFS= read -r f; do if [ -e "$f" ] || [ -L "$f" ]; then printf 'clash %s\\n' "$f"; clash=1; fi; done < "$L"`,
-    `  rm -f "$L"`,
-    `  [ -z "$clash" ] || exit 5`,
+    // there, too big to bring back, made since, or there before a first
+    // checkout): git would overwrite an ignored one without a word. Name them
+    // instead.
+    `L=.git/dispatch-added.$$; K=.git/dispatch-clash.$$`,
+    `if [ -n "$H" ]; then git diff-tree -r -z --no-renames --diff-filter=A --name-only HEAD "$C"; else git ls-tree -r -z --name-only "$C"; fi > "$L" || { rm -f "$L"; exit 1; }`,
+    `xargs -0 sh -c ${sq(CLASHES)} sh < "$L" > "$K" || { rm -f "$L" "$K"; exit 1; }`,
+    `rm -f "$L"`,
+    `if [ -s "$K" ]; then cat "$K"; rm -f "$K"; exit 5; fi`,
+    `rm -f "$K"`,
+    `if [ -n "$H" ]; then`,
     `  E=.git/dispatch-rt.$$`,
     `  if ! git read-tree -m -u HEAD "$C" 2>"$E"; then`,
     `    cat "$E" >&2`,
@@ -206,10 +212,24 @@ export async function checkoutCommit(remote: RemoteSide, p: RemotePaths, chatId:
     `git update-ref refs/dispatch/base "$C"`,
   ].join("\n");
   const r = await remote.run(script, { timeoutMs: 10 * 60_000 });
-  if (r.code === 5) throw new ClashError([...r.stdout.matchAll(/^clash (.*)$/gm)].map((m) => m[1]!));
+  if (r.code === 5) throw new ClashError(r.stdout.split("\0").filter((s) => s.startsWith("clash ")).map((s) => s.slice("clash ".length)));
   if (r.code === 4) throw new StaleError(r.stderr.match(/Entry '([^']+)'/)?.[1]);
   if (r.code !== 0) throw new Error(`checking your files out on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
+
+/**
+ * For `xargs -0 sh -c`: which of the paths given are already there. A
+ * directory the snapshot turns into a file is no clash (git replaces it)
+ * unless it holds something untracked.
+ */
+const CLASHES = [
+  `for f; do`,
+  `  if [ -e "$f" ] || [ -L "$f" ]; then`,
+  `    if [ -d "$f" ] && [ ! -L "$f" ] && git cat-file -e "HEAD:$f" 2>/dev/null && [ -z "$(git ls-files -o -- ":(literal)$f" | head -n 1)" ]; then continue; fi`,
+  `    printf 'clash %s\\0' "$f"`,
+  `  fi`,
+  `done`,
+].join("\n");
 
 /** A file the push would change had changed on the machine since the last look. */
 export class StaleError extends Error {
@@ -234,25 +254,25 @@ export async function hashThere(
   p: RemotePaths,
   paths: readonly string[],
 ): Promise<Map<string, ({ size: number } & { mode: string; sha: string }) | "dir" | "other">> {
-  const script = [
-    `cd ${sq(p.work)} || exit 1`,
-    `while IFS= read -r f; do`,
-    `  if [ -L "$f" ]; then echo "other $f"`,
-    `  elif [ -d "$f" ]; then echo "dir $f"`,
+  const each = [
+    `for f; do`,
+    `  if [ -L "$f" ]; then printf 'other %s\\0' "$f"`,
+    `  elif [ -d "$f" ]; then printf 'dir %s\\0' "$f"`,
     `  elif [ -f "$f" ]; then`,
     `    s=$(git hash-object -w -- "$f") || exit 1`,
     `    if [ -x "$f" ]; then m=100755; else m=100644; fi`,
-    `    echo "file $m $s $(wc -c < "$f" | tr -d ' ') $f"`,
-    `  else echo "other $f"; fi`,
+    `    printf 'file %s %s %s %s\\0' "$m" "$s" "$(wc -c < "$f" | tr -d ' ')" "$f"`,
+    `  else printf 'other %s\\0' "$f"; fi`,
     `done`,
   ].join("\n");
-  const r = await remote.run(script, { input: paths.join("\n") + "\n", timeoutMs: 10 * 60_000 });
+  const script = [PRELUDE, `cd ${sq(p.work)} || exit 1`, `xargs -0 sh -c ${sq(each)} sh`].join("\n");
+  const r = await remote.run(script, { input: paths.join("\0") + "\0", timeoutMs: 10 * 60_000 });
   if (r.code !== 0) throw new Error(`reading files on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
   const out = new Map<string, ({ size: number } & { mode: string; sha: string }) | "dir" | "other">();
-  for (const line of r.stdout.split("\n")) {
-    const f = line.match(/^file (\d{6}) ([0-9a-f]{40}) (\d+) (.*)$/);
+  for (const item of r.stdout.split("\0")) {
+    const f = item.match(/^file (\d{6}) ([0-9a-f]{40}) (\d+) ([\s\S]*)$/);
     if (f) out.set(f[4]!, { mode: f[1]!, sha: f[2]!, size: Number(f[3]) });
-    const o = line.match(/^(dir|other) (.*)$/);
+    const o = item.match(/^(dir|other) ([\s\S]*)$/);
     if (o) out.set(o[2]!, o[1] as "dir" | "other");
   }
   return out;

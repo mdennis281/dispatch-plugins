@@ -10,14 +10,16 @@
  * dates are pinned, so the same tree is the same commit every time.
  */
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readlink, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { git } from "@dispatch-plugins/remote-core";
 
 export const ZERO = "0".repeat(40);
+/** git's empty tree, which every repository knows without storing it. */
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /** A path that isn't there, as git's raw diff spells it. */
 export const ABSENT: Entry = { mode: "000000", sha: ZERO };
 
@@ -185,8 +187,22 @@ export async function pathProblem(root: string, p: string, win = process.platfor
     if (!st.isDirectory()) return `${relPosix(root, at)} is a file here`;
   }
   const st = await lstat(join(root, ...parts)).catch(() => undefined);
-  if (st?.isDirectory()) return "it is a directory here";
+  if (st?.isDirectory()) return DIR_HERE;
   return undefined;
+}
+
+/** `pathProblem`'s answer for a directory where the file goes: fine once the directory has gone. */
+export const DIR_HERE = "it is a directory here";
+
+/** Whether the directory `dir` holds nothing but `files` (so deleting them empties it). */
+export async function holdsOnly(root: string, dir: string, files: ReadonlySet<string>): Promise<boolean> {
+  const entries = await readdir(inside(root, dir), { withFileTypes: true }).catch(() => undefined);
+  if (!entries) return false;
+  for (const e of entries) {
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory() ? !(await holdsOnly(root, p, files)) : !files.has(p)) return false;
+  }
+  return true;
 }
 
 function relPosix(root: string, abs: string): string {
@@ -194,37 +210,45 @@ function relPosix(root: string, abs: string): string {
 }
 
 /**
- * What each path holds here right now, as the blob `git add` would make of it
- * (null when there is nothing there, "dir" for a directory). Read at the last
- * moment before a write, so an edit made since the snapshot is seen.
+ * The blob a snapshot would record for each of `paths` that is a file here,
+ * before pins: hashed through a copy of the real index, as `add` hashes, so a
+ * file committed with CRLF hashes as committed. A path that can't be read is
+ * left out.
  */
-export async function localBlobs(root: string, paths: readonly string[]): Promise<Map<string, string | null>> {
-  const out = new Map<string, string | null>();
+export async function snapshotBlobs(root: string, paths: readonly string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
   const files: string[] = [];
-  for (const p of paths) {
-    const st = await lstat(join(root, ...p.split("/"))).catch(() => undefined);
-    if (!st) out.set(p, null);
-    else if (st.isDirectory()) out.set(p, "dir");
-    else if (st.isSymbolicLink()) out.set(p, blobSha(Buffer.from(await readlink(join(root, ...p.split("/"))))));
-    else files.push(p);
-  }
-  if (files.length) {
-    const shas = (await git(root, ["hash-object", "--stdin-paths"], {}, files.join("\n") + "\n")).split("\n");
-    files.forEach((p, i) => out.set(p, shas[i] ?? null));
-  }
-  return out;
+  for (const p of paths) if ((await onDisk(root, p)) === "file") files.push(p);
+  if (!files.length) return out;
+  return withTempIndex(async (env) => {
+    await copyFile(await indexPath(root), env.GIT_INDEX_FILE).catch(() => {});
+    // --replace: a file where the index has a directory (or the reverse).
+    const add = (ps: readonly string[]) => git(root, ["update-index", "--add", "--replace", "-z", "--stdin"], env, ps.join("\0") + "\0");
+    const want = new Set(files);
+    // One unreadable file fails the lot: then path by path, leaving out each
+    // that fails (its index entry would still be the old blob).
+    await add(files).catch(async () => {
+      for (const p of files) await add([p]).catch(() => want.delete(p));
+    });
+    for (const line of (await git(root, ["ls-files", "-s", "-z"], env)).split("\0")) {
+      const m = line.match(/^\d{6} ([0-9a-f]{40}) \d\t([\s\S]*)$/);
+      if (m && want.has(m[2]!)) out.set(m[2]!, m[1]!);
+    }
+    return out;
+  });
 }
 
-function blobSha(content: Buffer): string {
+/** git's blob id for `content`. */
+export function blobSha(content: Buffer): string {
   return createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
 }
 
-/** Which of `paths` this worktree's ignore rules ignore. */
-export async function ignoredPaths(root: string, paths: readonly string[]): Promise<Set<string>> {
-  if (!paths.length) return new Set();
-  // Exit 1 means "none ignored", which `git()` would call a failure.
-  const out = await git(root, ["check-ignore", "-z", "--no-index", "--stdin"], {}, paths.join("\0") + "\0").catch(() => "");
-  return new Set(out.split("\0").filter(Boolean));
+/** The `blobSha` of the bytes of the file at `p`; undefined if it isn't a readable file. */
+export async function fileBlob(root: string, p: string): Promise<string | undefined> {
+  const abs = inside(root, p);
+  const st = await lstat(abs).catch(() => undefined);
+  if (!st?.isFile()) return undefined;
+  return readFile(abs).then(blobSha, () => undefined);
 }
 
 /** Give `p` the exec bit of `mode` here (a filesystem that holds one). */
@@ -362,8 +386,17 @@ export async function writeWorktree(
   for (const p of deletes) {
     await rm(inside(root, p), { force: true }).catch((err: unknown) => failed.push({ path: p, why: String((err as Error).message ?? err) }));
   }
-  if (!writes.length) return failed;
+  // A directory there that became a file comes back only once the empty one here is gone.
+  await removeEmptyParents(root, deletes);
   for (const w of writes) inside(root, w.path);
+  // `checkout-index -f` would delete a directory in the way, and all in it.
+  const clear: Array<{ path: string } & Entry> = [];
+  for (const w of writes) {
+    if ((await onDisk(root, w.path)) === "dir") failed.push({ path: w.path, why: DIR_HERE });
+    else clear.push(w);
+  }
+  writes = clear;
+  if (!writes.length) return failed;
   const checkout = (ws: ReadonlyArray<{ path: string } & Entry>) =>
     withTempIndex(async (env) => {
       await git(root, ["update-index", "-z", "--index-info"], env, ws.map((w) => `${w.mode} ${w.sha}\t${w.path}`).join("\0") + "\0");
@@ -377,8 +410,13 @@ export async function writeWorktree(
   return failed;
 }
 
-/** A blob as a checkout would write it at `path`, saved at `to` instead. */
-export async function writeCopy(root: string, sha: string, path: string, to: string): Promise<void> {
+/**
+ * A blob as a checkout would write it at `path`, saved at `to` instead.
+ * Written beside and renamed into place, so whatever is at `to` (a symlink,
+ * say) is replaced, never written through. Resolves with the id of the bytes
+ * written (`blobSha`), to tell later whether the copy was moved over the file.
+ */
+export async function writeCopy(root: string, sha: string, path: string, to: string): Promise<string> {
   const target = inside(root, to);
   const bytes = await new Promise<Buffer>((res, rej) => {
     const child = spawn("git", ["cat-file", "--filters", `--path=${path}`, sha], { cwd: root, windowsHide: true });
@@ -390,7 +428,47 @@ export async function writeCopy(root: string, sha: string, path: string, to: str
     child.on("close", (code) => (code === 0 ? res(Buffer.concat(chunks)) : rej(new Error(`git cat-file: ${err.trim()}`))));
   });
   await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, bytes);
+  const tmp = `${target}.rh-${randomBytes(4).toString("hex")}`;
+  await writeFile(tmp, bytes, { flag: "wx" });
+  try {
+    await rename(tmp, target);
+    return blobSha(bytes);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
+/** Every blob and link in `tree`, by path. */
+export async function treeMap(root: string, tree: string): Promise<Map<string, Entry>> {
+  const out = new Map<string, Entry>();
+  for (const line of (await git(root, ["ls-tree", "-r", "-z", "--full-tree", tree])).split("\0")) {
+    const m = line.match(/^(\d{6}) \w+ ([0-9a-f]{40})\t([\s\S]*)$/);
+    if (m) out.set(m[3]!, { mode: m[1]!, sha: m[2]! });
+  }
+  return out;
+}
+
+/** What is on disk at `p`: nothing, a directory, or a file (a symlink counts as a file). */
+export async function onDisk(root: string, p: string): Promise<"none" | "dir" | "file"> {
+  const st = await lstat(join(root, ...p.split("/"))).catch(() => undefined);
+  return !st ? "none" : st.isDirectory() ? "dir" : "file";
+}
+
+/** After deletes: take away the directories they left empty, up to the root. */
+async function removeEmptyParents(root: string, paths: readonly string[]): Promise<void> {
+  const top = resolve(root);
+  for (const p of paths) {
+    let dir = dirname(resolve(root, ...p.split("/")));
+    while (dir !== top && dir.startsWith(top + sep)) {
+      try {
+        await rmdir(dir);
+      } catch {
+        break;
+      }
+      dir = dirname(dir);
+    }
+  }
 }
 
 export interface RepoIds {

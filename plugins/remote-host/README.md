@@ -50,7 +50,7 @@ Nothing else on the machine changes.
 A chat working in a git repository gets its own checkout on the machine, `~/.dispatch-host/<instance>/chats/<chat>/<repo>`, and its shells start at the matching place in it. The base of the sync is the last snapshot both sides agreed on.
 
 **Before each command:**
-1. Bring back anything that changed on the machine since then (a dev server's codegen, say).
+1. Bring back anything that changed on the machine since then (a dev server's codegen, say). If that fails, the agent is told and step 3 still goes ahead: it never overwrites a change there.
 2. Snapshot the local worktree as `git status` sees it: committed, staged, unstaged, and untracked-but-not-ignored. The snapshot is a commit in a temp index; your index, HEAD and branches are never touched.
 3. Send the machine only the objects it lacks, then check the snapshot out there.
 
@@ -62,18 +62,18 @@ A chat working in a git repository gets its own checkout on the machine, `~/.dis
 - One bare repository per local repository is shared by every chat's checkout on that machine, so a second chat sends almost nothing.
 
 **When it refuses (the command doesn't run, and the agent is told why):**
-- **A conflict.** A file changed both there and here since the last sync. The machine's version is saved beside yours as `<file>.from-<machine>`, which is never synced. Merge what you want into your file and delete the copy; your version then goes there. To keep the machine's version, move the copy over your file. The same happens when your files add a path the machine already has outside the sync (a file ignored there, say): it is never overwritten.
-- **The checkout is busy.** Another terminal of the same chat is running a command there, so files can't change under it. A command that timed out or was cancelled still holds it, because it may still be running, until that terminal runs something else or its shell ends. Background commands (dev servers, watchers) don't hold it.
+- **A conflict.** A file changed both there and here since the last sync. The machine's version is saved beside yours as `<file>.from-<machine>`, which is never synced. Merge what you want into your file and delete the copy; your version then goes there. To keep the machine's version, move the copy over your file. The same happens when your files add a path the machine already has outside the sync (a file ignored there, say, or one already in the checkout's place on the first sync): it is never overwritten. Where the machine's file is the same as yours, it simply joins the sync.
+- **The checkout is busy.** Another terminal of the same chat is running a command there, so files can't change under it. A command that timed out or was cancelled may still be running, so it holds the checkout against every terminal, its own included, until the shell there reports it ended (finished, or Ctrl-C'd) or the shell ends. Background commands (dev servers, watchers) don't hold it.
 - **A file changed there mid-sync.** It is never overwritten; run the command again and it comes back first.
 - **The sync failed**, or the machine is offline.
 
-**Never overwritten, on either side:** each file is checked against what it holds at the moment of writing, not only against the snapshot. An edit made here while the machine's changes were on their way becomes a conflict. Some changes there are set aside instead: left as they are on both sides, and reported once. That covers a file here that git doesn't sync (ignored, or too big to send), a directory where a file goes or the reverse, a name Windows can't hold, and anything inside `.git`.
+**Never overwritten, on either side:** just before writing, the worktree is snapshotted again, exactly as a push would see it, and each file is checked against that. An edit made here while the machine's changes were on their way becomes a conflict. Some changes there are set aside instead: left as they are on both sides, and reported once. That covers a file here that git doesn't sync (ignored, or too big to send, even if it matches theirs), a directory where a file goes (unless the same changes empty it) or the reverse, a name Windows can't hold, and anything inside `.git`. A file there that can't be read is left out of the sync rather than stopping it.
 
 **Limits:**
 - Untracked files over 50 MB aren't sent, and new files over 50 MB made on the machine aren't brought back. Each is reported once.
 - Transfers go in batches of up to 32 MB, and the machine keeps each batch it receives. A connection lost mid-way costs one batch: the next command sends only what is still missing. The first sync, which sends the whole worktree, runs in the first command's sync, not in starting the shell.
 - Submodules and Git LFS objects aren't synced yet.
-- On Windows, where files can't carry an exec bit or be symlinks, the plugin remembers those modes from the machine so they survive the round trip. A file made there that git would store differently here (CRLF line endings under `core.autocrlf`) goes back exactly as it came.
+- On Windows, where files can't carry an exec bit or be symlinks, the plugin remembers those modes from the machine so they survive the round trip. A file made there that git would store differently here (CRLF line endings under `core.autocrlf`) goes back exactly as it came, and so does a conflict copy moved over your file.
 
 ## Removing a machine
 

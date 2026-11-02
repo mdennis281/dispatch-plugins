@@ -11,7 +11,7 @@
  * starts there, and a command whose files can't be synced doesn't run.
  */
 import { randomBytes } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
 import type {
   PluginContext,
@@ -105,6 +105,8 @@ export class HostBackend implements TerminalBackend {
       // Whatever it was running is over, so it no longer holds the checkout.
       this.syncs.get(chatId)?.releaseTerminal(info.name);
     });
+    // A run is over there, even one core stopped waiting for.
+    sh.on("runEnd", (m: { runId: string }) => this.syncs.get(chatId)?.runEnded(m.runId));
     return sh;
   }
 
@@ -167,7 +169,8 @@ export class HostBackend implements TerminalBackend {
         `aren't sent.`,
       `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is ` +
         `saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others ` +
-        `are refused, so files never change under a running command. Outside a git repository nothing is synced.`,
+        `are refused, so files never change under a running command; one that timed out holds every terminal until it ends ` +
+        `(Ctrl-C it). Outside a git repository nothing is synced.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you ` +
         `started (Ctrl-C the terminal, \`kill %1\`).`,
@@ -186,9 +189,16 @@ export function chatDir(paths: HostPaths, instanceId: string, chatId: string): s
  * and a sub-directory never stands in for its repository.
  */
 export async function repoTop(dir: string | undefined): Promise<string | undefined> {
-  if (!dir) return undefined;
-  const top = await git(dir, ["rev-parse", "--show-toplevel"]).catch(() => "");
-  return top ? resolve(top) : undefined;
+  if (!dir || !(await stat(dir).catch(() => undefined))?.isDirectory()) return undefined;
+  try {
+    const top = await git(dir, ["rev-parse", "--show-toplevel"], { LC_ALL: "C" });
+    return top ? resolve(top) : undefined;
+  } catch (err) {
+    if (/not a git repository|must be run in a work tree/i.test(errText(err))) return undefined;
+    // A repository git won't read (one it doesn't trust, say) must not pass
+    // for no repository: the shell would start in an empty checkout.
+    throw new Error(`can't read the git repository at ${dir}, so its files can't be synced: ${errText(err)}`);
+  }
 }
 
 /** `cwd` relative to `root`, POSIX-style; "" for the root itself or anywhere outside it. */

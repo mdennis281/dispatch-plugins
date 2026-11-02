@@ -22,7 +22,7 @@ import require$$1$2 from "zlib";
 import { StringDecoder } from "node:string_decoder";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, rename, rm, stat, lstat, readlink, writeFile, chmod, mkdtemp, copyFile, access, realpath } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, lstat, readdir, writeFile, chmod, mkdtemp, rmdir, copyFile, access, realpath } from "node:fs/promises";
 import { tmpdir, hostname, networkInterfaces } from "node:os";
 import { posix, join, basename, resolve, dirname, sep, isAbsolute, relative } from "node:path";
 import { createWriteStream, createReadStream } from "node:fs";
@@ -22119,6 +22119,7 @@ function json(payload, ok) {
   return m;
 }
 const ZERO = "0".repeat(40);
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const ABSENT = { mode: "000000", sha: ZERO };
 const SNAPSHOT_MESSAGE = "dispatch: working-tree snapshot";
 const SNAPSHOT_ENV = {
@@ -22221,35 +22222,50 @@ async function pathProblem(root, p, win = process.platform === "win32") {
     if (!st2.isDirectory()) return `${relPosix(root, at)} is a file here`;
   }
   const st = await lstat(join(root, ...parts)).catch(() => void 0);
-  if (st?.isDirectory()) return "it is a directory here";
+  if (st?.isDirectory()) return DIR_HERE;
   return void 0;
+}
+const DIR_HERE = "it is a directory here";
+async function holdsOnly(root, dir, files) {
+  const entries = await readdir(inside(root, dir), { withFileTypes: true }).catch(() => void 0);
+  if (!entries) return false;
+  for (const e of entries) {
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory() ? !await holdsOnly(root, p, files) : !files.has(p)) return false;
+  }
+  return true;
 }
 function relPosix(root, abs) {
   return abs.slice(resolve(root).length + 1).split(sep).join("/");
 }
-async function localBlobs(root, paths) {
+async function snapshotBlobs(root, paths) {
   const out = /* @__PURE__ */ new Map();
   const files = [];
-  for (const p of paths) {
-    const st = await lstat(join(root, ...p.split("/"))).catch(() => void 0);
-    if (!st) out.set(p, null);
-    else if (st.isDirectory()) out.set(p, "dir");
-    else if (st.isSymbolicLink()) out.set(p, blobSha(Buffer.from(await readlink(join(root, ...p.split("/"))))));
-    else files.push(p);
-  }
-  if (files.length) {
-    const shas = (await git(root, ["hash-object", "--stdin-paths"], {}, files.join("\n") + "\n")).split("\n");
-    files.forEach((p, i) => out.set(p, shas[i] ?? null));
-  }
-  return out;
+  for (const p of paths) if (await onDisk(root, p) === "file") files.push(p);
+  if (!files.length) return out;
+  return withTempIndex(async (env) => {
+    await copyFile(await indexPath(root), env.GIT_INDEX_FILE).catch(() => {
+    });
+    const add = (ps) => git(root, ["update-index", "--add", "--replace", "-z", "--stdin"], env, ps.join("\0") + "\0");
+    const want = new Set(files);
+    await add(files).catch(async () => {
+      for (const p of files) await add([p]).catch(() => want.delete(p));
+    });
+    for (const line of (await git(root, ["ls-files", "-s", "-z"], env)).split("\0")) {
+      const m = line.match(/^\d{6} ([0-9a-f]{40}) \d\t([\s\S]*)$/);
+      if (m && want.has(m[2])) out.set(m[2], m[1]);
+    }
+    return out;
+  });
 }
 function blobSha(content) {
   return createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
 }
-async function ignoredPaths(root, paths) {
-  if (!paths.length) return /* @__PURE__ */ new Set();
-  const out = await git(root, ["check-ignore", "-z", "--no-index", "--stdin"], {}, paths.join("\0") + "\0").catch(() => "");
-  return new Set(out.split("\0").filter(Boolean));
+async function fileBlob(root, p) {
+  const abs = inside(root, p);
+  const st = await lstat(abs).catch(() => void 0);
+  if (!st?.isFile()) return void 0;
+  return readFile(abs).then(blobSha, () => void 0);
 }
 async function setExec(root, p, mode) {
   const abs = inside(root, p);
@@ -22347,8 +22363,15 @@ async function writeWorktree(root, writes, deletes) {
   for (const p of deletes) {
     await rm(inside(root, p), { force: true }).catch((err) => failed.push({ path: p, why: String(err.message ?? err) }));
   }
-  if (!writes.length) return failed;
+  await removeEmptyParents(root, deletes);
   for (const w of writes) inside(root, w.path);
+  const clear = [];
+  for (const w of writes) {
+    if (await onDisk(root, w.path) === "dir") failed.push({ path: w.path, why: DIR_HERE });
+    else clear.push(w);
+  }
+  writes = clear;
+  if (!writes.length) return failed;
   const checkout = (ws) => withTempIndex(async (env) => {
     await git(root, ["update-index", "-z", "--index-info"], env, ws.map((w) => `${w.mode} ${w.sha}	${w.path}`).join("\0") + "\0");
     await git(root, ["checkout-index", "-f", "-z", "--stdin"], env, ws.map((w) => w.path).join("\0") + "\0");
@@ -22372,7 +22395,42 @@ async function writeCopy(root, sha, path, to) {
     child.on("close", (code) => code === 0 ? res(Buffer.concat(chunks)) : rej(new Error(`git cat-file: ${err.trim()}`)));
   });
   await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, bytes);
+  const tmp = `${target}.rh-${randomBytes(4).toString("hex")}`;
+  await writeFile(tmp, bytes, { flag: "wx" });
+  try {
+    await rename(tmp, target);
+    return blobSha(bytes);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {
+    });
+    throw err;
+  }
+}
+async function treeMap(root, tree) {
+  const out = /* @__PURE__ */ new Map();
+  for (const line of (await git(root, ["ls-tree", "-r", "-z", "--full-tree", tree])).split("\0")) {
+    const m = line.match(/^(\d{6}) \w+ ([0-9a-f]{40})\t([\s\S]*)$/);
+    if (m) out.set(m[3], { mode: m[1], sha: m[2] });
+  }
+  return out;
+}
+async function onDisk(root, p) {
+  const st = await lstat(join(root, ...p.split("/"))).catch(() => void 0);
+  return !st ? "none" : st.isDirectory() ? "dir" : "file";
+}
+async function removeEmptyParents(root, paths) {
+  const top = resolve(root);
+  for (const p of paths) {
+    let dir = dirname(resolve(root, ...p.split("/")));
+    while (dir !== top && dir.startsWith(top + sep)) {
+      try {
+        await rmdir(dir);
+      } catch {
+        break;
+      }
+      dir = dirname(dir);
+    }
+  }
 }
 async function repoIds(root) {
   const common = resolve(root, await git(root, ["rev-parse", "--git-common-dir"]));
@@ -22393,7 +22451,8 @@ function remotePaths(root, instance, chatId, repoName2, repoKey) {
   return { work, repo, alternates: posix.relative(posix.join(work, ".git", "objects"), posix.join(repo, "objects")) };
 }
 const PRELUDE = [
-  "export GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1",
+  // C: git's messages are matched below, and file names are bytes.
+  "export LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1",
   "export GIT_AUTHOR_NAME=Dispatch GIT_AUTHOR_EMAIL=dispatch@localhost GIT_COMMITTER_NAME=Dispatch GIT_COMMITTER_EMAIL=dispatch@localhost"
 ].join("\n");
 async function checkoutStatus(remote, p, baseTree) {
@@ -22404,7 +22463,10 @@ async function checkoutStatus(remote, p, baseTree) {
     `[ -d .git ] || { echo nogit; exit 0; }`,
     `I=.git/dispatch-status.$$`,
     `cp .git/index "$I" 2>/dev/null || rm -f "$I"`,
-    `if ! GIT_INDEX_FILE=$I git add -A >/dev/null; then rm -f "$I"; exit 3; fi`,
+    // A file there that can't be read (exit 1) is left as the base has it, so
+    // it reads as unchanged; it never stops the rest from syncing.
+    `GIT_INDEX_FILE=$I git add -A --ignore-errors >/dev/null 2>&1; rc=$?`,
+    `if [ "$rc" -gt 1 ]; then rm -f "$I"; echo "git add -A failed (exit $rc)" >&2; exit 3; fi`,
     `T=$(GIT_INDEX_FILE=$I git write-tree) || { rm -f "$I"; exit 3; }`,
     `rm -f "$I"`,
     `echo "tree $T"`,
@@ -22483,17 +22545,18 @@ async function checkoutCommit(remote, p, chatId, commit) {
     PRELUDE,
     `R=${sq(p.repo)}; C=${sq(commit)}; cd ${sq(p.work)} || exit 1`,
     `git --git-dir="$R" update-ref ${sq(`refs/dispatch/chats/${chatId}`)} "$C" || exit 1`,
-    `if git rev-parse -q --verify HEAD >/dev/null; then`,
-    `  git update-index -q --refresh >/dev/null 2>&1`,
+    `if git rev-parse -q --verify HEAD >/dev/null; then H=1; git update-index -q --refresh >/dev/null 2>&1; else H=; fi`,
     // A path the snapshot adds that is already there, untracked (ignored
-    // there, too big to bring back, made since): read-tree would overwrite an
-    // ignored one without a word. Name them instead.
-    `  L=.git/dispatch-added.$$`,
-    `  git -c core.quotepath=off diff-tree -r --diff-filter=A --name-only HEAD "$C" > "$L" || { rm -f "$L"; exit 1; }`,
-    `  clash=`,
-    `  while IFS= read -r f; do if [ -e "$f" ] || [ -L "$f" ]; then printf 'clash %s\\n' "$f"; clash=1; fi; done < "$L"`,
-    `  rm -f "$L"`,
-    `  [ -z "$clash" ] || exit 5`,
+    // there, too big to bring back, made since, or there before a first
+    // checkout): git would overwrite an ignored one without a word. Name them
+    // instead.
+    `L=.git/dispatch-added.$$; K=.git/dispatch-clash.$$`,
+    `if [ -n "$H" ]; then git diff-tree -r -z --no-renames --diff-filter=A --name-only HEAD "$C"; else git ls-tree -r -z --name-only "$C"; fi > "$L" || { rm -f "$L"; exit 1; }`,
+    `xargs -0 sh -c ${sq(CLASHES)} sh < "$L" > "$K" || { rm -f "$L" "$K"; exit 1; }`,
+    `rm -f "$L"`,
+    `if [ -s "$K" ]; then cat "$K"; rm -f "$K"; exit 5; fi`,
+    `rm -f "$K"`,
+    `if [ -n "$H" ]; then`,
     `  E=.git/dispatch-rt.$$`,
     `  if ! git read-tree -m -u HEAD "$C" 2>"$E"; then`,
     `    cat "$E" >&2`,
@@ -22508,10 +22571,18 @@ async function checkoutCommit(remote, p, chatId, commit) {
     `git update-ref refs/dispatch/base "$C"`
   ].join("\n");
   const r = await remote.run(script, { timeoutMs: 10 * 6e4 });
-  if (r.code === 5) throw new ClashError([...r.stdout.matchAll(/^clash (.*)$/gm)].map((m) => m[1]));
+  if (r.code === 5) throw new ClashError(r.stdout.split("\0").filter((s) => s.startsWith("clash ")).map((s) => s.slice("clash ".length)));
   if (r.code === 4) throw new StaleError(r.stderr.match(/Entry '([^']+)'/)?.[1]);
   if (r.code !== 0) throw new Error(`checking your files out on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
+const CLASHES = [
+  `for f; do`,
+  `  if [ -e "$f" ] || [ -L "$f" ]; then`,
+  `    if [ -d "$f" ] && [ ! -L "$f" ] && git cat-file -e "HEAD:$f" 2>/dev/null && [ -z "$(git ls-files -o -- ":(literal)$f" | head -n 1)" ]; then continue; fi`,
+  `    printf 'clash %s\\0' "$f"`,
+  `  fi`,
+  `done`
+].join("\n");
 class StaleError extends Error {
   constructor(file) {
     super(
@@ -22527,25 +22598,25 @@ class ClashError extends Error {
   }
 }
 async function hashThere(remote, p, paths) {
-  const script = [
-    `cd ${sq(p.work)} || exit 1`,
-    `while IFS= read -r f; do`,
-    `  if [ -L "$f" ]; then echo "other $f"`,
-    `  elif [ -d "$f" ]; then echo "dir $f"`,
+  const each = [
+    `for f; do`,
+    `  if [ -L "$f" ]; then printf 'other %s\\0' "$f"`,
+    `  elif [ -d "$f" ]; then printf 'dir %s\\0' "$f"`,
     `  elif [ -f "$f" ]; then`,
     `    s=$(git hash-object -w -- "$f") || exit 1`,
     `    if [ -x "$f" ]; then m=100755; else m=100644; fi`,
-    `    echo "file $m $s $(wc -c < "$f" | tr -d ' ') $f"`,
-    `  else echo "other $f"; fi`,
+    `    printf 'file %s %s %s %s\\0' "$m" "$s" "$(wc -c < "$f" | tr -d ' ')" "$f"`,
+    `  else printf 'other %s\\0' "$f"; fi`,
     `done`
   ].join("\n");
-  const r = await remote.run(script, { input: paths.join("\n") + "\n", timeoutMs: 10 * 6e4 });
+  const script = [PRELUDE, `cd ${sq(p.work)} || exit 1`, `xargs -0 sh -c ${sq(each)} sh`].join("\n");
+  const r = await remote.run(script, { input: paths.join("\0") + "\0", timeoutMs: 10 * 6e4 });
   if (r.code !== 0) throw new Error(`reading files on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
   const out = /* @__PURE__ */ new Map();
-  for (const line of r.stdout.split("\n")) {
-    const f = line.match(/^file (\d{6}) ([0-9a-f]{40}) (\d+) (.*)$/);
+  for (const item of r.stdout.split("\0")) {
+    const f = item.match(/^file (\d{6}) ([0-9a-f]{40}) (\d+) ([\s\S]*)$/);
     if (f) out.set(f[4], { mode: f[1], sha: f[2], size: Number(f[3]) });
-    const o = line.match(/^(dir|other) (.*)$/);
+    const o = item.match(/^(dir|other) ([\s\S]*)$/);
     if (o) out.set(o[2], o[1]);
   }
   return out;
@@ -22586,11 +22657,18 @@ class ChatSync {
   async beforeRun(info) {
     return this.serial(async () => {
       const h = this.holder;
-      if (h && h.terminal !== info.terminal) return { refuse: this.busyText(h) };
+      if (h && (h.terminal !== info.terminal || h.ended)) return { refuse: this.busyText(h) };
       const notices = [];
       try {
         await this.prepare();
-        await this.pullBack(notices, void 0, info.signal);
+        try {
+          await this.pullBack(notices, void 0, info.signal);
+        } catch (err) {
+          if (info.signal.aborted) throw err;
+          notices.push(
+            `[${this.d.label}] Could not check for changes made there (${errText(err)}). Whatever changed there stays, and isn't overwritten.`
+          );
+        }
         await this.resolved(notices);
         if (!this.rec.conflicts.length) await this.push(notices, info.signal);
         if (this.rec.conflicts.length) return { refuse: `Not run: ${this.conflictText()}`, notices };
@@ -22629,6 +22707,10 @@ class ChatSync {
   /** A terminal's shell ended: whatever it was running is over, and its lock goes. */
   releaseTerminal(terminal) {
     if (this.holder?.terminal === terminal) this.holder = void 0;
+  }
+  /** The shell there says a run is over (one core stopped waiting for, say): it no longer holds the checkout. */
+  runEnded(runId) {
+    if (this.holder?.runId === runId) this.holder = void 0;
   }
   /** Run `fn` after every earlier sync of this chat. */
   serial(fn) {
@@ -22690,9 +22772,11 @@ class ChatSync {
     const host = st.changes;
     if (!host.length) return;
     await this.ensureLocal(base.commit, signal);
+    const was = await treeMap(root, base.tree);
+    const off = host.find((c) => !sameEntry(was.get(c.path) ?? ABSENT, c.from));
+    if (off) throw new Error(`the machine's changes don't start from the last sync (${off.path})`);
     const snap = await snapshotWorktree(root, this.snapOpts());
     const local = new Map((await diffTrees(root, base.tree, snap.tree)).map((c) => [c.path, c.to]));
-    const tooBig = new Set(snap.tooBig.map((b) => b.path));
     const accept = [];
     const candidates = [];
     const copies = [];
@@ -22710,7 +22794,7 @@ class ChatSync {
         continue;
       }
       const bad = await pathProblem(root, c.path);
-      if (bad) {
+      if (bad && bad !== DIR_HERE) {
         aside.push({ c, why: bad });
         continue;
       }
@@ -22733,30 +22817,35 @@ class ChatSync {
         await conflict(c);
       }
     }
-    const need = /* @__PURE__ */ new Set([...candidates.filter((c) => !isAbsent(c.to)).map((c) => c.to.sha), ...copies.map((x) => x.c.to.sha)]);
-    if (need.size) await this.fetch([...need], signal);
+    const again = (c) => this.rec.skippedHost[c.path] === c.to.sha;
+    await this.fetchMissing(
+      [...candidates.filter((c) => !isAbsent(c.to) && !again(c)), ...copies.map((x) => x.c)].map((c) => c.to.sha),
+      signal
+    );
+    const last = await snapshotWorktree(root, this.snapOpts());
+    const now = new Map((await diffTrees(root, base.tree, last.tree)).map((c) => [c.path, c.to]));
     const writes = [];
     const deletes = [];
-    const now = await localBlobs(root, candidates.map((c) => c.path));
-    const unexpected = candidates.filter((c) => !matches(now.get(c.path), c.from));
-    const ignored = await ignoredPaths(
-      root,
-      unexpected.filter((c) => typeof now.get(c.path) === "string" && now.get(c.path) !== "dir").map((c) => c.path)
-    );
+    const take = (c, disk) => {
+      accept.push(c);
+      said.back.push(`${tag(c)} ${c.path}`);
+      if (isAbsent(c.to)) {
+        if (disk === "file") deletes.push(c.path);
+      } else if (c.to.sha !== c.from.sha || this.ids.modes) writes.push({ path: c.path, ...c.to });
+      this.noteMode(c);
+    };
+    const inTheWay = [];
     for (const c of candidates) {
-      const here = now.get(c.path) ?? null;
-      if (matches(here, c.from)) {
-        accept.push(c);
-        said.back.push(`${tag(c)} ${c.path}`);
-        if (isAbsent(c.to)) deletes.push(c.path);
-        else if (c.to.sha !== c.from.sha || this.ids.modes) writes.push({ path: c.path, ...c.to });
-        this.noteMode(c);
-      } else if (matches(here, c.to)) {
-        accept.push(c);
-      } else if (here === "dir") {
-        aside.push({ c, why: "it is a directory here" });
-      } else if (tooBig.has(c.path) || ignored.has(c.path)) {
+      const here = now.get(c.path) ?? c.from;
+      const disk = await onDisk(root, c.path);
+      if (disk === "dir" && !isAbsent(c.to)) {
+        inTheWay.push(c);
+      } else if (disk === "file" && isAbsent(here)) {
         aside.push({ c, why: "here it is a file that isn't synced (ignored, or too big to send)" });
+      } else if (sameEntry(here, c.from)) {
+        take(c, disk);
+      } else if (sameBlob(here, c.to)) {
+        accept.push(c);
       } else if (isAbsent(c.to)) {
         accept.push(c);
         said.kept.push(c.path);
@@ -22764,35 +22853,37 @@ class ChatSync {
         await conflict(c);
       }
     }
+    const deleting = new Set(deletes);
+    for (const c of inTheWay) {
+      if (isAbsent(c.from) && await holdsOnly(root, c.path, deleting)) take(c, "dir");
+      else aside.push({ c, why: DIR_HERE });
+    }
+    await this.fetchMissing([...writes.map((w) => w.sha), ...copies.map((x) => x.c.to.sha)], signal);
     const failed = await writeWorktree(root, writes, deletes);
     const lost = new Set(failed.map((f) => f.path));
     for (const f of failed) {
       const c = candidates.find((x) => x.path === f.path);
       aside.push({ c, why: `couldn't be written here: ${f.why.split("\n")[0]}` });
     }
+    said.back = said.back.filter((s) => !lost.has(s.slice(s.indexOf(" ") + 1)));
     const written = writes.filter((w) => !lost.has(w.path));
-    const hashed = await localBlobs(root, written.map((w) => w.path));
-    for (const w of written) {
-      const h = hashed.get(w.path);
-      if (typeof h === "string" && h !== "dir" && h !== w.sha) this.rec.pins[w.path] = { local: h, host: w.sha };
-      else delete this.rec.pins[w.path];
-    }
+    await this.pin(written.map((w) => ({ path: w.path, host: w.sha })));
     for (const pth of deletes) {
       if (lost.has(pth)) continue;
       delete this.rec.overlay[pth];
       delete this.rec.pins[pth];
     }
     for (const x of copies) {
+      let raw;
       try {
-        await writeCopy(root, x.c.to.sha, x.c.path, x.copy);
+        raw = await writeCopy(root, x.c.to.sha, x.c.path, x.copy);
       } catch (err) {
         aside.push({ c: x.c, why: `changed here too, and the machine's version couldn't be saved beside it: ${errText(err)}` });
         continue;
       }
       accept.push(x.c);
       this.noteMode(x.c);
-      this.rec.conflicts = this.rec.conflicts.filter((k) => k.path !== x.c.path);
-      this.rec.conflicts.push({ path: x.c.path, copy: x.copy, ...by ? { by } : {} });
+      this.addConflict({ path: x.c.path, copy: x.copy, ...by ? { by } : {}, host: x.c.to.sha, raw });
     }
     const taken = accept.filter((c) => !lost.has(c.path));
     const next = await composeTree(root, base.tree, taken);
@@ -22827,12 +22918,15 @@ class ChatSync {
     const done = [];
     for (const c of this.rec.conflicts) {
       if (await exists(inside(this.d.root, c.copy))) left.push(c);
-      else done.push(c.path);
+      else done.push(c);
     }
     if (!done.length) return;
+    const kept = [];
+    for (const c of done) if (c.host && c.raw && await fileBlob(this.d.root, c.path) === c.raw) kept.push({ path: c.path, host: c.host });
+    await this.pin(kept);
     this.rec.conflicts = left;
     await this.save();
-    notices.push(`[${this.d.label}] Conflict settled, your version goes there: ${list(done)}`);
+    notices.push(`[${this.d.label}] Conflict settled, your version goes there: ${list(done.map((c) => c.path))}`);
   }
   conflictText() {
     const items = this.rec.conflicts.map((c) => `\`${c.path}\` (theirs: \`${c.copy}\`${c.by ? `, changed by \`${short(c.by)}\`` : ""})`);
@@ -22841,7 +22935,7 @@ class ChatSync {
   busyText(h) {
     const what = `\`${short(h.command)}\``;
     if (h.ended) {
-      return `Not run: in terminal "${h.terminal}", ${what} ${h.ended === "timed-out" ? "timed out" : "was cancelled"} and may still be running in this chat's checkout on ${this.d.label}; syncing your files now would change them under it. Stop it (Ctrl-C there, or close that terminal), or run this in "${h.terminal}".`;
+      return `Not run: in terminal "${h.terminal}", ${what} ${h.ended === "timed-out" ? "timed out" : "was cancelled"} and may still be running in this chat's checkout on ${this.d.label}; syncing your files now would change them under it. Wait for it to finish, or stop it (Ctrl-C in that terminal, or close the terminal).`;
     }
     return `Not run: terminal "${h.terminal}" is still running ${what} in this chat's checkout on ${this.d.label}, and syncing your files now would change them under it. Wait for it to finish (or stop it), or run this in "${h.terminal}".`;
   }
@@ -22867,16 +22961,22 @@ class ChatSync {
     const since = base && await hasObject(this.d.root, base.tree) ? base.tree : void 0;
     const sent = await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, since), signal);
     if (signal.aborted) throw new Error("cancelled");
-    try {
-      await checkoutCommit(this.d.remote, p, this.d.chatId, snap.commit);
-    } catch (err) {
-      if (err instanceof ClashError) return this.adoptClashes(err.paths, signal);
-      if (err instanceof StaleError && err.file && this.rec.skippedHost[err.file] !== void 0) {
-        throw new Error(
-          `\`${err.file}\` changed on the machine but can't be brought back here (said earlier), and your files change it too. Nothing was overwritten; rename or undo your change to it here.`
-        );
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await checkoutCommit(this.d.remote, p, this.d.chatId, snap.commit);
+        break;
+      } catch (err) {
+        if (err instanceof ClashError && attempt === 0) {
+          if (await this.adoptClashes(err.paths, snap.tree, signal)) continue;
+          return;
+        }
+        if (err instanceof StaleError && err.file && this.rec.skippedHost[err.file] !== void 0) {
+          throw new Error(
+            `\`${err.file}\` changed on the machine but can't be brought back here (said earlier), and your files change it too. Nothing was overwritten; rename or undo your change to it here.`
+          );
+        }
+        throw err;
       }
-      throw err;
     }
     this.rec.base = { commit: snap.commit, tree: snap.tree };
     await this.save();
@@ -22888,13 +22988,16 @@ class ChatSync {
   }
   /**
    * Your files add paths the machine already has outside the sync (ignored
-   * there, set aside, made since). Make each a conflict, its machine version
-   * saved beside yours, rather than overwrite it.
+   * there, set aside, made since, or there before the first checkout). One
+   * the same as yours just joins the sync; any other becomes a conflict, the
+   * machine's version saved beside yours, rather than be overwritten.
+   * Resolves true when every one joined, so the checkout can go ahead.
    */
-  async adoptClashes(paths, signal) {
+  async adoptClashes(paths, snapTree, signal) {
     const p = this.paths;
-    const base = this.rec.base;
+    const baseTree = this.rec.base?.tree ?? EMPTY_TREE;
     const there = await hashThere(this.d.remote, p, paths);
+    const mine = await treeMap(this.d.root, snapTree);
     const adopt = [];
     const copies = [];
     const blocked = [];
@@ -22902,6 +23005,11 @@ class ChatSync {
       const t = there.get(path);
       if (!t || t === "dir" || t === "other") {
         blocked.push(`${path} (${t === "dir" ? "a directory" : "not a plain file"} there)`);
+        continue;
+      }
+      const to = { mode: t.mode, sha: t.sha };
+      if (mine.get(path)?.sha === t.sha) {
+        adopt.push({ path, from: ABSENT, to });
         continue;
       }
       if (t.size > this.cap) {
@@ -22913,18 +23021,25 @@ class ChatSync {
         blocked.push(`${path} (its copy can't be saved here)`);
         continue;
       }
-      adopt.push({ path, from: ABSENT, to: { mode: t.mode, sha: t.sha } });
-      copies.push({ path, sha: t.sha, copy });
+      copies.push({ path, to, copy });
     }
-    if (copies.length) {
-      await this.fetch(copies.map((c) => c.sha), signal);
-      for (const c of copies) {
-        await writeCopy(this.d.root, c.sha, c.path, c.copy);
-        this.rec.conflicts = this.rec.conflicts.filter((k) => k.path !== c.path);
-        this.rec.conflicts.push({ path: c.path, copy: c.copy });
+    await this.fetchMissing(copies.map((c) => c.to.sha), signal);
+    let conflicts = 0;
+    for (const c of copies) {
+      let raw;
+      try {
+        raw = await writeCopy(this.d.root, c.to.sha, c.path, c.copy);
+      } catch (err) {
+        blocked.push(`${c.path} (its copy couldn't be saved here: ${errText(err)})`);
+        continue;
       }
-      const next = await composeTree(this.d.root, base.tree, adopt);
-      await this.sendObjects(await objectsFor(this.d.root, next.commit, next.tree, base.tree), signal);
+      adopt.push({ path: c.path, from: ABSENT, to: c.to });
+      this.addConflict({ path: c.path, copy: c.copy, host: c.to.sha, raw });
+      conflicts++;
+    }
+    if (adopt.length) {
+      const next = await composeTree(this.d.root, baseTree, adopt);
+      await this.sendObjects(await objectsFor(this.d.root, next.commit, next.tree, baseTree), signal);
       await setBase(this.d.remote, p, this.d.chatId, next.commit);
       this.rec.base = next;
       await this.save();
@@ -22933,6 +23048,20 @@ class ChatSync {
       throw new Error(
         `your files add paths that are already on the machine, outside the sync: ${list(blocked)}. Nothing was overwritten; rename yours here.`
       );
+    }
+    return conflicts === 0;
+  }
+  addConflict(k) {
+    this.rec.conflicts = this.rec.conflicts.filter((x) => x.path !== k.path);
+    this.rec.conflicts.push(k);
+  }
+  /** Pin each file that is the machine's blob `host` but hashes differently here; drop any other pin on it. */
+  async pin(files) {
+    const hashed = await snapshotBlobs(this.d.root, files.map((f) => f.path));
+    for (const f of files) {
+      const h = hashed.get(f.path);
+      if (h && h !== f.host) this.rec.pins[f.path] = { local: h, host: f.host };
+      else delete this.rec.pins[f.path];
     }
   }
   /** Send the machine whichever of `shas` it lacks, in batches it keeps. */
@@ -22949,13 +23078,18 @@ class ChatSync {
     }
     return { objects: missing.length, bytes };
   }
-  /** Fetch blobs the machine made into the local repository. */
-  async fetch(shas, signal) {
+  /** Fetch whichever of `shas` (blobs the machine made) the local repository lacks. */
+  async fetchMissing(shas, signal) {
+    const want = [...new Set(shas)];
+    if (!want.length) return;
+    const have = await objectSizes(this.d.root, want);
+    const missing = want.filter((s) => !have.has(s));
+    if (!missing.length) return;
     const pipe = new PassThrough();
     const taking = receivePack(this.d.root, pipe);
     taking.catch(() => {
     });
-    await sendObjects(this.d.remote, this.paths, shas, pipe, signal);
+    await sendObjects(this.d.remote, this.paths, missing, pipe, signal);
     await taking;
   }
   /** The base's objects, here. They are normally (each base began here); a long-unused chat's may have been gc'd. */
@@ -22996,8 +23130,8 @@ class ChatSync {
 function empty(root) {
   return { v: 1, root, overlay: {}, pins: {}, conflicts: [], skippedHost: {}, skippedLocal: {} };
 }
-function matches(here, e) {
-  return isAbsent(e) ? here === null : here === e.sha;
+function sameBlob(a, b) {
+  return isAbsent(a) ? isAbsent(b) : a.sha === b.sha;
 }
 function tag(c) {
   if (isAbsent(c.from)) return "A";
@@ -23109,6 +23243,7 @@ class HostBackend {
       if (this.shells.get(key) === sh) this.shells.delete(key);
       this.syncs.get(chatId)?.releaseTerminal(info.name);
     });
+    sh.on("runEnd", (m) => this.syncs.get(chatId)?.runEnded(m.runId));
     return sh;
   }
   /**
@@ -23158,7 +23293,7 @@ class HostBackend {
       `- This terminal runs on ${host.label}${describe(probe)}, over SSH as \`${host.user}\`, under dispatch-host. A dropped connection pauses the command and picks it up again; it is not restarted.`,
       `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, with PATH and locale from the login shell. On it: ${tools(probe)}.`,
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB aren't sent.`,
-      `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command. Outside a git repository nothing is synced.`,
+      `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command; one that timed out holds every terminal until it ends (Ctrl-C it). Outside a git repository nothing is synced.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you started (Ctrl-C the terminal, \`kill %1\`).`
     ].join("\n");
@@ -23168,9 +23303,14 @@ function chatDir(paths, instanceId, chatId) {
   return posix.join(instanceLayout(paths.root, instanceId).chatsDir, assertId("chat", chatId));
 }
 async function repoTop(dir) {
-  if (!dir) return void 0;
-  const top = await git(dir, ["rev-parse", "--show-toplevel"]).catch(() => "");
-  return top ? resolve(top) : void 0;
+  if (!dir || !(await stat(dir).catch(() => void 0))?.isDirectory()) return void 0;
+  try {
+    const top = await git(dir, ["rev-parse", "--show-toplevel"], { LC_ALL: "C" });
+    return top ? resolve(top) : void 0;
+  } catch (err) {
+    if (/not a git repository|must be run in a work tree/i.test(errText(err))) return void 0;
+    throw new Error(`can't read the git repository at ${dir}, so its files can't be synced: ${errText(err)}`);
+  }
 }
 function within(root, cwd) {
   const rel = relative(root, cwd);
