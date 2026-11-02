@@ -1,0 +1,2 @@
+# Build output. The remote-host plugin inlines it into its own committed bundle.
+dist/
