@@ -5,30 +5,46 @@
  * the machine's SSH connection and speaks host-agent's framed protocol to it
  * (session.ts). A Mac command must never become a PowerShell one, so the
  * backend refuses rather than falls back (`fallback: "refuse"`).
+ *
+ * A chat in a git repository gets its own checkout on the machine, kept in
+ * step around every command by its ChatSync (sync/chat-sync.ts): the shell
+ * starts there, and a command whose files can't be synced doesn't run.
  */
 import { randomBytes } from "node:crypto";
-import { posix } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, posix, relative, resolve } from "node:path";
 import type {
+  PluginContext,
   PluginLog,
+  TerminalAfterRunInfo,
+  TerminalAfterRunResult,
   TerminalBackend,
   TerminalBackendHandle,
+  TerminalBeforeRunResult,
   TerminalRunInfo,
   TerminalSpawnInfo,
 } from "@dispatch/plugin-sdk";
-import { assertId, instanceLayout, sq, type ProbeResult } from "@dispatch-plugins/host-agent";
-import { errText } from "@dispatch-plugins/remote-core";
+import { assertId, chatWorktreePath, instanceLayout, sq, type ProbeResult } from "@dispatch-plugins/host-agent";
+import { errText, git } from "@dispatch-plugins/remote-core";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
 import type { HostLink } from "./link.js";
 import { HostShell, type HostShellOptions, type SessionOpener } from "./session.js";
+import { ChatSync, DEFAULT_CAP_BYTES, type ChatSyncDeps } from "./sync/chat-sync.js";
+import { linkRemote } from "./sync/link-remote.js";
+import { repoName } from "./sync/local.js";
+import type { RemoteSide } from "./sync/remote.js";
 
 export interface HostBackendDeps {
   host: () => HostConfig;
   link: HostLink;
   instanceId: string;
   log: PluginLog;
+  kv?: PluginContext["kv"];
   /** Overrides for tests: heartbeat, stall and give-up timings. */
   shell?: Partial<HostShellOptions>;
+  /** Overrides for tests: the size cap, the batch size. */
+  sync?: Pick<ChatSyncDeps, "capBytes" | "batchBytes">;
 }
 
 export class HostBackend implements TerminalBackend {
@@ -36,9 +52,14 @@ export class HostBackend implements TerminalBackend {
   readonly fallback = "refuse" as const;
   /** The first connect to a machine may push Node's ~50 MB runtime before the shell starts. */
   readonly spawnTimeoutMs = 5 * 60_000;
+  /** A chat's first sync sends its whole worktree; it resumes if cut short, but give it room. */
+  readonly runHookTimeoutMs = 30 * 60_000;
   label: string;
   /** The live shell per chat + terminal name, so `beforeRun` can mark its run in the journal. */
   private readonly shells = new Map<string, HostShell>();
+  /** Each chat's checkout on the machine, by chat. */
+  private readonly syncs = new Map<string, ChatSync>();
+  private remote?: RemoteSide;
 
   constructor(
     readonly id: string,
@@ -50,7 +71,16 @@ export class HostBackend implements TerminalBackend {
   async spawn(info: TerminalSpawnInfo): Promise<TerminalBackendHandle> {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
-    const cwd = chatDir(linked.paths, this.deps.instanceId, chatId);
+    // In a repository, the shell starts at the same place in the chat's
+    // checkout there. The checkout itself is filled by the first command's
+    // sync, not here: spawn stays quick.
+    const root = await repoTop(info.worktreePath ?? info.repoPath);
+    // git reports the top as a real path (macOS's /var is /private/var): compare like with like.
+    const local = root ? await realpath(info.cwd).catch(() => info.cwd) : info.cwd;
+    const cwd = root
+      ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, local))
+      : chatDir(linked.paths, this.deps.instanceId, chatId);
+    if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
     const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 30_000 });
     if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
 
@@ -72,7 +102,11 @@ export class HostBackend implements TerminalBackend {
     this.shells.set(key, sh);
     sh.on("exit", () => {
       if (this.shells.get(key) === sh) this.shells.delete(key);
+      // Whatever it was running is over, so it no longer holds the checkout.
+      this.syncs.get(chatId)?.releaseTerminal(info.name);
     });
+    // A run is over there, even one core stopped waiting for.
+    sh.on("runEnd", (m: { runId: string }) => this.syncs.get(chatId)?.runEnded(m.runId));
     return sh;
   }
 
@@ -88,8 +122,34 @@ export class HostBackend implements TerminalBackend {
     if (shells.length) await new Promise((r) => setTimeout(r, waitMs).unref?.());
   }
 
-  beforeRun(info: TerminalRunInfo): void {
-    this.shells.get(shellKey(info.chatId, info.terminal))?.runBegin(info.runId, info.background);
+  /** Sync the chat's files there (fail closed), then mark the run in the session's journal. */
+  async beforeRun(info: TerminalRunInfo): Promise<TerminalBeforeRunResult> {
+    const sync = this.syncs.get(info.chatId);
+    const r = sync ? await sync.beforeRun(info) : {};
+    if (!r.refuse) this.shells.get(shellKey(info.chatId, info.terminal))?.runBegin(info.runId, info.background);
+    return r;
+  }
+
+  /** Bring back what the command changed there. */
+  async afterRun(info: TerminalAfterRunInfo): Promise<TerminalAfterRunResult> {
+    return (await this.syncs.get(info.chatId)?.afterRun(info)) ?? {};
+  }
+
+  private chatSync(chatId: string, root: string): ChatSync {
+    this.remote ??= linkRemote(this.deps.link);
+    const host = this.deps.host();
+    return new ChatSync({
+      chatId,
+      root,
+      label: host.label,
+      slug: host.slug,
+      instanceId: this.deps.instanceId,
+      hostRoot: async () => (await this.deps.link.ready()).paths.root,
+      remote: this.remote,
+      log: this.deps.log,
+      ...(this.deps.kv ? { kv: this.deps.kv } : {}),
+      ...this.deps.sync,
+    });
   }
 
   agentNote(info: { chatId: string }): string {
@@ -102,18 +162,50 @@ export class HostBackend implements TerminalBackend {
         `connection pauses the command and picks it up again; it is not restarted.`,
       `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, ` +
         `with PATH and locale from the login shell. On it: ${tools(probe)}.`,
-      `- Your files are NOT synced to this machine yet. The shell starts in an empty directory of this chat's own, ${where}. ` +
-        `Clone or copy what you need there, and copy results back.`,
-      `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer.`,
+      `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked ` +
+        `files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts ` +
+        `at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, ` +
+        `build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB ` +
+        `aren't sent.`,
+      `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is ` +
+        `saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others ` +
+        `are refused, so files never change under a running command; one that timed out holds every terminal until it ends ` +
+        `(Ctrl-C it). Outside a git repository nothing is synced.`,
+      `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you ` +
         `started (Ctrl-C the terminal, \`kill %1\`).`,
     ].join("\n");
   }
 }
 
-/** Where a chat's shells start on the machine (until worktrees are synced there). */
+/** A chat's directory on the machine: its checkouts are inside, and a chat outside a repository starts here. */
 export function chatDir(paths: HostPaths, instanceId: string, chatId: string): string {
   return posix.join(instanceLayout(paths.root, instanceId).chatsDir, assertId("chat", chatId));
+}
+
+/**
+ * The top of the git repository `dir` is in, or undefined outside one: a
+ * chat with no repository (or a project folder that isn't one) isn't synced,
+ * and a sub-directory never stands in for its repository.
+ */
+export async function repoTop(dir: string | undefined): Promise<string | undefined> {
+  if (!dir || !(await stat(dir).catch(() => undefined))?.isDirectory()) return undefined;
+  try {
+    const top = await git(dir, ["rev-parse", "--show-toplevel"], { LC_ALL: "C" });
+    return top ? resolve(top) : undefined;
+  } catch (err) {
+    if (/not a git repository|must be run in a work tree/i.test(errText(err))) return undefined;
+    // A repository git won't read (one it doesn't trust, say) must not pass
+    // for no repository: the shell would start in an empty checkout.
+    throw new Error(`can't read the git repository at ${dir}, so its files can't be synced: ${errText(err)}`);
+  }
+}
+
+/** `cwd` relative to `root`, POSIX-style; "" for the root itself or anywhere outside it. */
+export function within(root: string, cwd: string): string {
+  const rel = relative(root, cwd);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return "";
+  return rel.split(/[\\/]+/).join("/");
 }
 
 export function sessionCommand(

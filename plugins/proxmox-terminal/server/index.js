@@ -22,7 +22,7 @@ import require$$1$2 from "zlib";
 import { StringDecoder } from "node:string_decoder";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, copyFile, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, copyFile, utimes, readFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { resolve, isAbsolute, join, basename } from "node:path";
 import { request } from "node:https";
@@ -20481,8 +20481,7 @@ async function snapshot(root) {
   const dir = await mkdtemp(join(tmpdir(), "dispatch-snap-"));
   const tmpIndex = join(dir, "index");
   try {
-    await copyFile(indexPath, tmpIndex).catch(() => {
-    });
+    await copyIndex(indexPath, tmpIndex);
     const env = { GIT_INDEX_FILE: tmpIndex };
     await git(root, ["add", "-A"], env);
     const tree = await git(root, ["write-tree"], env);
@@ -20500,6 +20499,12 @@ async function snapshot(root) {
     await rm(dir, { recursive: true, force: true }).catch(() => {
     });
   }
+}
+async function copyIndex(from, to) {
+  const st = await stat(from).catch(() => void 0);
+  if (!st) return;
+  await copyFile(from, to);
+  await utimes(to, st.atime, st.mtime);
 }
 async function localHas(root, shas) {
   const asked = shas.filter((sha) => /^[0-9a-f]{40}$/.test(sha));

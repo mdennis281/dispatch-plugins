@@ -3,7 +3,7 @@
  * index is untouched" is a claim about git, not about this code.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -46,6 +46,21 @@ describe("snapshot", () => {
     expect(readFileSync(join(dir, ".git", "index")).equals(indexBefore)).toBe(true);
     expect(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: dir }).toString().trim()).toBe("");
     expect(execFileSync("git", ["stash", "list"], { cwd: dir }).toString().trim()).toBe("");
+  });
+
+  it("sees a same-size rewrite that only git's racy check catches, though it works on a copy of the index", async () => {
+    const dir = gitRepo();
+    const g = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" });
+    // a.txt's entry and the index file share one timestamp: racily clean.
+    const t0 = 1_600_000_000;
+    utimesSync(join(dir, "a.txt"), t0, t0);
+    g("add", "a.txt");
+    utimesSync(join(dir, ".git", "index"), t0, t0);
+    // Same size, same mtime: only that racy check can tell.
+    writeFileSync(join(dir, "a.txt"), "two\n");
+    utimesSync(join(dir, "a.txt"), t0, t0);
+    const sha = await snapshot(dir);
+    expect(execFileSync("git", ["show", `${sha}:a.txt`], { cwd: dir, stdio: "pipe" }).toString()).toBe("two\n");
   });
 
   it("is deterministic: an unchanged tree on an unchanged HEAD is the same commit", async () => {
