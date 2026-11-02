@@ -7,7 +7,6 @@
  * Skipped on Windows; CI runs it on Linux and macOS.
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { TerminalBackendHandle, TerminalExitReason } from "@dispatch/plugin-sdk";
@@ -52,7 +51,11 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
   let registry: HostRegistry;
 
   beforeAll(async () => {
-    home = realpathSync(mkdtempSync(join(tmpdir(), "rh-e2e-")));
+    // Short on purpose: dispatch-host's sockets live under it, and a unix
+    // socket path is capped at 104 bytes on macOS. Its $TMPDIR
+    // (/private/var/folders/…/T/) alone uses most of that. A real home,
+    // /Users/dispatch, is far below it.
+    home = realpathSync(mkdtempSync("/tmp/rh-"));
     const bin = join(home, ".dispatch-host", "runtime", "node", "bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(
@@ -154,14 +157,13 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     h.kill();
     const link = registry.get("e2e")!.link;
     type Row = { chat: string; state: string };
-    let rows: Row[] = [];
-    await until(
-      () => {
-        void link.agent<Row[]>(["list", "--instance", INSTANCE]).then((r) => (rows = r));
-        return rows.some((r) => r.chat === "chat-2") && rows.filter((r) => r.chat === "chat-2").every((r) => r.state === "exited");
-      },
-      20_000,
-      "chat-2's session to exit",
-    );
+    const end = Date.now() + 20_000;
+    for (;;) {
+      const rows = await link.agent<Row[]>(["list", "--instance", INSTANCE]);
+      const mine = rows.filter((r) => r.chat === "chat-2");
+      if (mine.length && mine.every((r) => r.state === "exited")) break;
+      if (Date.now() > end) throw new Error(`chat-2's session did not exit: ${JSON.stringify(mine)}`);
+      await new Promise((r) => setTimeout(r, 200));
+    }
   });
 });
