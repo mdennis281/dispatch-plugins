@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { connect, type AddressInfo } from "node:net";
 import { Server, utils, type AuthContext, type ServerChannel } from "ssh2";
 import { hostKeyFingerprint } from "../src/ssh/host-verifier.js";
+import { generateKeyPair } from "../src/ssh/keys.js";
 
 export interface AuthAttempt {
   method: string;
@@ -53,7 +54,8 @@ export interface TestSshServer {
 }
 
 export async function startTestSshServer(opts: TestSshServerOptions = {}): Promise<TestSshServer> {
-  const hostKey = utils.generateKeyPairSync("ed25519");
+  // Not ssh2's generateKeyPairSync: one key in 256 it makes is malformed (see keys.ts).
+  const hostKey = { private: generateKeyPair("test-host").privateKey };
   const parsed = utils.parseKey(hostKey.private);
   if (parsed instanceof Error) throw parsed;
   const attempts: AuthAttempt[] = [];
