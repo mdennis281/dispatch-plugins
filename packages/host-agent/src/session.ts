@@ -25,6 +25,7 @@ import {
   type Frame,
   type ReadyMsg,
   type RunBeginMsg,
+  type RunEndMsg,
   type SignalMsg,
 } from "./protocol.js";
 
@@ -81,6 +82,8 @@ export class Session {
   /** Why we are killing the shell, so its exit is reported as that and not as `exited`. */
   private ending?: { reason: ExitReason; detail?: string };
   private readonly scanner = new SentinelScanner();
+  /** Recent run ends, so a client that was away when one landed still gets its RUN_END. */
+  private readonly ends: Array<RunEndMsg & { out: number }> = [];
 
   constructor(private readonly d: SessionDeps) {
     this.lastBeat = d.now();
@@ -131,6 +134,8 @@ export class Session {
     client.write(encodeFrame(F.ready, ready));
     for (const frame of replay(this.d.out, from.out, F.stdout)) client.write(frame);
     for (const frame of replay(this.d.err, from.err, F.stderr)) client.write(frame);
+    // After the bytes that hold their sentinels: ends the client hasn't seen.
+    for (const e of this.ends) if (e.out > from.out) client.write(encodeFrame(F.runEnd, { runId: e.runId, exitCode: e.exitCode, cwd: e.cwd }));
     if (this.exitMsg) {
       client.write(encodeFrame(F.exit, this.exitMsg));
       client.end();
@@ -227,6 +232,8 @@ export class Session {
         err: this.d.err.offset,
         at: new Date().toISOString(),
       });
+      this.ends.push({ runId, exitCode: end.exitCode, cwd: end.cwd, out: this.d.out.offset });
+      if (this.ends.length > 32) this.ends.shift();
       c?.write(encodeFrame(F.runEnd, { runId, exitCode: end.exitCode, cwd: end.cwd }));
     }
     // A client this far behind is a stalled link. Let it go: the journal has

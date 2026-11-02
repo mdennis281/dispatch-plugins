@@ -4,9 +4,10 @@
  * A live owner kills its own tree: when the shell exits, on a KILL, and once
  * Dispatch has been silent past the heartbeat timeout. Two cases are left:
  *
- * - **The owner died first** (crashed, OOM-killed). Its shell and anything it
- *   started are orphans. The sweep finds them from the record the owner kept
- *   (the shell's pid, which is also its session id, plus tracked escapees).
+ * - **The owner died first** (crashed, OOM-killed). The shell ends at once,
+ *   since its stdin was the owner's pipe, but whatever it started in the
+ *   background is orphaned. The sweep finds those from the record the owner
+ *   kept: the shell's pid is still their session id, plus tracked escapees.
  * - **Dead-man switch.** No Dispatch has talked to this instance for
  *   `deadManMs`, so every session of it still alive is killed, owner and all.
  *   That's the backstop if a watchdog never fires. "Talked" means anything

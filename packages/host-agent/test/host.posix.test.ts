@@ -273,9 +273,11 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     const rec = JSON.parse(readFileSync(sessionPaths(root, INSTANCE, id).record, "utf8")) as { ownerPid: number };
     process.kill(rec.ownerPid, "SIGKILL");
     await b.exited;
-    expect(alive(pid)).toBe(true); // bash is in its own session: the owner's death didn't take it
+    // bash reads the owner's pipe, so it ends at that EOF; its background child is orphaned.
+    await b.waitFor(() => !alive(pid));
+    expect(alive(bg)).toBe(true);
     expect((cli("sweep") as { reaped: string[] }).reaped).toContain(id);
-    await b.waitFor(() => !alive(pid) && !alive(bg));
+    await b.waitFor(() => !alive(bg));
   });
 
   it.skipIf(!hasLsof)("attributes a listener to the chat whose shell started it", async () => {

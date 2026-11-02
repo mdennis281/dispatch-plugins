@@ -185,6 +185,24 @@ describe("Session", () => {
     expect(runs).toHaveLength(2);
   });
 
+  it("gives a client that was away when a run ended its RUN_END on resume, after the bytes", () => {
+    const { session, shell } = setup();
+    const a = new FakeClient();
+    session.attach(a, { v: 1 });
+    session.handle(a, frame(F.runBegin, { runId: "r1", background: false }));
+    shell.say("working\n");
+    session.detachClient(a);
+    shell.say("CMTERMSENTINEL_n1|0|True|/w\n");
+    const b = new FakeClient();
+    session.attach(b, { v: 1, resume: { out: 8, err: 0 } });
+    expect(b.frames.map((f) => f.type)).toEqual([F.ready, F.stdout, F.runEnd]);
+    expect(decodeJson(b.of(F.runEnd)[0]!.payload)).toEqual({ runId: "r1", exitCode: 0, cwd: "/w" });
+    // A client that already had the sentinel doesn't get it twice.
+    const c = new FakeClient();
+    session.attach(c, { v: 1, resume: { out: 8 + 28, err: 0 } });
+    expect(c.of(F.runEnd)).toEqual([]);
+  });
+
   it("drops a client too far behind; the journal keeps every byte for its return", () => {
     const { session, shell } = setup({ maxBacklog: 10 });
     const c = new FakeClient();

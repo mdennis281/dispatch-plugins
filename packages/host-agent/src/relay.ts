@@ -15,7 +15,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, openSync, statSync } from "node:fs";
 import { connect, type Socket } from "node:net";
-import { StreamLog } from "./journal.js";
+import { StreamLog, readRuns } from "./journal.js";
 import { sessionPaths, type SessionRecord } from "./layout.js";
 import { NO_CWD_EXIT } from "./owner.js";
 import { F, PROTOCOL_VERSION, encodeFrame, type ErrorCode, type ExitMsg, type ReadyMsg } from "./protocol.js";
@@ -185,6 +185,9 @@ function replayExited(a: RelayArgs, rec: SessionRecord): number {
   a.output.write(encodeFrame(F.ready, ready));
   for (const f of replay(out, from.out, F.stdout)) a.output.write(f);
   for (const f of replay(err, from.err, F.stderr)) a.output.write(f);
+  for (const e of readRuns(paths.runs)) {
+    if (e.t === "end" && e.out > from.out) a.output.write(encodeFrame(F.runEnd, { runId: e.runId, exitCode: e.exitCode, cwd: e.cwd }));
+  }
   const exit: ExitMsg = {
     code: rec.exit?.code ?? null,
     signal: rec.exit?.signal ?? null,
