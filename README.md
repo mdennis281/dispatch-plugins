@@ -8,7 +8,7 @@ Plugins for [Dispatch](https://github.com/mdennis281/dispatch). Each one lives i
 
 ## Planned
 
-- **Remote host** (`remote-host`): run a chat's terminals, a synced worktree and its browser MCPs on your own machines, Mac first. Design: [docs/design/remote-host.md](docs/design/remote-host.md).
+- **Remote host** (`remote-host`): run a chat's terminals, a synced worktree and its browser MCPs on your own machines, Mac first. Design: [docs/design/remote-host.md](docs/design/remote-host.md). Preparing a Mac: [docs/setup/macos-host.md](docs/setup/macos-host.md).
 
 ## Install
 
