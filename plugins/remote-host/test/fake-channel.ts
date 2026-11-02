@@ -105,6 +105,8 @@ export function fakeOpener(opts: { fail?: () => Error | undefined } = {}) {
     /** Wait for the n-th channel (1-based) to be opened. */
     async nth(n: number, timeoutMs = 2_000): Promise<FakeChannel> {
       const until = Date.now() + timeoutMs;
+      // A real channel never carries data in the same turn it opens.
+      await new Promise((r) => setTimeout(r, 0));
       while (channels.length < n) {
         if (Date.now() > until) throw new Error(`channel ${n} was never opened (have ${channels.length})`);
         await new Promise((r) => setTimeout(r, 5));

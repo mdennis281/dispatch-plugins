@@ -62,11 +62,11 @@ export default definePlugin({
     live = { registry, pairing, off };
   },
 
-  deactivate() {
+  async deactivate() {
     const l = live;
     live = undefined;
     l?.off();
     l?.pairing.clear();
-    l?.registry.dispose();
+    await l?.registry.dispose();
   },
 });

@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createTestContext, type TestContext } from "@dispatch/plugin-sdk/testing";
 import type { PluginCapability, PluginModule } from "@dispatch/plugin-sdk";
 import { PluginManifestSchema, pluginSecretAllowed } from "@dispatch/plugin-sdk/manifest";
+import { generateKeyPair } from "@dispatch-plugins/remote-core";
 
 const dir = fileURLToPath(new URL("..", import.meta.url));
 const manifest = readFileSync(`${dir}/plugin.yaml`, "utf8");
@@ -105,12 +106,14 @@ describe("the manifest", () => {
 describe("activation", () => {
   it("registers each paired machine as a refusing bash backend, and reports it straight away", async () => {
     const port = await closedPort();
-    const t = await activate({ settings: { hosts: [host("lab", port)] }, secrets: { REMOTE_HOST_KEY_LAB: "not really a key" } });
+    const key = generateKeyPair("test").privateKey;
+    const t = await activate({ settings: { hosts: [host("lab", port)] }, secrets: { REMOTE_HOST_KEY_LAB: key } });
     const b = t.terminalBackends.get("remote-host/lab");
     expect(b).toMatchObject({ id: "remote-host/lab", label: "LAB", shell: "bash", fallback: "refuse" });
     expect(t.terminalStatus.get("remote-host/lab")).toBeDefined();
+    // With a real key it really dials the machine, and says why that failed.
     await until(() => t.terminalStatus.get("remote-host/lab")?.state === "offline");
-    expect(t.terminalStatus.get("remote-host/lab")?.detail).toMatch(/refused|key/);
+    expect(t.terminalStatus.get("remote-host/lab")?.detail).toMatch(/connection refused/);
   });
 
   it("does nothing without an instance id to namespace its work by", async () => {

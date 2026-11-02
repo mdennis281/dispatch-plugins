@@ -66,6 +66,8 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     const kp = generateKeyPair("e2e@test");
     server = await startTestSshServer({
       authorizedKeys: () => [kp.publicKey],
+      // sshd's default: a connection past ten sessions has channels refused.
+      maxSessions: 10,
       exec: runLocally({
         PATH: process.env.PATH ?? "/usr/bin:/bin",
         HOME: home,
@@ -102,24 +104,30 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       pairedAt: new Date().toISOString(),
     };
     registry.sync([host]);
-    await until(() => t.terminalStatus.get(ID)?.state === "online", 60_000, `${ID} online (status: ${JSON.stringify(t.terminalStatus.get(ID))})`);
+    // Connected and probed. Online, or degraded if this runner lacks
+    // something the probe looks for; either way the link is up.
+    const up = () => {
+      const s = t.terminalStatus.get(ID);
+      return !!registry.get("e2e")?.link.probe && !!s && s.state !== "offline" && s.detail !== "connecting";
+    };
+    await until(up, 60_000, `${ID} connected (status: ${JSON.stringify(t.terminalStatus.get(ID))})`);
   }, 90_000);
 
   afterAll(async () => {
     await registry?.get("e2e")?.link.agent(["kill", "--instance", INSTANCE, "--all"]).catch(() => {});
-    registry?.dispose();
+    await registry?.dispose();
     await server?.close();
     if (home) rmSync(home, { recursive: true, force: true });
-  });
+  }, 30_000);
 
-  it("installed the agent and reports the machine online, with its probe", () => {
+  it("installed the agent and probed the machine", () => {
     const view = registry.list()[0]!;
-    expect(view.status.state).toBe("online");
+    expect(view.status.lastSeenAt).toBeTypeOf("number");
     expect(view.probe?.agentVersion).toBe(bundledAgent().version);
     expect(view.probe?.home).toBe(home);
   });
 
-  it("runs a shell there, in the chat's own directory", async () => {
+  it("runs a shell there, in the chat's own directory", { timeout: 60_000 }, async () => {
     const h = await t.terminals.spawn(ID, { chatId: "chat-1", name: "main" });
     const w = watch(h);
     expect(h.cwd).toBe(join(home, ".dispatch-host", INSTANCE, "chats", "chat-1"));
@@ -131,7 +139,7 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     expect(w.exit).toEqual({ code: 7, reason: { kind: "exited" } });
   });
 
-  it("rides out a dropped connection: the shell keeps running and nothing is lost or repeated", async () => {
+  it("rides out a dropped connection: the shell keeps running and nothing is lost or repeated", { timeout: 90_000 }, async () => {
     const h = await t.terminals.spawn(ID, { chatId: "chat-1", name: "drop" });
     const w = watch(h);
     h.stdin.write("echo before-drop; (sleep 2; echo after-drop) &\n");
@@ -149,11 +157,13 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     expect(w.exit?.reason).toEqual({ kind: "killed", detail: "stopped by Dispatch" });
   });
 
-  it("kill() ends the session and what it started on the machine", async () => {
+  it("kill() ends the session and what it started on the machine", { timeout: 60_000 }, async () => {
     const h = await t.terminals.spawn(ID, { chatId: "chat-2", name: "main" });
     const w = watch(h);
-    h.stdin.write("sleep 300 &\necho started\n");
-    await until(() => w.out.includes("started"), 20_000, "started");
+    h.stdin.write("sleep 300 &\necho pid=$!\n");
+    await until(() => /pid=\d+/.test(w.out), 20_000, "the sleep's pid");
+    const pid = Number(w.out.match(/pid=(\d+)/)![1]);
+    expect(alive(pid)).toBe(true);
     h.kill();
     const link = registry.get("e2e")!.link;
     type Row = { chat: string; state: string };
@@ -165,5 +175,29 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       if (Date.now() > end) throw new Error(`chat-2's session did not exit: ${JSON.stringify(mine)}`);
       await new Promise((r) => setTimeout(r, 200));
     }
+    // The "machine" is this one, so the background job can be looked for.
+    await until(() => !alive(pid), 10_000, `the background sleep (pid ${pid}) to end`);
+  });
+
+  it("runs more shells than one connection has sessions for, and still answers", { timeout: 90_000 }, async () => {
+    const shells = await Promise.all(Array.from({ length: 12 }, (_, i) => t.terminals.spawn(ID, { chatId: "chat-3", name: `s${i}` })));
+    const ws = shells.map(watch);
+    shells.forEach((h, i) => h.stdin.write(`echo shell-${i}-ok\n`));
+    for (const [i, w] of ws.entries()) await until(() => w.out.includes(`shell-${i}-ok`), 20_000, `shell ${i}`);
+    const link = registry.get("e2e")!.link;
+    expect(link.sessionConnections).toBeGreaterThanOrEqual(2);
+    await expect(link.agent(["hello", "--instance", INSTANCE])).resolves.toBeTruthy();
+    for (const h of shells) h.kill();
+    expect(ws.every((w) => w.exit?.reason?.kind === "killed")).toBe(true);
   });
 });
+
+/** Whether a process exists (a zombie counts until it is reaped). */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}

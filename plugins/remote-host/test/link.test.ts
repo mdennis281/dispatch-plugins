@@ -5,8 +5,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
 import type { HostConfig } from "../src/hosts.js";
-import { HostLink, describeConnectError, statusFrom } from "../src/link.js";
-import { AGENT, FakeMachine, PROBE, fakeRuntime, type AddressBehaviour } from "./fake-machine.js";
+import { HostLink, SESSIONS_PER_CONNECTION, describeConnectError, statusFrom, type LinkTiming } from "../src/link.js";
+import { AGENT, FakeMachine, PROBE, fakeRuntime, type AddressBehaviour, type FakeConn } from "./fake-machine.js";
 
 const HOST: HostConfig = {
   slug: "cvx-mac",
@@ -26,8 +26,12 @@ afterEach(() => {
   for (const l of links.splice(0)) l.dispose();
 });
 
-function link(machine: FakeMachine, opts: { key?: string | undefined; kv?: Map<string, unknown>; runtime?: ReturnType<typeof fakeRuntime> } = {}) {
+function link(
+  machine: FakeMachine,
+  opts: { key?: string | undefined; kv?: Map<string, unknown>; runtime?: ReturnType<typeof fakeRuntime>; timing?: Partial<LinkTiming> } = {},
+) {
   const statuses: TerminalBackendStatusInput[] = [];
+  const warns: string[] = [];
   const kvMap = opts.kv ?? new Map<string, unknown>();
   const runtime = opts.runtime ?? fakeRuntime();
   const l = new HostLink(HOST, {
@@ -36,7 +40,7 @@ function link(machine: FakeMachine, opts: { key?: string | undefined; kv?: Map<s
     agent: AGENT,
     runtime,
     setStatus: (s) => statuses.push(s),
-    log: { info: () => {}, warn: () => {}, error: () => {} },
+    log: { info: () => {}, warn: (m: string) => void warns.push(m), error: () => {} },
     kv: {
       get: async <T>(k: string) => kvMap.get(k) as T | undefined,
       set: async (k: string, v: unknown) => void kvMap.set(k, v),
@@ -44,10 +48,10 @@ function link(machine: FakeMachine, opts: { key?: string | undefined; kv?: Map<s
       list: async () => [...kvMap.keys()],
     },
     connect: machine.connect,
-    timing: { tickMs: 10, helloEveryMs: 40, probeEveryMs: 60_000, backoffMs: [20] },
+    timing: { tickMs: 10, helloEveryMs: 40, probeEveryMs: 60_000, backoffMs: [20], ...opts.timing },
   });
   links.push(l);
-  return { l, statuses, kv: kvMap, runtime };
+  return { l, statuses, warns, kv: kvMap, runtime };
 }
 
 const until = async (cond: () => boolean, ms = 3_000) => {
@@ -184,6 +188,91 @@ describe("staying up", () => {
     expect(m.open()).toHaveLength(1);
     l.update({ ...HOST, addresses: ["cvx-mac.local"] }, true);
     await until(() => l.address === "cvx-mac.local");
+  });
+});
+
+describe("shells", () => {
+  it("go on their own connections, eight to each, so the control connection always has room", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l } = link(m);
+    await l.ready();
+    const control = m.open()[0]!;
+    const chans = await Promise.all(Array.from({ length: 12 }, (_, i) => l.openSession(`exec shell ${i}`)));
+    expect(chans).toHaveLength(12);
+    expect(l.sessionConnections).toBe(2);
+    expect(control.live()).toBe(0);
+    const pool = m.open().filter((c) => c !== control);
+    expect(pool.map((c) => c.live()).sort()).toEqual([4, SESSIONS_PER_CONNECTION]);
+    // Each extra connection pins the machine's key like the first.
+    for (const c of pool) {
+      expect(c.target.host).toBe("10.0.10.16");
+      expect(c.target.hostVerifier).toBeTypeOf("function");
+      expect(c.target.algorithms?.serverHostKey).toEqual(["ssh-ed25519"]);
+    }
+    await expect(l.agent(["hello"])).resolves.toBeTruthy();
+  });
+
+  it("reuse room a closed shell left, and an idle extra connection is closed", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l } = link(m, { timing: { idleSessionConnectionMs: 30 } });
+    l.start();
+    await l.ready();
+    const chans = await Promise.all(Array.from({ length: SESSIONS_PER_CONNECTION }, () => l.openSession("exec shell")));
+    (chans[0] as unknown as { close(): void }).close();
+    await l.openSession("exec shell");
+    expect(l.sessionConnections).toBe(1);
+    for (const c of m.open()) for (const ch of c.channels) ch.close();
+    await until(() => l.sessionConnections === 0);
+    expect(m.open()).toHaveLength(1);
+  });
+
+  it("are refused, not left waiting, while the machine is offline", async () => {
+    const m = machine({ "10.0.10.16": "refused" });
+    const { l } = link(m);
+    await expect(l.openSession("exec shell")).rejects.toThrow(/connection refused/);
+  });
+});
+
+describe("races", () => {
+  it("throws away a connect that finishes after the settings changed", async () => {
+    const m = machine({ "10.0.10.16": "ok", "cvx-mac.local": "ok" });
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    m.hold = (a) => (a === "10.0.10.16" ? held : Promise.resolve());
+    const { l, statuses } = link(m);
+    const stale = l.ready();
+    stale.catch(() => {});
+    l.update({ ...HOST, addresses: ["cvx-mac.local"] }, true);
+    await until(() => l.address === "cvx-mac.local");
+    release();
+    await expect(stale).rejects.toThrow(/settings changed/);
+    expect(l.address).toBe("cvx-mac.local");
+    expect(m.conns.filter((c: FakeConn) => c.target.host === "10.0.10.16" && c.isOpen)).toEqual([]);
+    expect(statuses.at(-1)?.state).toBe("online");
+  });
+
+  it("Check probes a live machine without dropping its connection", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l } = link(m);
+    await l.ready();
+    const conn = m.open()[0]!;
+    const made = m.conns.length;
+    m.probe = { ...PROBE, freeDiskBytes: 1024 ** 3 };
+    const s = await l.checkNow();
+    expect(s).toMatchObject({ state: "degraded", detail: "low disk: 1.0 GB free" });
+    expect(conn.isOpen).toBe(true);
+    expect(m.conns).toHaveLength(made);
+  });
+
+  it("keeps the link when the control connection is full, rather than calling the machine gone", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l, statuses, warns } = link(m);
+    l.start();
+    await l.ready();
+    m.maxSessions = 0;
+    await until(() => warns.some((w) => /could not open a channel/.test(w)));
+    expect(m.open()).toHaveLength(1);
+    expect(statuses.at(-1)?.state).toBe("online");
   });
 });
 

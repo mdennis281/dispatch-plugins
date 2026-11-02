@@ -54,6 +54,10 @@ export class FakeMachine {
   agent: string | undefined = "0.1.0";
   probe: ProbeResult = { ...PROBE };
   helloFails = false;
+  /** sshd's MaxSessions. */
+  maxSessions = 10;
+  /** Holds a connect to an address until it resolves. */
+  hold?: (address: string) => Promise<void>;
   readonly addresses: Record<string, AddressBehaviour>;
   readonly targets: SshTarget[] = [];
   readonly commands: string[] = [];
@@ -114,8 +118,24 @@ export class FakeMachine {
   }
 }
 
+/** A session channel on the fake machine: it only opens and closes. */
+export class FakeSessionChannel extends EventEmitter {
+  closed = false;
+
+  constructor(readonly command: string) {
+    super();
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.emit("close");
+  }
+}
+
 export class FakeConn extends EventEmitter implements LinkConnection {
   isOpen = false;
+  readonly channels: FakeSessionChannel[] = [];
 
   constructor(
     private readonly m: FakeMachine,
@@ -124,7 +144,13 @@ export class FakeConn extends EventEmitter implements LinkConnection {
     super();
   }
 
+  /** Channels open on this connection now, exec'd commands aside. */
+  live(): number {
+    return this.channels.filter((c) => !c.closed).length;
+  }
+
   async connectOnce(): Promise<void> {
+    await this.m.hold?.(this.target.host);
     const b = this.m.addresses[this.target.host] ?? "timeout";
     if (b === "wrong-key") throw new Error("Host denied (verification failed)");
     if (b === "refused") throw new Error(`connect ECONNREFUSED ${this.target.host}:22`);
@@ -139,16 +165,23 @@ export class FakeConn extends EventEmitter implements LinkConnection {
 
   exec(command: string, opts: { stdin?: (ch: ClientChannel) => Promise<void>; timeoutMs?: number } = {}): Promise<ExecResult> {
     if (!this.isOpen) return Promise.reject(new Error("closed"));
+    if (this.live() >= this.m.maxSessions) return Promise.reject(new Error("(SSH) Channel open failure: open failed"));
     return this.m.run(command, opts);
   }
 
-  channel(): Promise<ClientChannel> {
-    return Promise.reject(new Error("no channels in this fake"));
+  /** Like sshd: at most `maxSessions` at once on one connection. */
+  async channel(command: string): Promise<ClientChannel> {
+    if (!this.isOpen) throw new Error("closed");
+    if (this.live() >= this.m.maxSessions) throw new Error("(SSH) Channel open failure: open failed");
+    const ch = new FakeSessionChannel(command);
+    this.channels.push(ch);
+    return ch as unknown as ClientChannel;
   }
 
   close(): void {
     if (!this.isOpen) return;
     this.isOpen = false;
+    for (const ch of this.channels) ch.close();
     this.emit("close");
   }
 }

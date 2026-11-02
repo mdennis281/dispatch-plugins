@@ -33,7 +33,17 @@ import {
 } from "@dispatch-plugins/remote-core";
 import { shCommand } from "@dispatch-plugins/host-agent";
 import { addKeyOneLiner, addKeyScript, authorizedKeysLine, keyBlobOf, removeKeyScript } from "./authorized-keys.js";
-import { SLUG_PATTERN, backendId, keySecretName, validAddress, validFrom, validUser, type HostConfig } from "./hosts.js";
+import {
+  HOST_KEY_TYPES,
+  SLUG_PATTERN,
+  backendId,
+  hostKeyAlgorithms,
+  keySecretName,
+  validAddress,
+  validFrom,
+  validUser,
+  type HostConfig,
+} from "./hosts.js";
 import { describeConnectError, type LinkConnection } from "./link.js";
 
 /** An error the human can fix, reported as HTTP 400 (or `status`). */
@@ -152,11 +162,16 @@ export class Pairing {
     const hostKey = str(body.hostKey, "hostKey");
     if (!/^SHA256:[A-Za-z0-9+/]{43}$/.test(hostKey)) throw new UserError("hostKey must be the SHA256: fingerprint shown by the scan");
     const hostKeyType = typeof body.hostKeyType === "string" && body.hostKeyType ? body.hostKeyType : "ssh-ed25519";
+    if (!(HOST_KEY_TYPES as readonly string[]).includes(hostKeyType)) {
+      throw new UserError(`not a host key type Dispatch can pin: ${hostKeyType} (one of ${HOST_KEY_TYPES.join(", ")})`);
+    }
     const allowFrom = Array.isArray(body.allowFrom)
       ? body.allowFrom.map((a) => String(a).trim()).filter(Boolean)
       : (this.deps.localAddresses ?? localIPv4)();
     if (!allowFrom.length) throw new UserError("the key needs at least one address of this computer to be usable from (allowFrom)");
-    for (const a of allowFrom) if (!validFrom(a)) throw new UserError(`not an address pattern: ${a}`);
+    for (const a of allowFrom) {
+      if (!validFrom(a)) throw new UserError(`not an IP address or a network no wider than /8: ${a}`);
+    }
     const label = typeof body.label === "string" && body.label.trim() ? body.label.trim().slice(0, 80) : slug;
 
     const comment = `dispatch-remote-host:${slug}@${safeName(this.deps.dispatchName ?? hostname())}`;
@@ -193,7 +208,7 @@ export class Pairing {
       port: r.port,
       username: r.user,
       hostVerifier: pinnedHostKey(r.hostKey),
-      algorithms: { serverHostKey: [r.hostKeyType as never] },
+      algorithms: { serverHostKey: hostKeyAlgorithms(r.hostKeyType) as never },
     };
     const password = typeof body.password === "string" && body.password ? body.password : undefined;
 
@@ -257,6 +272,7 @@ export class Pairing {
       pairedAt: new Date(this.now()).toISOString(),
     };
     const hosts = this.deps.hosts();
+    const before = hosts.find((h) => h.slug === r.slug);
     const at = hosts.findIndex((h) => h.slug === r.slug);
     const next = at >= 0 ? hosts.map((h, i) => (i === at ? host : h)) : [...hosts, host];
     try {
@@ -269,28 +285,36 @@ export class Pairing {
     this.pending.delete(p.id);
     this.deps.log.info(`remote-host: paired ${r.slug} (${r.user}@${r.address}, host key ${r.hostKey})`);
 
-    // Pairing again: the machine still lets the old key in. Take it out.
+    // Pairing again: the old machine (or account) still lets the old key in.
+    // Take it out there, logging in with the old key itself.
     let oldKey: "removed" | "absent" | "left" | undefined;
-    if (previous && previous.trim() !== p.privateKey.trim()) {
-      oldKey = await this.removeOldKey(base, p.privateKey, previous);
+    if (previous && before && previous.trim() !== p.privateKey.trim()) {
+      oldKey = await this.removeOldKey(before, previous);
     }
     return { host, ...(seenFrom ? { seenFrom } : {}), ...(oldKey ? { oldKey } : {}) };
   }
 
-  private async removeOldKey(base: SshTarget, privateKey: string, previous: string): Promise<"removed" | "absent" | "left"> {
+  private async removeOldKey(old: HostConfig, previous: string): Promise<"removed" | "absent" | "left"> {
     let blob: string;
     try {
       blob = keyBlobOf(publicKeyOf(previous));
     } catch {
       return "left";
     }
-    const c = this.connect({ ...base, privateKey });
+    const c = this.connect({
+      host: old.addresses[0]!,
+      port: old.port,
+      username: old.user,
+      privateKey: previous,
+      hostVerifier: pinnedHostKey(old.hostKey),
+      algorithms: { serverHostKey: hostKeyAlgorithms(old.hostKeyType) as never },
+    });
     try {
       await c.connect(CONNECT_MS);
       const res = await c.exec(shCommand(removeKeyScript(blob)), { timeoutMs: 30_000 });
       return res.code === 0 && res.stdout.includes("removed") ? "removed" : res.code === 0 ? "absent" : "left";
     } catch (err) {
-      this.deps.log.warn(`remote-host: could not remove the old key from ${base.host}: ${errText(err)}`);
+      this.deps.log.warn(`remote-host: could not remove the old key from ${old.user}@${old.addresses[0]}: ${errText(err)}`);
       return "left";
     } finally {
       c.close();
@@ -336,5 +360,6 @@ export function localIPv4(): string[] {
 }
 
 function safeName(name: string): string {
-  return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 63) || "dispatch";
+  // The whole comment must stay within generateKeyPair's 128 characters.
+  return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 50) || "dispatch";
 }

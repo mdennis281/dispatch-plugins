@@ -3,7 +3,7 @@ import { dirname as __pt_dirname } from "node:path";
 const __filename = __pt_fileURLToPath(import.meta.url);
 const __dirname = __pt_dirname(__filename);
 import { EventEmitter } from "node:events";
-import { createServer, connect } from "node:net";
+import { createServer, connect, isIP } from "node:net";
 import require$$0$4 from "net";
 import require$$1$1 from "stream";
 import require$$0$3 from "path";
@@ -20285,8 +20285,8 @@ class SshConnection extends EventEmitter {
         port: this.target.port ?? 22,
         username: this.target.username,
         readyTimeout: 1e4,
-        keepaliveInterval: 15e3,
-        keepaliveCountMax: 4,
+        keepaliveInterval: this.target.keepalive?.intervalMs ?? 15e3,
+        keepaliveCountMax: this.target.keepalive?.countMax ?? 4,
         hostVerifier: toSsh2(this.target.hostVerifier ?? trustProvisioner()),
         ...this.target.algorithms ? { algorithms: this.target.algorithms } : {},
         ...this.target.privateKey ? { privateKey: this.target.privateKey } : {},
@@ -20828,7 +20828,6 @@ function keySecretName(slug) {
 }
 const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
 const ADDRESS = /^[A-Za-z0-9._:%-]{1,253}$/;
-const FROM = /^[A-Za-z0-9.:/*?-]{1,64}$/;
 const USER = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 function readHosts(raw, warn = () => {
 }) {
@@ -20877,9 +20876,11 @@ function invalid(h) {
   }
   if (o.port !== void 0 && !(Number.isInteger(o.port) && o.port > 0 && o.port < 65536)) return `${o.slug}: bad port`;
   if (typeof o.hostKey !== "string" || !FINGERPRINT.test(o.hostKey)) return `${o.slug}: no pinned host key`;
-  if (typeof o.hostKeyType !== "string" || !o.hostKeyType) return `${o.slug}: no host key type`;
+  if (typeof o.hostKeyType !== "string" || !HOST_KEY_TYPES.includes(o.hostKeyType)) {
+    return `${o.slug}: no usable host key type`;
+  }
   if (typeof o.keyFingerprint !== "string" || !FINGERPRINT.test(o.keyFingerprint)) return `${o.slug}: no client key fingerprint`;
-  if (!Array.isArray(o.allowFrom) || !o.allowFrom.length || !o.allowFrom.every((a) => typeof a === "string" && FROM.test(a))) {
+  if (!Array.isArray(o.allowFrom) || !o.allowFrom.length || !o.allowFrom.every((a) => typeof a === "string" && validFrom(a))) {
     return `${o.slug}: no valid allowFrom`;
   }
   if (typeof o.pairedAt !== "string") return `${o.slug}: no pairedAt`;
@@ -20889,7 +20890,18 @@ function validAddress(a) {
   return ADDRESS.test(a);
 }
 function validFrom(a) {
-  return FROM.test(a);
+  const m = a.match(/^([0-9a-fA-F:.]+)(?:\/(\d{1,3}))?$/);
+  if (!m) return false;
+  const ip = m[1];
+  const v = isIP(ip);
+  if (!v) return false;
+  if (m[2] === void 0) return true;
+  const bits = Number(m[2]);
+  return v === 4 ? bits >= 8 && bits <= 32 : bits >= 32 && bits <= 128;
+}
+const HOST_KEY_TYPES = ["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa"];
+function hostKeyAlgorithms(type) {
+  return type === "ssh-rsa" ? ["rsa-sha2-512", "rsa-sha2-256"] : [type];
 }
 function validUser(u) {
   return USER.test(u);
@@ -21018,8 +21030,12 @@ const DEFAULT_TIMING = {
   tickMs: 5e3,
   helloEveryMs: 3e4,
   probeEveryMs: 5 * 6e4,
-  backoffMs: [2e3, 5e3, 15e3, 3e4, 6e4]
+  sweepEveryMs: 10 * 6e4,
+  backoffMs: [2e3, 5e3, 15e3, 3e4, 6e4],
+  idleSessionConnectionMs: 6e4
 };
+const SESSIONS_PER_CONNECTION = 8;
+const KEEPALIVE = { intervalMs: 5e3, countMax: 3 };
 const LOW_DISK_BYTES = 5 * 1024 ** 3;
 class HostLink {
   constructor(host, deps) {
@@ -21030,11 +21046,16 @@ class HostLink {
   }
   linked;
   connecting;
+  /** Bumped whenever how to reach the machine changes. A connect from an older generation is thrown away. */
+  gen = 0;
+  pool = [];
+  adding;
   timer;
   failures = 0;
   nextAttemptAt = 0;
   lastHelloAt = 0;
   lastProbeAt = 0;
+  lastSweepAt = 0;
   busy = false;
   disposed = false;
   memory = {};
@@ -21057,6 +21078,10 @@ class HostLink {
   get config() {
     return this.host;
   }
+  /** How many connections carry shells right now (for tests and the log). */
+  get sessionConnections() {
+    return this.pool.length;
+  }
   /** Report "connecting", then connect in the background and keep the link up. */
   start() {
     this.report(this.current);
@@ -21069,7 +21094,9 @@ class HostLink {
   update(host, changedConnection) {
     this.host = host;
     if (!changedConnection) return;
+    this.gen++;
     this.drop("its settings changed; reconnecting", "degraded");
+    this.closePool();
     this.failures = 0;
     void this.attempt().catch(() => {
     });
@@ -21077,14 +21104,38 @@ class HostLink {
   /** A live, verified connection: the current one, or a new one. Rejects with why the machine can't be reached. */
   ready(signal) {
     if (this.linked?.conn.isOpen) return Promise.resolve(this.linked);
-    const p = this.attempt();
-    if (!signal) return p;
-    return new Promise((resolve, reject) => {
-      if (signal.aborted) return reject(new Error("cancelled"));
-      const onAbort = () => reject(new Error("cancelled"));
-      signal.addEventListener("abort", onAbort, { once: true });
-      p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-    });
+    return withAbort(this.attempt(), signal);
+  }
+  /**
+   * A channel running `command` for a shell, on a connection with room for it
+   * (opened if none has). The channel stays open for the shell's life.
+   */
+  async openSession(command, signal) {
+    await this.ready(signal);
+    const gen = this.gen;
+    for (; ; ) {
+      if (signal?.aborted) throw new Error("cancelled");
+      const slot = this.pool.find((p) => p.conn.isOpen && p.open < SESSIONS_PER_CONNECTION);
+      if (!slot) {
+        this.adding ??= this.addSessionConnection().finally(() => {
+          this.adding = void 0;
+        });
+        await withAbort(this.adding, signal);
+        continue;
+      }
+      if (gen !== this.gen) throw new Error("the machine's settings changed; try again");
+      slot.open++;
+      slot.idleSince = void 0;
+      let ch;
+      try {
+        ch = await slot.conn.channel(command);
+      } catch (err) {
+        this.release(slot);
+        throw err;
+      }
+      ch.on("close", () => this.release(slot));
+      return ch;
+    }
   }
   /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
   async agent(args, timeoutMs = 3e4) {
@@ -21093,10 +21144,22 @@ class HostLink {
     if (r.code !== 0) throw new Error(`dispatch-host ${args[0]} exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
     return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "null");
   }
-  /** Reconnect now and probe, for a human pressing "Check". */
+  /**
+   * For a human pressing "Check": probe a live link without disturbing its
+   * shells, or try an offline one now instead of at the end of its backoff.
+   */
   async checkNow() {
-    this.drop("checking", "degraded");
+    if (this.linked?.conn.isOpen) {
+      try {
+        await this.hello();
+        await this.probeNow();
+      } catch (err) {
+        this.lost(`no answer: ${errText(err)}`);
+      }
+      return this.current;
+    }
     this.failures = 0;
+    this.nextAttemptAt = 0;
     await this.attempt().catch(() => {
     });
     return this.current;
@@ -21108,30 +21171,49 @@ class HostLink {
     const l = this.linked;
     this.linked = void 0;
     l?.conn.close();
+    this.closePool();
   }
   attempt() {
     if (this.disposed) return Promise.reject(new Error("the plugin is shutting down"));
     if (this.linked?.conn.isOpen) return Promise.resolve(this.linked);
-    this.connecting ??= this.connectOnce().then(
+    if (this.connecting && this.connecting.gen === this.gen) return this.connecting.p;
+    const gen = this.gen;
+    const p = this.connectOnce(gen).then(
       (linked) => {
         this.failures = 0;
         return linked;
       },
       (err) => {
-        this.failures++;
-        const wait = this.t.backoffMs[Math.min(this.failures - 1, this.t.backoffMs.length - 1)] ?? 6e4;
-        this.nextAttemptAt = this.now() + wait;
-        if (!this.disposed) {
-          this.report({ state: "offline", detail: errText(err), ...this.memory.lastSeenAt ? { lastSeenAt: this.memory.lastSeenAt } : {} });
+        if (gen === this.gen) {
+          this.failures++;
+          const wait = this.t.backoffMs[Math.min(this.failures - 1, this.t.backoffMs.length - 1)] ?? 6e4;
+          this.nextAttemptAt = this.now() + wait;
+          if (!this.disposed) this.report({ state: "offline", detail: errText(err), ...this.seen() });
         }
         throw err;
       }
     ).finally(() => {
-      this.connecting = void 0;
+      if (this.connecting?.p === p) this.connecting = void 0;
     });
-    return this.connecting;
+    this.connecting = { gen, p };
+    return p;
   }
-  async connectOnce() {
+  target(address, key) {
+    const host = this.host;
+    return {
+      host: address,
+      port: host.port,
+      username: host.user,
+      privateKey: key,
+      hostVerifier: pinnedHostKey(host.hostKey),
+      algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) },
+      keepalive: KEEPALIVE
+    };
+  }
+  make(target) {
+    return this.deps.connect ? this.deps.connect(target) : new SshConnection(target);
+  }
+  async connectOnce(gen) {
     const host = this.host;
     const key = await this.deps.privateKey();
     if (!key) throw new Error(`no key: the ${keySecretName(host.slug)} secret is missing; pair the machine again`);
@@ -21140,15 +21222,7 @@ class HostLink {
     if (last && order.includes(last)) order.sort((a, b) => a === last ? -1 : b === last ? 1 : 0);
     const misses = [];
     for (const address of order) {
-      const target = {
-        host: address,
-        port: host.port,
-        username: host.user,
-        privateKey: key,
-        hostVerifier: pinnedHostKey(host.hostKey),
-        algorithms: { serverHostKey: [host.hostKeyType] }
-      };
-      const conn = this.deps.connect ? this.deps.connect(target) : new SshConnection(target);
+      const conn = this.make(this.target(address, key));
       try {
         await conn.connectOnce();
       } catch (err) {
@@ -21157,7 +21231,7 @@ class HostLink {
         continue;
       }
       try {
-        return await this.verify(conn, address);
+        return await this.verify(conn, address, gen);
       } catch (err) {
         conn.close();
         throw err;
@@ -21165,7 +21239,8 @@ class HostLink {
     }
     throw new Error(misses.length === 1 ? misses[0] : misses.join("; "));
   }
-  async verify(conn, address) {
+  async verify(conn, address, gen) {
+    const first = this.lastProbeAt === 0;
     const { paths, installed } = await ensureAgent(conn, { agent: this.deps.agent, runtime: this.deps.runtime });
     if (installed.length) this.deps.log.info(`remote-host ${this.host.slug}: installed ${installed.join(", ")}`);
     const run = async (args) => {
@@ -21173,45 +21248,107 @@ class HostLink {
       if (r.code !== 0) throw new Error(`dispatch-host ${args[0]} exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
       return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "null");
     };
-    const swept = await run(["sweep", "--instance", this.deps.instanceId]);
-    const reaped = [...swept?.reaped ?? [], ...swept?.deadMan ?? []];
-    if (reaped.length) this.deps.log.info(`remote-host ${this.host.slug}: swept ${reaped.length} orphaned session(s)`);
+    if (first) await this.sweepWith(run);
     await run(["hello", "--instance", this.deps.instanceId]);
-    const probe = await run(["probe"]);
-    if (this.disposed) {
+    const probe = first ? await run(["probe"]) : void 0;
+    if (this.disposed || gen !== this.gen) {
       conn.close();
-      throw new Error("the plugin is shutting down");
+      throw new Error(this.disposed ? "the plugin is shutting down" : "the machine's settings changed while connecting");
     }
     const linked = { conn, paths, address };
     this.linked = linked;
     conn.on("close", () => this.closed(conn));
     const at = this.now();
     this.lastHelloAt = at;
-    this.lastProbeAt = at;
-    this.memory = { lastAddress: address, lastSeenAt: at, probe };
+    this.memory = { ...this.memory, lastAddress: address, lastSeenAt: at, ...probe ? { probe } : {} };
+    if (probe) this.lastProbeAt = at;
     void this.saveMemory();
-    this.report(statusFrom(probe, at));
-    this.deps.log.info(`remote-host ${this.host.slug}: connected at ${address} (${[probe.os.name, probe.os.version].filter(Boolean).join(" ") || probe.platform}, ${probe.arch})`);
+    this.report(this.memory.probe ? statusFrom(this.memory.probe, at) : { state: "online", lastSeenAt: at });
+    const p = this.memory.probe;
+    this.deps.log.info(
+      `remote-host ${this.host.slug}: connected at ${address}` + (p ? ` (${[p.os.name, p.os.version].filter(Boolean).join(" ") || p.platform}, ${p.arch})` : "")
+    );
     return linked;
+  }
+  async sweepWith(run) {
+    const swept = await run(["sweep", "--instance", this.deps.instanceId]);
+    this.lastSweepAt = this.now();
+    const reaped = [...swept?.reaped ?? [], ...swept?.deadMan ?? []];
+    if (reaped.length) this.deps.log.info(`remote-host ${this.host.slug}: swept ${reaped.length} orphaned session(s)`);
+  }
+  async addSessionConnection() {
+    const linked = await this.ready();
+    const gen = this.gen;
+    const key = await this.deps.privateKey();
+    if (!key) throw new Error(`no key: the ${keySecretName(this.host.slug)} secret is missing`);
+    const conn = this.make(this.target(linked.address, key));
+    try {
+      await conn.connectOnce();
+    } catch (err) {
+      conn.close();
+      throw new Error(`could not open another connection for shells: ${describeConnectError(err)}`);
+    }
+    const entry = { conn, open: 0, idleSince: this.now() };
+    conn.on("close", () => {
+      this.pool = this.pool.filter((p) => p !== entry);
+    });
+    if (this.disposed || gen !== this.gen) {
+      conn.close();
+      throw new Error(this.disposed ? "the plugin is shutting down" : "the machine's settings changed; try again");
+    }
+    this.pool.push(entry);
+    return entry;
+  }
+  release(slot) {
+    slot.open = Math.max(0, slot.open - 1);
+    if (slot.open === 0) slot.idleSince = this.now();
+  }
+  closePool() {
+    const pool = this.pool;
+    this.pool = [];
+    for (const p of pool) p.conn.close();
   }
   closed(conn) {
     if (this.linked?.conn !== conn) return;
     this.linked = void 0;
     if (this.disposed) return;
-    this.report({ state: "offline", detail: "connection lost; reconnecting", ...this.memory.lastSeenAt ? { lastSeenAt: this.memory.lastSeenAt } : {} });
+    this.report({ state: "offline", detail: "connection lost; reconnecting", ...this.seen() });
     this.nextAttemptAt = this.now() + (this.t.backoffMs[0] ?? 2e3);
+  }
+  lost(detail) {
+    this.drop(detail, "offline");
+    this.nextAttemptAt = this.now();
   }
   drop(detail, state) {
     const l = this.linked;
     this.linked = void 0;
     l?.conn.close();
-    this.report({ state, detail, ...this.memory.lastSeenAt ? { lastSeenAt: this.memory.lastSeenAt } : {} });
+    this.report({ state, detail, ...this.seen() });
+  }
+  seen() {
+    return this.memory.lastSeenAt ? { lastSeenAt: this.memory.lastSeenAt } : {};
+  }
+  async hello() {
+    await this.agent(["hello", "--instance", this.deps.instanceId], 15e3);
+    this.lastHelloAt = this.now();
+    this.memory.lastSeenAt = this.lastHelloAt;
+    this.report({ ...this.current, lastSeenAt: this.lastHelloAt });
+  }
+  async probeNow() {
+    const probe = await this.agent(["probe"], 6e4);
+    this.lastProbeAt = this.now();
+    this.memory.probe = probe;
+    this.report(statusFrom(probe, this.lastHelloAt));
+    void this.saveMemory();
   }
   async tick() {
     if (this.disposed || this.busy) return;
     this.busy = true;
     try {
       const now = this.now();
+      for (const p of this.pool) {
+        if (p.open === 0 && p.idleSince !== void 0 && now - p.idleSince >= this.t.idleSessionConnectionMs) p.conn.close();
+      }
       if (!this.linked?.conn.isOpen) {
         if (!this.connecting && now >= this.nextAttemptAt) await this.attempt().catch(() => {
         });
@@ -21219,26 +21356,25 @@ class HostLink {
       }
       if (now - this.lastHelloAt >= this.t.helloEveryMs) {
         try {
-          await this.agent(["hello", "--instance", this.deps.instanceId], 15e3);
-          this.lastHelloAt = this.now();
-          this.memory.lastSeenAt = this.lastHelloAt;
-          this.report({ ...this.current, lastSeenAt: this.lastHelloAt });
+          await this.hello();
         } catch (err) {
-          this.drop(`no answer: ${errText(err)}`, "offline");
-          this.nextAttemptAt = this.now();
-          return;
+          if (/channel open failure|open failed/i.test(errText(err))) {
+            this.deps.log.warn(`remote-host ${this.host.slug}: hello could not open a channel: ${errText(err)}`);
+          } else {
+            this.lost(`no answer: ${errText(err)}`);
+            return;
+          }
         }
       }
       if (now - this.lastProbeAt >= this.t.probeEveryMs) {
-        try {
-          const probe = await this.agent(["probe"], 6e4);
-          this.lastProbeAt = this.now();
-          this.memory.probe = probe;
-          this.report(statusFrom(probe, this.lastHelloAt));
-          void this.saveMemory();
-        } catch (err) {
-          this.deps.log.warn(`remote-host ${this.host.slug}: probe failed: ${errText(err)}`);
-        }
+        await this.probeNow().catch((err) => this.deps.log.warn(`remote-host ${this.host.slug}: probe failed: ${errText(err)}`));
+      }
+      if (now - this.lastSweepAt >= this.t.sweepEveryMs) {
+        await this.agent(["sweep", "--instance", this.deps.instanceId], 6e4).then((s) => {
+          this.lastSweepAt = this.now();
+          const n = (s?.reaped?.length ?? 0) + (s?.deadMan?.length ?? 0);
+          if (n) this.deps.log.info(`remote-host ${this.host.slug}: swept ${n} orphaned session(s)`);
+        }).catch((err) => this.deps.log.warn(`remote-host ${this.host.slug}: sweep failed: ${errText(err)}`));
       }
     } finally {
       this.busy = false;
@@ -21270,6 +21406,15 @@ class HostLink {
       this.deps.log.warn(`remote-host ${this.host.slug}: could not save its state: ${errText(err)}`);
     }
   }
+}
+function withAbort(p, signal) {
+  if (!signal) return p;
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new Error("cancelled"));
+    const onAbort = () => reject(new Error("cancelled"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 function statusFrom(probe, lastSeenAt) {
   const issues = [];
@@ -21337,9 +21482,14 @@ class Pairing {
     const hostKey = str(body2.hostKey, "hostKey");
     if (!/^SHA256:[A-Za-z0-9+/]{43}$/.test(hostKey)) throw new UserError("hostKey must be the SHA256: fingerprint shown by the scan");
     const hostKeyType = typeof body2.hostKeyType === "string" && body2.hostKeyType ? body2.hostKeyType : "ssh-ed25519";
+    if (!HOST_KEY_TYPES.includes(hostKeyType)) {
+      throw new UserError(`not a host key type Dispatch can pin: ${hostKeyType} (one of ${HOST_KEY_TYPES.join(", ")})`);
+    }
     const allowFrom = Array.isArray(body2.allowFrom) ? body2.allowFrom.map((a) => String(a).trim()).filter(Boolean) : (this.deps.localAddresses ?? localIPv4)();
     if (!allowFrom.length) throw new UserError("the key needs at least one address of this computer to be usable from (allowFrom)");
-    for (const a of allowFrom) if (!validFrom(a)) throw new UserError(`not an address pattern: ${a}`);
+    for (const a of allowFrom) {
+      if (!validFrom(a)) throw new UserError(`not an IP address or a network no wider than /8: ${a}`);
+    }
     const label = typeof body2.label === "string" && body2.label.trim() ? body2.label.trim().slice(0, 80) : slug;
     const comment = `dispatch-remote-host:${slug}@${safeName(this.deps.dispatchName ?? hostname())}`;
     const kp = generateKeyPair(comment);
@@ -21373,7 +21523,7 @@ class Pairing {
       port: r.port,
       username: r.user,
       hostVerifier: pinnedHostKey(r.hostKey),
-      algorithms: { serverHostKey: [r.hostKeyType] }
+      algorithms: { serverHostKey: hostKeyAlgorithms(r.hostKeyType) }
     };
     const password = typeof body2.password === "string" && body2.password ? body2.password : void 0;
     if (password) {
@@ -21428,6 +21578,7 @@ class Pairing {
       pairedAt: new Date(this.now()).toISOString()
     };
     const hosts = this.deps.hosts();
+    const before = hosts.find((h) => h.slug === r.slug);
     const at = hosts.findIndex((h) => h.slug === r.slug);
     const next = at >= 0 ? hosts.map((h, i) => i === at ? host : h) : [...hosts, host];
     try {
@@ -21442,25 +21593,32 @@ class Pairing {
     this.pending.delete(p.id);
     this.deps.log.info(`remote-host: paired ${r.slug} (${r.user}@${r.address}, host key ${r.hostKey})`);
     let oldKey;
-    if (previous && previous.trim() !== p.privateKey.trim()) {
-      oldKey = await this.removeOldKey(base, p.privateKey, previous);
+    if (previous && before && previous.trim() !== p.privateKey.trim()) {
+      oldKey = await this.removeOldKey(before, previous);
     }
     return { host, ...seenFrom ? { seenFrom } : {}, ...oldKey ? { oldKey } : {} };
   }
-  async removeOldKey(base, privateKey, previous) {
+  async removeOldKey(old, previous) {
     let blob;
     try {
       blob = keyBlobOf(publicKeyOf(previous));
     } catch {
       return "left";
     }
-    const c = this.connect({ ...base, privateKey });
+    const c = this.connect({
+      host: old.addresses[0],
+      port: old.port,
+      username: old.user,
+      privateKey: previous,
+      hostVerifier: pinnedHostKey(old.hostKey),
+      algorithms: { serverHostKey: hostKeyAlgorithms(old.hostKeyType) }
+    });
     try {
       await c.connect(CONNECT_MS);
       const res = await c.exec(shCommand(removeKeyScript(blob)), { timeoutMs: 3e4 });
       return res.code === 0 && res.stdout.includes("removed") ? "removed" : res.code === 0 ? "absent" : "left";
     } catch (err) {
-      this.deps.log.warn(`remote-host: could not remove the old key from ${base.host}: ${errText(err)}`);
+      this.deps.log.warn(`remote-host: could not remove the old key from ${old.user}@${old.addresses[0]}: ${errText(err)}`);
       return "left";
     } finally {
       c.close();
@@ -21498,8 +21656,9 @@ function localIPv4() {
   return [...new Set(out)];
 }
 function safeName(name) {
-  return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 63) || "dispatch";
+  return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 50) || "dispatch";
 }
+const MAX_UNREADABLE = 3;
 class HostShell extends EventEmitter {
   constructor(opener, opts) {
     super();
@@ -21524,6 +21683,9 @@ class HostShell extends EventEmitter {
       on: () => void 0
       // input never errors here: a dead link is a stall, then an exit
     };
+    const look = () => queueMicrotask(() => this.openGate());
+    this.on("newListener", look);
+    this.stdout.on("newListener", look);
   }
   stdout = new EventEmitter();
   stderr = new EventEmitter();
@@ -21532,6 +21694,8 @@ class HostShell extends EventEmitter {
   cwd;
   phase = "starting";
   ch;
+  /** A channel was opened at some point, so a session may exist on the machine. */
+  opened = false;
   got = { out: 0, err: 0 };
   text = { out: new StringDecoder("utf8"), err: new StringDecoder("utf8") };
   queue = [];
@@ -21540,10 +21704,21 @@ class HostShell extends EventEmitter {
   lastFrameAt;
   detachedAt;
   attempts = 0;
+  unreadable = 0;
+  lastGarbledAt = 0;
   heartbeat;
   retry;
   relayErr = "";
+  /** What came first on the stream before READY, to say what a garbled start looked like. */
+  head = Buffer.alloc(0);
   starting;
+  /**
+   * Events held until core is listening. `spawn` resolves on READY, and output
+   * or an exit in the same chunk would otherwise be emitted before core has
+   * attached a listener. That output would be lost, and that exit too.
+   */
+  gate = [];
+  gateOpening = false;
   o;
   /** Start a session; resolves once the shell runs on the machine. */
   static async start(opener, opts, signal) {
@@ -21553,7 +21728,15 @@ class HostShell extends EventEmitter {
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
       if (signal?.aborted) throw new Error("cancelled");
-      sh.wire(await opener.open());
+      const opening = opener.open().then((ch) => {
+        sh.opened = true;
+        if (sh.phase === "starting") sh.wire(ch);
+        else {
+          closeQuietly(ch);
+          opener.killDetached?.();
+        }
+      });
+      await Promise.race([opening, started]);
       await started;
       return sh;
     } catch (err) {
@@ -21590,7 +21773,7 @@ class HostShell extends EventEmitter {
       }
     } else {
       this.closeChannel();
-      this.opener.killDetached?.();
+      if (this.opened) this.opener.killDetached?.();
     }
     this.exit(null, { kind: "killed", detail: "stopped by Dispatch" });
   }
@@ -21598,7 +21781,7 @@ class HostShell extends EventEmitter {
     if (this.phase !== "starting") return;
     this.phase = "exited";
     this.closeChannel();
-    this.opener.killDetached?.();
+    if (this.opened) this.opener.killDetached?.();
     this.settleStart(new Error("cancelled"));
   }
   settleStart(err) {
@@ -21607,6 +21790,19 @@ class HostShell extends EventEmitter {
     if (!s) return;
     if (err) s.reject(err);
     else s.resolve();
+  }
+  /** Run `fn` (an emit) now if core is listening, else once it is, in order. */
+  deliver(fn) {
+    if (this.gate) this.gate.push(fn);
+    else fn();
+  }
+  openGate() {
+    if (!this.gate || this.gateOpening) return;
+    if (this.stdout.listenerCount("data") === 0 || this.listenerCount("exit") === 0) return;
+    this.gateOpening = true;
+    const q = this.gate;
+    for (let i = 0; i < q.length; i++) q[i]();
+    this.gate = void 0;
   }
   send(frame) {
     if (this.phase === "exited") return;
@@ -21629,23 +21825,27 @@ class HostShell extends EventEmitter {
     const decoder = new FrameDecoder();
     ch.on("data", (data) => {
       if (this.ch !== ch) return;
+      if (this.phase === "starting" && this.head.length < 256) this.head = Buffer.concat([this.head, data]).subarray(0, 256);
       let frames;
       try {
         frames = decoder.push(data);
       } catch (err) {
-        this.o.log?.warn(`remote-host ${this.o.label}: unreadable session stream (${String(err)}); re-attaching`);
-        this.closeChannel();
-        this.channelLost(ch);
+        this.garbled(ch, String(err.message ?? err));
         return;
       }
       this.lastFrameAt = this.o.now();
       if (this.stalled && this.phase === "attached") {
         this.stalled = false;
-        this.emit("resumed");
+        this.deliver(() => this.emit("resumed"));
       }
       for (const f of frames) {
         if (this.ch !== ch) break;
-        this.frame(ch, f);
+        try {
+          this.frame(ch, f);
+        } catch (err) {
+          this.garbled(ch, `frame 0x${f.type.toString(16)}: ${String(err.message ?? err)}`);
+          return;
+        }
       }
     });
     ch.stderr.on("data", (d) => {
@@ -21655,22 +21855,51 @@ class HostShell extends EventEmitter {
     });
     ch.on("close", () => this.channelLost(ch));
   }
+  /** The stream isn't the protocol. Before READY that is a failed start; after it, drop this channel and re-attach. */
+  garbled(ch, why) {
+    if (this.ch !== ch) return;
+    if (this.phase === "starting") {
+      const seen = this.head.toString("utf8").replace(/[^\x20-\x7e\n]/g, "?").trim().slice(0, 160);
+      this.phase = "exited";
+      this.closeChannel();
+      this.opener.killDetached?.();
+      this.settleStart(
+        new Error(
+          `dispatch-host on ${this.o.label} answered with something that isn't its protocol (${why})` + (seen ? `. It began: ${JSON.stringify(seen)}. Something the account's shell runs at login may be printing.` : "")
+        )
+      );
+      return;
+    }
+    const now = this.o.now();
+    if (now - this.lastGarbledAt > 5 * 6e4) this.unreadable = 0;
+    this.lastGarbledAt = now;
+    this.unreadable++;
+    this.o.log?.warn(`remote-host ${this.o.label}: unreadable session stream (${why})`);
+    if (this.unreadable >= MAX_UNREADABLE) {
+      this.exit(null, { kind: "transport-lost", detail: `the session stream from ${this.o.label} kept arriving garbled (${why})` });
+      return;
+    }
+    this.channelLost(ch);
+    closeQuietly(ch);
+  }
   frame(ch, f) {
     switch (f.type) {
       case F.ready:
-        return this.ready(decodeJson(f.payload));
+        return this.ready(json(f.payload, (m) => typeof m.cwd === "string"));
       case F.stdout:
       case F.stderr: {
         const { offset, data } = decodeOutput(f.payload);
         return this.output(f.type === F.stdout ? "out" : "err", offset, data);
       }
       case F.exit:
-        return this.remoteExit(ch, decodeJson(f.payload));
+        return this.remoteExit(ch, json(f.payload, (m) => typeof m.reason === "string"));
       case F.error:
-        return this.remoteError(ch, decodeJson(f.payload));
-      case F.runEnd:
-        this.emit("runEnd", decodeJson(f.payload));
+        return this.remoteError(ch, json(f.payload, (m) => typeof m.code === "string"));
+      case F.runEnd: {
+        const m = json(f.payload, (x) => typeof x.runId === "string");
+        this.deliver(() => this.emit("runEnd", m));
         return;
+      }
       default:
         return;
     }
@@ -21681,6 +21910,7 @@ class HostShell extends EventEmitter {
     this.phase = "attached";
     this.detachedAt = void 0;
     this.attempts = 0;
+    this.head = Buffer.alloc(0);
     const queue = this.queue;
     this.queue = [];
     this.queued = 0;
@@ -21689,7 +21919,7 @@ class HostShell extends EventEmitter {
     if (this.starting) this.settleStart();
     if (this.stalled) {
       this.stalled = false;
-      this.emit("resumed");
+      this.deliver(() => this.emit("resumed"));
     }
   }
   output(stream, offset, data) {
@@ -21699,12 +21929,12 @@ class HostShell extends EventEmitter {
     if (offset > have) this.notice(`${offset - have} bytes of output were lost while Dispatch was disconnected.`);
     this.got[stream] = offset + data.length;
     const text = this.text[stream].write(data.subarray(from - offset));
-    if (text) (stream === "out" ? this.stdout : this.stderr).emit("data", text);
+    if (text) this.deliver(() => (stream === "out" ? this.stdout : this.stderr).emit("data", text));
   }
   notice(line) {
-    this.stderr.emit("data", `
+    this.deliver(() => this.stderr.emit("data", `
 [remote-host] ${line}
-`);
+`));
   }
   remoteExit(ch, m) {
     if (this.ch === ch) this.closeChannel();
@@ -21715,7 +21945,7 @@ class HostShell extends EventEmitter {
       this.settleStart(new Error(`the shell on ${label} did not start: ${m.detail ?? m.reason}`));
       return;
     }
-    this.exit(m.code, reason);
+    this.exit(typeof m.code === "number" ? m.code : null, reason);
   }
   remoteError(ch, m) {
     if (this.ch === ch) this.closeChannel();
@@ -21742,6 +21972,7 @@ class HostShell extends EventEmitter {
     if (this.phase === "exited") return;
     if (this.phase === "starting") {
       this.phase = "exited";
+      this.opener.killDetached?.();
       const why = this.relayErr.trim();
       this.settleStart(new Error(`dispatch-host on ${this.o.label} ended before the shell started${why ? `: ${why}` : ""}`));
       return;
@@ -21754,7 +21985,7 @@ class HostShell extends EventEmitter {
   stall(detail) {
     if (this.stalled) return;
     this.stalled = true;
-    this.emit("stalled", { detail });
+    this.deliver(() => this.emit("stalled", { detail }));
   }
   scheduleReattach() {
     if (this.phase !== "detached" || this.retry) return;
@@ -21786,10 +22017,7 @@ class HostShell extends EventEmitter {
       return;
     }
     if (this.phase !== "detached") {
-      try {
-        ch.close?.();
-      } catch {
-      }
+      closeQuietly(ch);
       return;
     }
     this.wire(ch);
@@ -21815,11 +22043,7 @@ class HostShell extends EventEmitter {
     const ch = this.ch;
     this.ch = void 0;
     this.stopHeartbeat();
-    if (!ch) return;
-    try {
-      ch.close?.();
-    } catch {
-    }
+    if (ch) closeQuietly(ch);
   }
   exit(code, reason) {
     if (this.phase === "exited") return;
@@ -21831,10 +22055,21 @@ class HostShell extends EventEmitter {
     this.queued = 0;
     for (const stream of ["out", "err"]) {
       const rest = this.text[stream].end();
-      if (rest) (stream === "out" ? this.stdout : this.stderr).emit("data", rest);
+      if (rest) this.deliver(() => (stream === "out" ? this.stdout : this.stderr).emit("data", rest));
     }
-    this.emit("exit", code, reason);
+    this.deliver(() => this.emit("exit", code, reason));
   }
+}
+function closeQuietly(ch) {
+  try {
+    ch.close?.();
+  } catch {
+  }
+}
+function json(payload, ok) {
+  const m = decodeJson(payload);
+  if (!m || typeof m !== "object" || !ok(m)) throw new Error("unexpected message shape");
+  return m;
 }
 class HostBackend {
   constructor(id, deps) {
@@ -21860,7 +22095,7 @@ class HostBackend {
     const opener = {
       open: async (resume) => {
         const l = await this.deps.link.ready();
-        return l.conn.channel(`exec ${sessionCommand(l.paths, { instance, chatId, sid, cwd, resume })}`);
+        return this.deps.link.openSession(`exec ${sessionCommand(l.paths, { instance, chatId, sid, cwd, resume })}`);
       },
       killDetached: () => {
         void this.deps.link.agent(["kill", "--instance", instance, "--sid", sid], 15e3).catch((err) => {
@@ -21875,6 +22110,17 @@ class HostBackend {
       if (this.shells.get(key) === sh) this.shells.delete(key);
     });
     return sh;
+  }
+  /**
+   * End every shell this backend holds, KILL down each channel, and wait
+   * (briefly) for the channels to close, so the KILLs are out before the
+   * connections go. For teardown: removing the machine, the plugin stopping.
+   */
+  async killAll(waitMs = 1500) {
+    const shells = [...this.shells.values()];
+    this.shells.clear();
+    for (const sh of shells) sh.kill();
+    if (shells.length) await new Promise((r) => setTimeout(r, waitMs).unref?.());
   }
   beforeRun(info) {
     this.shells.get(shellKey(info.chatId, info.terminal))?.runBegin(info.runId, info.background);
@@ -21907,26 +22153,37 @@ function sessionCommand(paths, s) {
     s.sid,
     "--cwd",
     s.cwd,
+    "--heartbeat-ms",
+    String(HEARTBEAT_TIMEOUT_MS),
     ...s.resume ? ["--resume-out", String(s.resume.out), "--resume-err", String(s.resume.err)] : []
   ]);
 }
+const HEARTBEAT_TIMEOUT_MS = 3 * 6e4;
 function newSid() {
   return `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
 }
 function shellKey(chatId, name) {
   return `${chatId}\0${name}`;
 }
+function token(v, max = 32) {
+  const m = (v ?? "").match(/[A-Za-z0-9][A-Za-z0-9._+-]*/);
+  return m ? m[0].slice(0, max) : void 0;
+}
 function describe(probe) {
   if (!probe) return "";
-  const os = [probe.os.name, probe.os.version].filter(Boolean).join(" ") || probe.platform;
-  return ` (${os}, ${probe.arch})`;
+  const name = (probe.os.name ?? "").match(/^[A-Za-z][A-Za-z ]{0,20}$/)?.[0];
+  const os = [name, token(probe.os.version, 16)].filter(Boolean).join(" ") || token(probe.platform, 16) || "unknown OS";
+  return ` (${os}, ${token(probe.arch, 16) ?? "?"})`;
 }
 function tools(probe) {
   if (!probe) return "not probed yet";
   const t = probe.tools;
-  const has = (name, v) => v ? `${name} ${v.replace(/^v/, "")}` : `no ${name}`;
+  const has = (name, v) => {
+    const ver = token(v?.replace(/^\D*(?=\d)/, ""));
+    return v ? `${name}${ver ? ` ${ver}` : ""}` : `no ${name}`;
+  };
   const list = [has("git", t.git), has("node", t.node), has("pnpm", t.pnpm)];
-  if (probe.platform === "darwin") list.push(t.xcodebuild ? `Xcode (${t.xcodebuild})` : "no Xcode");
+  if (probe.platform === "darwin") list.push(has("Xcode", t.xcodebuild));
   return list.join(", ");
 }
 class HostRegistry {
@@ -21942,10 +22199,14 @@ class HostRegistry {
     for (const [slug, e] of this.entries) {
       if (wanted.has(slug)) continue;
       this.entries.delete(slug);
-      e.link.dispose();
-      void terminals.unregisterBackend(backendId(slug)).catch((err) => {
-        ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText(err)}`);
-      });
+      void (async () => {
+        await e.backend.killAll().catch(() => {
+        });
+        await terminals.unregisterBackend(backendId(slug)).catch((err) => {
+          ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText(err)}`);
+        });
+        e.link.dispose();
+      })();
       ctx.log.info(`remote-host: ${slug} removed`);
     }
     for (const host of hosts) {
@@ -22012,9 +22273,13 @@ class HostRegistry {
       ...link.probe ? { probe: link.probe } : {}
     }));
   }
-  dispose() {
-    for (const e of this.entries.values()) e.link.dispose();
+  /** The plugin is going down: end the shells (KILL down their channels), then close every connection. */
+  async dispose() {
+    const entries = [...this.entries.values()];
     this.entries.clear();
+    await Promise.all(entries.map((e) => e.backend.killAll().catch(() => {
+    })));
+    for (const e of entries) e.link.dispose();
   }
 }
 function wrap(log, fn) {
@@ -22152,12 +22417,12 @@ const server = definePlugin({
     ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, hosts, saveHosts }));
     live = { registry, pairing, off };
   },
-  deactivate() {
+  async deactivate() {
     const l = live;
     live = void 0;
     l?.off();
     l?.pairing.clear();
-    l?.registry.dispose();
+    await l?.registry.dispose();
   }
 });
 export {

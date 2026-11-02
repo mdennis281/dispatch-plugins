@@ -59,7 +59,7 @@ export class HostBackend implements TerminalBackend {
     const opener: SessionOpener = {
       open: async (resume) => {
         const l = await this.deps.link.ready();
-        return l.conn.channel(`exec ${sessionCommand(l.paths, { instance, chatId, sid, cwd, resume })}`);
+        return this.deps.link.openSession(`exec ${sessionCommand(l.paths, { instance, chatId, sid, cwd, resume })}`);
       },
       killDetached: () => {
         void this.deps.link.agent(["kill", "--instance", instance, "--sid", sid], 15_000).catch((err: unknown) => {
@@ -74,6 +74,18 @@ export class HostBackend implements TerminalBackend {
       if (this.shells.get(key) === sh) this.shells.delete(key);
     });
     return sh;
+  }
+
+  /**
+   * End every shell this backend holds, KILL down each channel, and wait
+   * (briefly) for the channels to close, so the KILLs are out before the
+   * connections go. For teardown: removing the machine, the plugin stopping.
+   */
+  async killAll(waitMs = 1_500): Promise<void> {
+    const shells = [...this.shells.values()];
+    this.shells.clear();
+    for (const sh of shells) sh.kill();
+    if (shells.length) await new Promise((r) => setTimeout(r, waitMs).unref?.());
   }
 
   beforeRun(info: TerminalRunInfo): void {
@@ -118,9 +130,19 @@ export function sessionCommand(
     s.sid,
     "--cwd",
     s.cwd,
+    "--heartbeat-ms",
+    String(HEARTBEAT_TIMEOUT_MS),
     ...(s.resume ? ["--resume-out", String(s.resume.out), "--resume-err", String(s.resume.err)] : []),
   ]);
 }
+
+/**
+ * How long a session waits for Dispatch after its connection drops before
+ * the machine ends it. Time asleep doesn't count. Long enough to ride out a
+ * Wi-Fi drop and the reconnect after it; short enough that what an abandoned
+ * shell started doesn't run on for long.
+ */
+export const HEARTBEAT_TIMEOUT_MS = 3 * 60_000;
 
 /** A session id: sortable by start, unique, and within dispatch-host's id alphabet. */
 export function newSid(): string {
@@ -131,17 +153,32 @@ function shellKey(chatId: string, name: string): string {
   return `${chatId}\u0000${name}`;
 }
 
+/**
+ * A string the machine reported, made safe to put in the agent's prompt: the
+ * account on the machine controls its PATH, so a "version" could be
+ * anything, instructions included. Only a short, version-like token gets through.
+ */
+export function token(v: string | null | undefined, max = 32): string | undefined {
+  const m = (v ?? "").match(/[A-Za-z0-9][A-Za-z0-9._+-]*/);
+  return m ? m[0].slice(0, max) : undefined;
+}
+
 function describe(probe: ProbeResult | undefined): string {
   if (!probe) return "";
-  const os = [probe.os.name, probe.os.version].filter(Boolean).join(" ") || probe.platform;
-  return ` (${os}, ${probe.arch})`;
+  const name = (probe.os.name ?? "").match(/^[A-Za-z][A-Za-z ]{0,20}$/)?.[0];
+  const os = [name, token(probe.os.version, 16)].filter(Boolean).join(" ") || token(probe.platform, 16) || "unknown OS";
+  return ` (${os}, ${token(probe.arch, 16) ?? "?"})`;
 }
 
 function tools(probe: ProbeResult | undefined): string {
   if (!probe) return "not probed yet";
   const t = probe.tools;
-  const has = (name: string, v: string | null) => (v ? `${name} ${v.replace(/^v/, "")}` : `no ${name}`);
+  const has = (name: string, v: string | null) => {
+    // "git version 2.39.2 (Apple Git-143)" → "2.39.2"; "Xcode 14.3.1" → "14.3.1".
+    const ver = token(v?.replace(/^\D*(?=\d)/, ""));
+    return v ? `${name}${ver ? ` ${ver}` : ""}` : `no ${name}`;
+  };
   const list = [has("git", t.git), has("node", t.node), has("pnpm", t.pnpm)];
-  if (probe.platform === "darwin") list.push(t.xcodebuild ? `Xcode (${t.xcodebuild})` : "no Xcode");
+  if (probe.platform === "darwin") list.push(has("Xcode", t.xcodebuild));
   return list.join(", ");
 }

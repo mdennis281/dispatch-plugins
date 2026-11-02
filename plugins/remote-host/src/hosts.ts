@@ -7,6 +7,7 @@
  * machine. What changes at run time (online, last seen, the probe) is kept
  * per instance in kv.
  */
+import { isIP } from "node:net";
 
 export const PLUGIN_ID = "remote-host";
 
@@ -45,7 +46,6 @@ export function keySecretName(slug: string): string {
 
 const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
 const ADDRESS = /^[A-Za-z0-9._:%-]{1,253}$/;
-const FROM = /^[A-Za-z0-9.:/*?-]{1,64}$/;
 const USER = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 
 /**
@@ -100,9 +100,11 @@ function invalid(h: unknown): string | undefined {
   }
   if (o.port !== undefined && !(Number.isInteger(o.port) && (o.port as number) > 0 && (o.port as number) < 65536)) return `${o.slug}: bad port`;
   if (typeof o.hostKey !== "string" || !FINGERPRINT.test(o.hostKey)) return `${o.slug}: no pinned host key`;
-  if (typeof o.hostKeyType !== "string" || !o.hostKeyType) return `${o.slug}: no host key type`;
+  if (typeof o.hostKeyType !== "string" || !(HOST_KEY_TYPES as readonly string[]).includes(o.hostKeyType)) {
+    return `${o.slug}: no usable host key type`;
+  }
   if (typeof o.keyFingerprint !== "string" || !FINGERPRINT.test(o.keyFingerprint)) return `${o.slug}: no client key fingerprint`;
-  if (!Array.isArray(o.allowFrom) || !o.allowFrom.length || !o.allowFrom.every((a) => typeof a === "string" && FROM.test(a))) {
+  if (!Array.isArray(o.allowFrom) || !o.allowFrom.length || !o.allowFrom.every((a) => typeof a === "string" && validFrom(a))) {
     return `${o.slug}: no valid allowFrom`;
   }
   if (typeof o.pairedAt !== "string") return `${o.slug}: no pairedAt`;
@@ -113,8 +115,33 @@ export function validAddress(a: string): boolean {
   return ADDRESS.test(a);
 }
 
+/**
+ * One entry of the key's `from=` list: an IP address, or a network in CIDR
+ * form. Not a host name or a wildcard: those widen who may use the key in
+ * ways that are easy to get wrong (`*` lets in everyone). A network can't be
+ * wider than a /8 (IPv4) or a /32 (IPv6).
+ */
 export function validFrom(a: string): boolean {
-  return FROM.test(a);
+  const m = a.match(/^([0-9a-fA-F:.]+)(?:\/(\d{1,3}))?$/);
+  if (!m) return false;
+  const ip = m[1]!;
+  const v = isIP(ip);
+  if (!v) return false;
+  if (m[2] === undefined) return true;
+  const bits = Number(m[2]);
+  return v === 4 ? bits >= 8 && bits <= 32 : bits >= 32 && bits <= 128;
+}
+
+/** Host key types a machine may be pinned by. */
+export const HOST_KEY_TYPES = ["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa"] as const;
+
+/**
+ * What to let the host negotiate so that it shows the pinned key. An RSA key
+ * is the same key under either SHA-2 signature; plain `ssh-rsa` (SHA-1) is
+ * refused by OpenSSH 8.8 and later.
+ */
+export function hostKeyAlgorithms(type: string): string[] {
+  return type === "ssh-rsa" ? ["rsa-sha2-512", "rsa-sha2-256"] : [type];
 }
 
 export function validUser(u: string): boolean {

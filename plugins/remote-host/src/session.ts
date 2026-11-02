@@ -8,8 +8,12 @@
  * `stalled` (core pauses the command's timeout) and re-attaches. It asks for
  * the output from the last byte it got, and the supervisor replays it from its
  * journal. The command in flight carries on and its result arrives intact.
- * Only a drop that outlasts {@link HostShellOptions.giveUpMs}, or a session
- * the machine no longer has, ends the shell as `transport-lost`.
+ *
+ * The supervisor waits for Dispatch as long as its heartbeat timeout
+ * (`--heartbeat-ms`, set by the backend). Asleep doesn't count; it measures
+ * time the machine is awake. A drop longer than that ends the shell on the
+ * machine, and the re-attach reports the session as gone. Re-attaching gives
+ * up after {@link HostShellOptions.giveUpMs} either way, as `transport-lost`.
  */
 import { EventEmitter } from "node:events";
 import { StringDecoder } from "node:string_decoder";
@@ -51,7 +55,7 @@ export interface HostShellOptions {
   /** The machine's name, for messages. */
   label: string;
   log?: PluginLog;
-  /** How often to tell the supervisor Dispatch is still here. Its own timeout is 60 s. */
+  /** How often to tell the supervisor Dispatch is still here. */
   heartbeatMs?: number;
   /** Silence after which the shell is reported stalled. */
   stallAfterMs?: number;
@@ -67,6 +71,9 @@ export interface HostShellOptions {
 type Phase = "starting" | "attached" | "detached" | "exited";
 type Stream = "out" | "err";
 
+/** A stream that isn't this protocol this many times in a row is not going to become it. */
+const MAX_UNREADABLE = 3;
+
 export class HostShell extends EventEmitter implements TerminalBackendHandle {
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
@@ -76,6 +83,8 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
 
   private phase: Phase = "starting";
   private ch?: SessionChannel;
+  /** A channel was opened at some point, so a session may exist on the machine. */
+  private opened = false;
   private readonly got: Record<Stream, number> = { out: 0, err: 0 };
   private readonly text: Record<Stream, StringDecoder> = { out: new StringDecoder("utf8"), err: new StringDecoder("utf8") };
   private queue: Buffer[] = [];
@@ -84,10 +93,21 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
   private lastFrameAt: number;
   private detachedAt?: number;
   private attempts = 0;
+  private unreadable = 0;
+  private lastGarbledAt = 0;
   private heartbeat?: NodeJS.Timeout;
   private retry?: NodeJS.Timeout;
   private relayErr = "";
+  /** What came first on the stream before READY, to say what a garbled start looked like. */
+  private head = Buffer.alloc(0);
   private starting?: { resolve: () => void; reject: (e: Error) => void };
+  /**
+   * Events held until core is listening. `spawn` resolves on READY, and output
+   * or an exit in the same chunk would otherwise be emitted before core has
+   * attached a listener. That output would be lost, and that exit too.
+   */
+  private gate: Array<() => void> | undefined = [];
+  private gateOpening = false;
   private readonly o: Required<Omit<HostShellOptions, "log">> & { log?: PluginLog };
 
   private constructor(
@@ -114,6 +134,10 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
       end: () => this.send(encodeFrame(F.stdinEnd)),
       on: () => undefined, // input never errors here: a dead link is a stall, then an exit
     };
+    // `newListener` fires before the listener is added, hence the microtask.
+    const look = () => queueMicrotask(() => this.openGate());
+    this.on("newListener", look);
+    this.stdout.on("newListener", look);
   }
 
   /** Start a session; resolves once the shell runs on the machine. */
@@ -124,7 +148,20 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
       if (signal?.aborted) throw new Error("cancelled");
-      sh.wire(await opener.open());
+      // A channel that opens after the spawn was cancelled is an orphan: the
+      // relay may already be starting a session for it. Close it and end the
+      // session. Otherwise the channel is wired the moment it opens, before
+      // anything it carries can be read.
+      const opening = opener.open().then((ch) => {
+        sh.opened = true;
+        if (sh.phase === "starting") sh.wire(ch);
+        else {
+          closeQuietly(ch);
+          opener.killDetached?.();
+        }
+      });
+      // A cancel mustn't wait for the channel to open: `started` rejects on it.
+      await Promise.race([opening, started]);
       await started;
       return sh;
     } catch (err) {
@@ -165,7 +202,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
       }
     } else {
       this.closeChannel();
-      this.opener.killDetached?.();
+      if (this.opened) this.opener.killDetached?.();
     }
     this.exit(null, { kind: "killed", detail: "stopped by Dispatch" });
   }
@@ -174,7 +211,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     if (this.phase !== "starting") return;
     this.phase = "exited";
     this.closeChannel();
-    this.opener.killDetached?.();
+    if (this.opened) this.opener.killDetached?.();
     this.settleStart(new Error("cancelled"));
   }
 
@@ -184,6 +221,21 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     if (!s) return;
     if (err) s.reject(err);
     else s.resolve();
+  }
+
+  /** Run `fn` (an emit) now if core is listening, else once it is, in order. */
+  private deliver(fn: () => void): void {
+    if (this.gate) this.gate.push(fn);
+    else fn();
+  }
+
+  private openGate(): void {
+    if (!this.gate || this.gateOpening) return;
+    if (this.stdout.listenerCount("data") === 0 || this.listenerCount("exit") === 0) return;
+    this.gateOpening = true;
+    const q = this.gate;
+    for (let i = 0; i < q.length; i++) q[i]!();
+    this.gate = undefined;
   }
 
   private send(frame: Buffer): void {
@@ -208,24 +260,31 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     const decoder = new FrameDecoder();
     ch.on("data", (data: Buffer) => {
       if (this.ch !== ch) return;
+      if (this.phase === "starting" && this.head.length < 256) this.head = Buffer.concat([this.head, data]).subarray(0, 256);
       let frames: Frame[];
       try {
         frames = decoder.push(data);
       } catch (err) {
-        this.o.log?.warn(`remote-host ${this.o.label}: unreadable session stream (${String(err)}); re-attaching`);
-        this.closeChannel();
-        this.channelLost(ch);
+        this.garbled(ch, String((err as Error).message ?? err));
         return;
       }
       this.lastFrameAt = this.o.now();
       // Quiet, not gone: a stall from unanswered heartbeats ends with the next frame.
       if (this.stalled && this.phase === "attached") {
         this.stalled = false;
-        this.emit("resumed");
+        this.deliver(() => this.emit("resumed"));
       }
       for (const f of frames) {
         if (this.ch !== ch) break;
-        this.frame(ch, f);
+        try {
+          this.frame(ch, f);
+        } catch (err) {
+          // A frame that doesn't read (bad JSON, a short output frame) must not
+          // throw out of ssh2's data handler: that would close the whole
+          // connection, every other shell on it included.
+          this.garbled(ch, `frame 0x${f.type.toString(16)}: ${String((err as Error).message ?? err)}`);
+          return;
+        }
       }
     });
     ch.stderr.on("data", (d: Buffer) => {
@@ -237,22 +296,56 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     ch.on("close", () => this.channelLost(ch));
   }
 
+  /** The stream isn't the protocol. Before READY that is a failed start; after it, drop this channel and re-attach. */
+  private garbled(ch: SessionChannel, why: string): void {
+    if (this.ch !== ch) return;
+    if (this.phase === "starting") {
+      const seen = this.head.toString("utf8").replace(/[^\x20-\x7e\n]/g, "?").trim().slice(0, 160);
+      this.phase = "exited";
+      this.closeChannel();
+      // A session may have started behind the noise; nobody will attach to it.
+      this.opener.killDetached?.();
+      this.settleStart(
+        new Error(
+          `dispatch-host on ${this.o.label} answered with something that isn't its protocol (${why})` +
+            (seen ? `. It began: ${JSON.stringify(seen)}. Something the account's shell runs at login may be printing.` : ""),
+        ),
+      );
+      return;
+    }
+    // Not reset by READY: a bad frame in the journal comes back with every
+    // replay. Only five quiet minutes clear the count.
+    const now = this.o.now();
+    if (now - this.lastGarbledAt > 5 * 60_000) this.unreadable = 0;
+    this.lastGarbledAt = now;
+    this.unreadable++;
+    this.o.log?.warn(`remote-host ${this.o.label}: unreadable session stream (${why})`);
+    if (this.unreadable >= MAX_UNREADABLE) {
+      this.exit(null, { kind: "transport-lost", detail: `the session stream from ${this.o.label} kept arriving garbled (${why})` });
+      return;
+    }
+    this.channelLost(ch);
+    closeQuietly(ch);
+  }
+
   private frame(ch: SessionChannel, f: Frame): void {
     switch (f.type) {
       case F.ready:
-        return this.ready(decodeJson<ReadyMsg>(f.payload));
+        return this.ready(json<ReadyMsg>(f.payload, (m) => typeof m.cwd === "string"));
       case F.stdout:
       case F.stderr: {
         const { offset, data } = decodeOutput(f.payload);
         return this.output(f.type === F.stdout ? "out" : "err", offset, data);
       }
       case F.exit:
-        return this.remoteExit(ch, decodeJson<ExitMsg>(f.payload));
+        return this.remoteExit(ch, json<ExitMsg>(f.payload, (m) => typeof m.reason === "string"));
       case F.error:
-        return this.remoteError(ch, decodeJson<ErrorMsg>(f.payload));
-      case F.runEnd:
-        this.emit("runEnd", decodeJson<RunEndMsg>(f.payload));
+        return this.remoteError(ch, json<ErrorMsg>(f.payload, (m) => typeof m.code === "string"));
+      case F.runEnd: {
+        const m = json<RunEndMsg>(f.payload, (x) => typeof x.runId === "string");
+        this.deliver(() => this.emit("runEnd", m));
         return;
+      }
       default:
         return; // heartbeat acks; anything newer than this plugin knows
     }
@@ -264,6 +357,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     this.phase = "attached";
     this.detachedAt = undefined;
     this.attempts = 0;
+    this.head = Buffer.alloc(0);
     const queue = this.queue;
     this.queue = [];
     this.queued = 0;
@@ -272,7 +366,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     if (this.starting) this.settleStart();
     if (this.stalled) {
       this.stalled = false;
-      this.emit("resumed");
+      this.deliver(() => this.emit("resumed"));
     }
   }
 
@@ -284,11 +378,11 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     if (offset > have) this.notice(`${offset - have} bytes of output were lost while Dispatch was disconnected.`);
     this.got[stream] = offset + data.length;
     const text = this.text[stream].write(data.subarray(from - offset));
-    if (text) (stream === "out" ? this.stdout : this.stderr).emit("data", text);
+    if (text) this.deliver(() => (stream === "out" ? this.stdout : this.stderr).emit("data", text));
   }
 
   private notice(line: string): void {
-    this.stderr.emit("data", `\n[remote-host] ${line}\n`);
+    this.deliver(() => this.stderr.emit("data", `\n[remote-host] ${line}\n`));
   }
 
   private remoteExit(ch: SessionChannel, m: ExitMsg): void {
@@ -309,7 +403,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
       this.settleStart(new Error(`the shell on ${label} did not start: ${m.detail ?? m.reason}`));
       return;
     }
-    this.exit(m.code, reason);
+    this.exit(typeof m.code === "number" ? m.code : null, reason);
   }
 
   private remoteError(ch: SessionChannel, m: ErrorMsg): void {
@@ -343,6 +437,8 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     if (this.phase === "exited") return;
     if (this.phase === "starting") {
       this.phase = "exited";
+      // The connection may have dropped after the session started; don't leave it to the heartbeat timeout.
+      this.opener.killDetached?.();
       const why = this.relayErr.trim();
       this.settleStart(new Error(`dispatch-host on ${this.o.label} ended before the shell started${why ? `: ${why}` : ""}`));
       return;
@@ -356,7 +452,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
   private stall(detail: string): void {
     if (this.stalled) return;
     this.stalled = true;
-    this.emit("stalled", { detail });
+    this.deliver(() => this.emit("stalled", { detail }));
   }
 
   private scheduleReattach(): void {
@@ -390,11 +486,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
       return;
     }
     if (this.phase !== "detached") {
-      try {
-        ch.close?.();
-      } catch {
-        /* gone */
-      }
+      closeQuietly(ch);
       return;
     }
     this.wire(ch);
@@ -424,12 +516,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     const ch = this.ch;
     this.ch = undefined;
     this.stopHeartbeat();
-    if (!ch) return;
-    try {
-      ch.close?.();
-    } catch {
-      /* already closed */
-    }
+    if (ch) closeQuietly(ch);
   }
 
   private exit(code: number | null, reason: TerminalExitReason): void {
@@ -442,8 +529,23 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     this.queued = 0;
     for (const stream of ["out", "err"] as const) {
       const rest = this.text[stream].end();
-      if (rest) (stream === "out" ? this.stdout : this.stderr).emit("data", rest);
+      if (rest) this.deliver(() => (stream === "out" ? this.stdout : this.stderr).emit("data", rest));
     }
-    this.emit("exit", code, reason);
+    this.deliver(() => this.emit("exit", code, reason));
   }
+}
+
+function closeQuietly(ch: SessionChannel): void {
+  try {
+    ch.close?.();
+  } catch {
+    /* already closed */
+  }
+}
+
+/** A JSON payload that must look like `T` (checked by `ok`), or a throw the caller turns into "garbled". */
+function json<T>(payload: Buffer, ok: (m: T) => boolean): T {
+  const m = decodeJson<T>(payload);
+  if (!m || typeof m !== "object" || !ok(m)) throw new Error("unexpected message shape");
+  return m;
 }

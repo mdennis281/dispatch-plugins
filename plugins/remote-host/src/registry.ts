@@ -51,10 +51,15 @@ export class HostRegistry {
     for (const [slug, e] of this.entries) {
       if (wanted.has(slug)) continue;
       this.entries.delete(slug);
-      e.link.dispose();
-      void terminals.unregisterBackend(backendId(slug)).catch((err: unknown) => {
-        ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText(err)}`);
-      });
+      // Shells first, while their connections are up to carry the KILL; then
+      // the backend; the link last.
+      void (async () => {
+        await e.backend.killAll().catch(() => {});
+        await terminals.unregisterBackend(backendId(slug)).catch((err: unknown) => {
+          ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText(err)}`);
+        });
+        e.link.dispose();
+      })();
       ctx.log.info(`remote-host: ${slug} removed`);
     }
     for (const host of hosts) {
@@ -127,8 +132,11 @@ export class HostRegistry {
     }));
   }
 
-  dispose(): void {
-    for (const e of this.entries.values()) e.link.dispose();
+  /** The plugin is going down: end the shells (KILL down their channels), then close every connection. */
+  async dispose(): Promise<void> {
+    const entries = [...this.entries.values()];
     this.entries.clear();
+    await Promise.all(entries.map((e) => e.backend.killAll().catch(() => {})));
+    for (const e of entries) e.link.dispose();
   }
 }

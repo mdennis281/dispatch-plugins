@@ -4,7 +4,7 @@
  * from the right offsets, no byte twice, no byte lost silently).
  */
 import { describe, expect, it } from "vitest";
-import { F } from "@dispatch-plugins/host-agent";
+import { F, encodeFrame, encodeOutput } from "@dispatch-plugins/host-agent";
 import type { TerminalExitReason } from "@dispatch/plugin-sdk";
 import { HostShell } from "../src/session.js";
 import { fakeOpener } from "./fake-channel.js";
@@ -59,6 +59,7 @@ describe("starting", () => {
     ch.stderr.emit("data", Buffer.from("node: No such file or directory\n"));
     ch.drop();
     await expect(p).rejects.toThrow(/ended before the shell started: node: No such file/);
+    expect(o.killedDetached).toBe(1); // in case it got as far as starting one
   });
 
   it("gives up when the spawn is cancelled", async () => {
@@ -178,5 +179,81 @@ describe("a dropped connection", () => {
     expect(t.o.killedDetached).toBe(1);
     expect(t.exit()?.reason?.kind).toBe("killed");
     expect(t.o.channels).toHaveLength(1); // and stops trying to re-attach
+  });
+});
+
+describe("races and garbage", () => {
+  it("a spawn cancelled while its channel opens closes that channel and ends the session", async () => {
+    const o = fakeOpener();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow = { ...o.opener, open: async (resume?: { out: number; err: number }) => (await gate, o.opener.open(resume)) };
+    const ac = new AbortController();
+    const p = HostShell.start(slow, fast, ac.signal);
+    ac.abort();
+    await expect(p).rejects.toThrow(/cancelled/);
+    release();
+    await until(() => o.channels.length === 1);
+    await until(() => o.channels[0]!.closed);
+    expect(o.killedDetached).toBe(1);
+  });
+
+  it("never reaches for the machine to kill a session whose channel never opened", async () => {
+    const o = fakeOpener({ fail: () => new Error("offline") });
+    await expect(HostShell.start(o.opener, fast)).rejects.toThrow(/offline/);
+    expect(o.killedDetached).toBe(0);
+  });
+
+  it("delivers output and an exit that arrive in the same chunk as READY, once core listens", async () => {
+    const o = fakeOpener();
+    const p = HostShell.start(o.opener, fast);
+    const ch = await o.nth(1);
+    ch.emit(
+      "data",
+      Buffer.concat([
+        encodeFrame(F.ready, { v: 1, sid: "s", pid: 1, agentVersion: "0.1.0", cwd: "/x", out: 0, err: 0, resumed: false }),
+        ...encodeOutput(F.stdout, 0, Buffer.from("bash: warning: setlocale\n")),
+        encodeFrame(F.exit, { code: 1, signal: null, reason: "exited" }),
+      ]),
+    );
+    const sh = await p;
+    const out: string[] = [];
+    let exit: unknown;
+    sh.stdout.on("data", (d: string) => out.push(d));
+    sh.on("exit", (code: number | null, reason?: TerminalExitReason) => (exit = { code, reason }));
+    await until(() => exit !== undefined);
+    expect(out.join("")).toBe("bash: warning: setlocale\n");
+    expect(exit).toEqual({ code: 1, reason: { kind: "exited" } });
+  });
+
+  it("fails a start at once, saying what came, when the login shell prints before dispatch-host", async () => {
+    const o = fakeOpener();
+    const p = HostShell.start(o.opener, fast);
+    const ch = await o.nth(1);
+    ch.emit("data", Buffer.from("Welcome to the machine!\nLast login: today\n"));
+    await expect(p).rejects.toThrow(/isn't its protocol.*Welcome to the machine/s);
+    expect(ch.closed).toBe(true);
+    expect(o.killedDetached).toBe(1);
+  });
+
+  it("drops only that channel on a frame that doesn't read, and re-attaches", async () => {
+    const t = await started();
+    expect(() => t.ch.emit("data", encodeFrame(F.exit, Buffer.from("{not json")))).not.toThrow();
+    expect(t.events).toEqual(["stalled"]);
+    const again = await t.o.nth(2);
+    again.ready({ resumed: true });
+    expect(t.events).toEqual(["stalled", "resumed"]);
+    expect(t.exit()).toBeUndefined();
+  });
+
+  it("gives up on a stream that keeps arriving garbled", async () => {
+    const t = await started();
+    for (let n = 1; n <= 3; n++) {
+      const ch = await t.o.nth(n);
+      if (n > 1) ch.ready({ resumed: true });
+      ch.emit("data", encodeFrame(F.ready, Buffer.from("[]")));
+    }
+    await until(() => t.exit() !== undefined);
+    expect(t.exit()?.reason).toEqual({ kind: "transport-lost", detail: expect.stringMatching(/garbled/) });
   });
 });

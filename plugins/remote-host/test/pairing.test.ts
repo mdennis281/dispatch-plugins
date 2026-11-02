@@ -98,7 +98,32 @@ describe("start", () => {
     expect(() => p.start({ ...ok, slug: "-bad" })).toThrow(/lowercase/);
     expect(() => p.start({ ...ok, slug: "cvx-mac" })).toThrow(/already paired/);
     expect(() => p.start({ ...ok, slug: "x", hostKey: "MD5:aa" })).toThrow(/fingerprint/);
-    expect(() => p.start({ ...ok, slug: "x", allowFrom: ['1.2.3.4" evil'] })).toThrow(/address pattern/);
+    expect(() => p.start({ ...ok, slug: "x", allowFrom: ['1.2.3.4" evil'] })).toThrow(/not an IP address/);
+    expect(() => p.start({ ...ok, slug: "x", hostKeyType: "ssh-dss" })).toThrow(/host key type/);
+  });
+
+  it("never lets the key in from everywhere: no wildcards, names, or catch-all networks", () => {
+    const p = pairing(fresh());
+    const ok = { slug: "x", address: "h", user: "dispatch", hostKey: `SHA256:${"a".repeat(43)}` };
+    for (const bad of ["*", "0.0.0.0/0", "10.0.0.0/7", "::/0", "*.lan", "cvx-mac.lan", "10.0.4.*"]) {
+      expect(() => p.start({ ...ok, allowFrom: [bad] }), bad).toThrow(/not an IP address/);
+    }
+    expect(p.start({ ...ok, allowFrom: ["10.0.4.1", "10.0.0.0/20", "fd00::1", "2001:db8::/48"] }).authorizedKeysLine).toContain(
+      'from="10.0.4.1,10.0.0.0/20,fd00::1,2001:db8::/48"',
+    );
+  });
+
+  it("keeps the key's comment within bounds for the longest name and a long computer name", () => {
+    const p = new Pairing({
+      hosts: () => [],
+      saveHosts: async () => {},
+      secrets: { get: async () => undefined, set: async () => {}, delete: async () => false },
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+      localAddresses: () => ["10.0.4.1"],
+      dispatchName: "a-very-long-computer-name.with.a.domain.that.goes.on.and.on.example.internal",
+    });
+    const r = p.start({ slug: "a".repeat(48), address: "h", user: "dispatch", hostKey: `SHA256:${"a".repeat(43)}` });
+    expect(r.authorizedKeysLine.split(" ").at(-1)!.length).toBeLessThanOrEqual(128);
   });
 });
 
