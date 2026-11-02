@@ -12,7 +12,7 @@ export { generateKeyPair, publicKeyOf, type SshKeyPair } from "./ssh/keys.js";
 export { keyTypeOf, scanHostKey, type HostKeyScan } from "./ssh/scan.js";
 export { NO_CWD_EXIT, RemoteShell, ShellStartError, remoteShellCommand, signalName } from "./shell/remote-shell.js";
 export { sq } from "./shell/quote.js";
-export { git, localHas, pack, remotePathFor, repoInfo, snapshot, type RepoInfo } from "./sync/snapshot.js";
+export { copyIndex, git, localHas, pack, remotePathFor, repoInfo, snapshot, type RepoInfo } from "./sync/snapshot.js";
 export { RemoteCheckouts, githubHttps, type RemoteCheckoutsOptions } from "./sync/remote-repo.js";
 export { PortWatch, parseListeners, type PortWatchOptions } from "./ports/watch.js";
 export {

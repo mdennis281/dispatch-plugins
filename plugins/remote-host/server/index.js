@@ -22,7 +22,7 @@ import require$$1$2 from "zlib";
 import { StringDecoder } from "node:string_decoder";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, rename, rm, stat, lstat, readdir, writeFile, chmod, mkdtemp, rmdir, copyFile, access, realpath } from "node:fs/promises";
+import { stat, copyFile, utimes, mkdir, readFile, rename, rm, lstat, readdir, writeFile, chmod, mkdtemp, rmdir, access, realpath } from "node:fs/promises";
 import { tmpdir, hostname, networkInterfaces } from "node:os";
 import { posix, join, basename, resolve, dirname, sep, isAbsolute, relative } from "node:path";
 import { createWriteStream, createReadStream } from "node:fs";
@@ -20574,6 +20574,12 @@ function git(cwd, args, env = {}, input) {
     if (input !== void 0) child.stdin?.end(input);
   });
 }
+async function copyIndex(from, to) {
+  const st = await stat(from).catch(() => void 0);
+  if (!st) return;
+  await copyFile(from, to);
+  await utimes(to, st.atime, st.mtime);
+}
 function errText(err) {
   return err instanceof Error ? err.message : String(err);
 }
@@ -22165,8 +22171,7 @@ function commitFor(root, tree) {
 }
 async function snapshotWorktree(root, opts) {
   return withTempIndex(async (env) => {
-    await copyFile(await indexPath(root), env.GIT_INDEX_FILE).catch(() => {
-    });
+    await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
     const others = (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
     const tooBig = [];
     for (let i = 0; i < others.length; i += 64) {
@@ -22244,8 +22249,7 @@ async function snapshotBlobs(root, paths) {
   for (const p of paths) if (await onDisk(root, p) === "file") files.push(p);
   if (!files.length) return out;
   return withTempIndex(async (env) => {
-    await copyFile(await indexPath(root), env.GIT_INDEX_FILE).catch(() => {
-    });
+    await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
     const add = (ps) => git(root, ["update-index", "--add", "--replace", "-z", "--stdin"], env, ps.join("\0") + "\0");
     const want = new Set(files);
     await add(files).catch(async () => {
@@ -22462,7 +22466,8 @@ async function checkoutStatus(remote, p, baseTree) {
     `cd "$W" 2>/dev/null || { echo missing; exit 0; }`,
     `[ -d .git ] || { echo nogit; exit 0; }`,
     `I=.git/dispatch-status.$$`,
-    `cp .git/index "$I" 2>/dev/null || rm -f "$I"`,
+    // -p: the copy keeps the index's mtime, which git's racy check needs (see remote-core's copyIndex).
+    `cp -p .git/index "$I" 2>/dev/null || rm -f "$I"`,
     // A file there that can't be read (exit 1) is left as the base has it, so
     // it reads as unchanged; it never stops the rest from syncing.
     `GIT_INDEX_FILE=$I git add -A --ignore-errors >/dev/null 2>&1; rc=$?`,

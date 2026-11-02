@@ -79,7 +79,8 @@ export async function checkoutStatus(remote: RemoteSide, p: RemotePaths, baseTre
     `cd "$W" 2>/dev/null || { echo missing; exit 0; }`,
     `[ -d .git ] || { echo nogit; exit 0; }`,
     `I=.git/dispatch-status.$$`,
-    `cp .git/index "$I" 2>/dev/null || rm -f "$I"`,
+    // -p: the copy keeps the index's mtime, which git's racy check needs (see remote-core's copyIndex).
+    `cp -p .git/index "$I" 2>/dev/null || rm -f "$I"`,
     // A file there that can't be read (exit 1) is left as the base has it, so
     // it reads as unchanged; it never stops the rest from syncing.
     `GIT_INDEX_FILE=$I git add -A --ignore-errors >/dev/null 2>&1; rc=$?`,

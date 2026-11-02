@@ -11,11 +11,11 @@
  */
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import { git } from "@dispatch-plugins/remote-core";
+import { copyIndex, git } from "@dispatch-plugins/remote-core";
 
 export const ZERO = "0".repeat(40);
 /** git's empty tree, which every repository knows without storing it. */
@@ -118,9 +118,8 @@ export function commitFor(root: string, tree: string): Promise<string> {
 
 export async function snapshotWorktree(root: string, opts: SnapshotOptions): Promise<Snapshot> {
   return withTempIndex(async (env) => {
-    await copyFile(await indexPath(root), env.GIT_INDEX_FILE).catch(() => {
-      /* no index yet: `add -A` builds one */
-    });
+    // mtime and all: git's racy check needs it (`copyIndex`). No index yet: `add -A` builds one.
+    await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
     // What `add -A` would pick up new. Anything over the cap stays out, and is
     // never even hashed.
     const others = (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
@@ -221,7 +220,7 @@ export async function snapshotBlobs(root: string, paths: readonly string[]): Pro
   for (const p of paths) if ((await onDisk(root, p)) === "file") files.push(p);
   if (!files.length) return out;
   return withTempIndex(async (env) => {
-    await copyFile(await indexPath(root), env.GIT_INDEX_FILE).catch(() => {});
+    await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
     // --replace: a file where the index has a directory (or the reverse).
     const add = (ps: readonly string[]) => git(root, ["update-index", "--add", "--replace", "-z", "--stdin"], env, ps.join("\0") + "\0");
     const want = new Set(files);

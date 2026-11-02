@@ -4,8 +4,9 @@
  * would show — into ONE commit, without touching the repository's real index,
  * stash, branches or HEAD.
  *
- * How: copy the worktree's index to a temp file (so git's stat cache makes
- * `add -A` fast on a big tree), point `GIT_INDEX_FILE` at the copy, `add -A`,
+ * How: copy the worktree's index to a temp file, mtime and all (so git's stat
+ * cache makes `add -A` fast on a big tree, and stays honest: `copyIndex`),
+ * point `GIT_INDEX_FILE` at the copy, `add -A`,
  * `write-tree`, `commit-tree -p HEAD` (no parent before the first commit).
  * Author and committer dates are pinned, so the same tree on the same HEAD is
  * the same commit sha every time — which is what lets a sync before every
@@ -20,7 +21,7 @@
  * remote may be a shallow clone of GitHub, or nothing at all.
  */
 import { execFile, spawn } from "node:child_process";
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -86,9 +87,7 @@ export async function snapshot(root: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "dispatch-snap-"));
   const tmpIndex = join(dir, "index");
   try {
-    await copyFile(indexPath, tmpIndex).catch(() => {
-      /* a repo with no index yet — `add -A` builds one from scratch */
-    });
+    await copyIndex(indexPath, tmpIndex);
     const env = { GIT_INDEX_FILE: tmpIndex };
     await git(root, ["add", "-A"], env);
     const tree = await git(root, ["write-tree"], env);
@@ -106,6 +105,22 @@ export async function snapshot(root: string): Promise<string> {
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * Copy an index to use as a temp `GIT_INDEX_FILE`, keeping its mtime. git
+ * trusts a file whose stat matches its entry unless the entry is as new as
+ * the index file itself ("racy git"). A copy with a newer mtime turns those
+ * entries trusted, and a file rewritten within the same second at the same
+ * size reads as unchanged. Stat first: an index rewritten meanwhile leaves
+ * the copy looking older, which only means more re-checking. No index yet:
+ * no copy (`add -A` builds one).
+ */
+export async function copyIndex(from: string, to: string): Promise<void> {
+  const st = await stat(from).catch(() => undefined);
+  if (!st) return;
+  await copyFile(from, to);
+  await utimes(to, st.atime, st.mtime);
 }
 
 /**
