@@ -23,6 +23,12 @@ export interface SshTarget extends SshAuth {
   username: string;
   /** Whether the key the host presents is the host we meant. Default {@link trustProvisioner}. */
   hostVerifier?: HostVerifier;
+  /**
+   * What the two ends may negotiate. Pinning a host key needs
+   * `{ serverHostKey: [<the pinned key's type>] }` as well: a host offers one
+   * key per type, and which one it shows depends on what was negotiated.
+   */
+  algorithms?: ConnectConfig["algorithms"];
 }
 
 export interface ExecResult {
@@ -63,7 +69,12 @@ export class SshConnection extends EventEmitter {
     throw new Error(`SSH to ${this.target.host} failed: ${last instanceof Error ? last.message : String(last)}`);
   }
 
-  private connectOnce(): Promise<void> {
+  /**
+   * One attempt, within ssh2's 10 s ready timeout. For a machine that is
+   * either there or not: a refused or silent address is an answer, not a
+   * reason to wait.
+   */
+  connectOnce(): Promise<void> {
     return new Promise((resolve, reject) => {
       const client = new Client();
       const cfg: ConnectConfig = {
@@ -74,9 +85,20 @@ export class SshConnection extends EventEmitter {
         keepaliveInterval: 15_000,
         keepaliveCountMax: 4,
         hostVerifier: toSsh2(this.target.hostVerifier ?? trustProvisioner()),
+        ...(this.target.algorithms ? { algorithms: this.target.algorithms } : {}),
         ...(this.target.privateKey ? { privateKey: this.target.privateKey } : {}),
-        ...(this.target.password ? { password: this.target.password } : {}),
+        // macOS's sshd asks for a password through keyboard-interactive (PAM)
+        // as often as through `password`.
+        ...(this.target.password ? { password: this.target.password, tryKeyboard: true } : {}),
       };
+      const password = this.target.password;
+      if (password) {
+        client.on("keyboard-interactive", (_name, _instructions, _lang, prompts, finish) => {
+          // One hidden prompt is the password. Anything else (a second factor)
+          // is not something a stored password can answer.
+          finish(prompts.length === 1 && !prompts[0]!.echo ? [password] : []);
+        });
+      }
       client
         .once("ready", () => {
           this.client = client;
@@ -135,6 +157,18 @@ export class SshConnection extends EventEmitter {
           ch.end();
         }
       });
+    });
+  }
+
+  /**
+   * Start `command` and hand back its channel, still open, for an exchange
+   * the caller drives itself (binary frames, say). {@link exec} would hold
+   * every byte until the command ended.
+   */
+  channel(command: string): Promise<ClientChannel> {
+    const client = this.requireClient();
+    return new Promise((resolve, reject) => {
+      client.exec(command, (err, ch) => (err ? reject(err) : resolve(ch)));
     });
   }
 
