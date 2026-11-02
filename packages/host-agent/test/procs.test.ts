@@ -71,7 +71,7 @@ describe("the session's tree", () => {
     const plan = killPlan(reused, { root: 800, rootStart: start(800), sessionMembers: [800, 810, 820, 840], self: 700 });
     expect(plan.pids).toEqual([]);
     const same = killPlan(rows, { root: 800, rootStart: start(800), self: 700 });
-    expect(same.pids).toEqual([800, 810, 815, 820]);
+    expect(same.pids).toEqual([800, 810, 815, 820, 840]);
   });
 
   it("never plans the owner's own process group, even if the tree claims it", () => {
@@ -79,6 +79,13 @@ describe("the session's tree", () => {
     const plan = killPlan(twisted, { root: 800, self: 700 });
     expect(plan.pids).toContain(850);
     expect(plan.pgids).not.toContain(700);
+  });
+
+  it("finds a background job by the shell's process group once the shell is gone (macOS pgrep -s can't)", () => {
+    const after = rows.filter((r) => r.pid !== 800).map((r) => (r.pid === 810 ? { ...r, ppid: 1 } : r));
+    const plan = killPlan(after, { root: 800, rootStart: start(800), sessionMembers: [], self: 700 });
+    expect(plan.pids).toEqual([810, 815, 820, 840]);
+    expect(plan.pgids).toEqual([800, 815]);
   });
 
   it("finds the processes a kill of the shell's group would miss", () => {
@@ -100,10 +107,10 @@ describe("killTree", () => {
       sleep: async () => {},
     };
     const n = await killTree(io, { root: 800, self: 700 });
-    expect(n).toBe(4);
+    expect(n).toBe(5);
     expect(sent[0]).toBe("-800:SIGKILL");
     expect(sent).not.toContain("700:SIGKILL");
-    // 840 went with its process group; 830 left the session and wasn't tracked.
+    // 840 is in the shell's group; 830 left the session and wasn't tracked.
     expect(live.map((r) => r.pid)).toEqual([1, 500, 600, 700, 830, 900]);
   });
 });

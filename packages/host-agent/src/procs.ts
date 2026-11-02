@@ -6,8 +6,12 @@
  * WHAT A SESSION OWNS. The shell is started with `setsid`, so its pid is its
  * session id and its process group. It owns:
  * - its descendants by parent pid;
- * - every process still in its session (`pgrep -s`), including one whose
- *   parent died, so it was reparented to launchd;
+ * - every process in its process group, which has the shell's pid as its id.
+ *   A non-interactive bash runs every job there, and the group outlives the
+ *   shell, so this finds a background job reparented to launchd after the
+ *   shell died. (Measured: macOS `pgrep -s` doesn't find those once the
+ *   session leader is gone.);
+ * - every process still in its session (`pgrep -s`), where that works;
  * - every process the owner saw in its tree and recorded with its start
  *   time ("tracked"), which catches one that left the session with `setsid`
  *   or a double fork;
@@ -87,6 +91,12 @@ export function rootReused(rows: readonly ProcRow[], root: number | undefined, r
   return Boolean(r) && r!.start !== rootStart;
 }
 
+/** Processes in the shell's process group (its pid), unless that pid is someone else's now. */
+export function groupOf(rows: readonly ProcRow[], root: number | undefined, rootStart?: string): number[] {
+  if (!root || rootReused(rows, root, rootStart)) return [];
+  return rows.filter((r) => r.pgid === root).map((r) => r.pid);
+}
+
 /** The tracked processes that are still the SAME process: their pid is alive with the start time recorded. */
 export function liveTracked(rows: readonly ProcRow[], tracked: ReadonlyArray<{ pid: number; start: string }>): number[] {
   const byPid = new Map(rows.map((r) => [r.pid, r]));
@@ -117,6 +127,7 @@ export function killPlan(
   const reused = rootReused(rows, opts.root, opts.rootStart);
   const seeds = new Set<number>([
     ...(opts.root && !reused ? [opts.root] : []),
+    ...groupOf(rows, opts.root, opts.rootStart),
     ...(reused ? [] : (opts.sessionMembers ?? [])),
     ...liveTracked(rows, opts.tracked ?? []),
   ]);
@@ -138,7 +149,7 @@ export function killPlan(
  */
 export function escapees(rows: readonly ProcRow[], root: number, sessionMembers: readonly number[]): Array<{ pid: number; start: string }> {
   const plain = descendantsOf(rows, [root]);
-  const all = descendantsOf(rows, [root, ...sessionMembers]);
+  const all = descendantsOf(rows, [root, ...groupOf(rows, root), ...sessionMembers]);
   const byPid = new Map(rows.map((r) => [r.pid, r]));
   const out: Array<{ pid: number; start: string }> = [];
   for (const pid of all) {
@@ -216,7 +227,7 @@ export function attribute(listeners: readonly Listener[], rows: readonly ProcRow
   const owner = new Map<number, number>();
   sessions.forEach((s, i) => {
     const root = s.root && !rootReused(rows, s.root, s.rootStart) ? [s.root] : [];
-    const seeds = [...root, ...liveTracked(rows, s.tracked ?? [])];
+    const seeds = [...root, ...groupOf(rows, s.root, s.rootStart), ...liveTracked(rows, s.tracked ?? [])];
     for (const pid of descendantsOf(rows, seeds)) if (!owner.has(pid)) owner.set(pid, i);
   });
   const out: Attribution = { sessions: sessions.map((s) => ({ sid: s.sid, chat: s.chat, ports: [] })), unattributed: [] };
