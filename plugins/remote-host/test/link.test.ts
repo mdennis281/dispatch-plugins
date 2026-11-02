@@ -1,0 +1,196 @@
+/**
+ * HostLink against a scripted machine: how it finds the machine, what it
+ * installs, and what it reports, through connects, drops and failures.
+ */
+import { afterEach, describe, expect, it } from "vitest";
+import type { TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
+import type { HostConfig } from "../src/hosts.js";
+import { HostLink, describeConnectError, statusFrom } from "../src/link.js";
+import { AGENT, FakeMachine, PROBE, fakeRuntime, type AddressBehaviour } from "./fake-machine.js";
+
+const HOST: HostConfig = {
+  slug: "cvx-mac",
+  label: "CVX Mac",
+  user: "dispatch",
+  addresses: ["cvx-mac.lan", "10.0.10.16"],
+  port: 22,
+  hostKey: "SHA256:vH2I6HOzQ1J5PJs3HVEiIEM6IMfqsUr64kEVGUbAvrc",
+  hostKeyType: "ssh-ed25519",
+  keyFingerprint: "SHA256:rv7Q7s4pS26oiq0AK+3b++kytycm2xzKpoQJ9q+RxH8",
+  allowFrom: ["10.0.4.1"],
+  pairedAt: "2026-11-01T00:00:00.000Z",
+};
+
+const links: HostLink[] = [];
+afterEach(() => {
+  for (const l of links.splice(0)) l.dispose();
+});
+
+function link(machine: FakeMachine, opts: { key?: string | undefined; kv?: Map<string, unknown>; runtime?: ReturnType<typeof fakeRuntime> } = {}) {
+  const statuses: TerminalBackendStatusInput[] = [];
+  const kvMap = opts.kv ?? new Map<string, unknown>();
+  const runtime = opts.runtime ?? fakeRuntime();
+  const l = new HostLink(HOST, {
+    instanceId: "11111111-2222-3333-4444-555555555555",
+    privateKey: async () => ("key" in opts ? opts.key : "PRIVATE"),
+    agent: AGENT,
+    runtime,
+    setStatus: (s) => statuses.push(s),
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    kv: {
+      get: async <T>(k: string) => kvMap.get(k) as T | undefined,
+      set: async (k: string, v: unknown) => void kvMap.set(k, v),
+      delete: async (k: string) => void kvMap.delete(k),
+      list: async () => [...kvMap.keys()],
+    },
+    connect: machine.connect,
+    timing: { tickMs: 10, helloEveryMs: 40, probeEveryMs: 60_000, backoffMs: [20] },
+  });
+  links.push(l);
+  return { l, statuses, kv: kvMap, runtime };
+}
+
+const until = async (cond: () => boolean, ms = 3_000) => {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error("timed out waiting");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+};
+
+const machine = (a: Record<string, AddressBehaviour>) => new FakeMachine(a);
+
+describe("finding the machine", () => {
+  it("skips an address that answers with another host key, and never trusts it", async () => {
+    const m = machine({ "cvx-mac.lan": "wrong-key", "10.0.10.16": "ok" });
+    const { l, statuses } = link(m);
+    l.start();
+    const linked = await l.ready();
+    expect(linked.address).toBe("10.0.10.16");
+    // Every attempt pinned the key AND the key type.
+    for (const t of m.targets) {
+      expect(t.algorithms?.serverHostKey).toEqual(["ssh-ed25519"]);
+      expect(t.hostVerifier).toBeTypeOf("function");
+      expect(t.password).toBeUndefined();
+    }
+    expect(statuses[0]).toEqual({ state: "degraded", detail: "connecting" });
+    expect(statuses.at(-1)?.state).toBe("online");
+  });
+
+  it("tries the address that worked last time first", async () => {
+    const m = machine({ "cvx-mac.lan": "timeout", "10.0.10.16": "ok" });
+    const kv = new Map<string, unknown>([["host:cvx-mac", { lastAddress: "10.0.10.16" }]]);
+    const { l } = link(m, { kv });
+    l.start();
+    await l.ready();
+    expect(m.targets.map((t) => t.host)).toEqual(["10.0.10.16"]);
+  });
+
+  it("is offline with each address's reason when none answers, and tries again after a backoff", async () => {
+    const m = machine({ "cvx-mac.lan": "refused", "10.0.10.16": "timeout" });
+    const { l, statuses } = link(m);
+    l.start();
+    await expect(l.ready()).rejects.toThrow(/cvx-mac.lan: connection refused.*10\.0\.10\.16: no answer/);
+    await until(() => statuses.some((s) => s.state === "offline"));
+    const tries = m.targets.length;
+    await until(() => m.targets.length > tries);
+    m.addresses["10.0.10.16"] = "ok";
+    await until(() => statuses.at(-1)?.state === "online");
+  });
+
+  it("says the key was refused rather than that the machine is down", async () => {
+    expect(describeConnectError(new Error("All configured authentication methods failed"))).toMatch(/key was refused/);
+    const m = machine({ "cvx-mac.lan": "bad-key", "10.0.10.16": "bad-key" });
+    const { l } = link(m);
+    await expect(l.ready()).rejects.toThrow(/key was refused/);
+  });
+
+  it("is offline, and says to pair again, without its key", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l } = link(m, { key: undefined });
+    await expect(l.ready()).rejects.toThrow(/REMOTE_HOST_KEY_CVX_MAC secret is missing/);
+    expect(m.targets).toEqual([]);
+  });
+});
+
+describe("installing", () => {
+  it("sends the pinned runtime and the agent when they are missing, over stdin, and verifies the agent runs", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    m.node = undefined;
+    m.agent = undefined;
+    const { l, runtime } = link(m);
+    await l.ready();
+    expect(runtime.calls).toBe(1);
+    expect(m.stdin.map((s) => s.data)).toEqual([runtime.bytes, AGENT.source]);
+    expect(m.commands.some((c) => /dispatch-host.mjs' '?version'?$/.test(c))).toBe(true);
+  });
+
+  it("sends nothing when the right versions are there", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l, runtime } = link(m);
+    await l.ready();
+    expect(runtime.calls).toBe(0);
+    expect(m.stdin).toEqual([]);
+  });
+
+  it("never downgrades a newer runtime someone else installed", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    m.node = "v25.1.0";
+    const { l, runtime } = link(m);
+    await l.ready();
+    expect(runtime.calls).toBe(0);
+  });
+
+  it("sweeps this instance's orphans, says hello, and probes on every connect", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l } = link(m);
+    await l.ready();
+    const agentCmds = m.commands.filter((c) => c.includes("dispatch-host.mjs'")).map((c) => c.split("dispatch-host.mjs' ")[1]);
+    expect(agentCmds).toEqual([
+      "'sweep' '--instance' '11111111-2222-3333-4444-555555555555'",
+      "'hello' '--instance' '11111111-2222-3333-4444-555555555555'",
+      "'probe'",
+    ]);
+    expect(l.probe?.os.version).toBe("13.5");
+  });
+});
+
+describe("staying up", () => {
+  it("goes offline when the connection drops, and comes back by itself", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l, statuses } = link(m);
+    l.start();
+    await l.ready();
+    m.open()[0]!.close();
+    expect(statuses.at(-1)).toMatchObject({ state: "offline", detail: "connection lost; reconnecting" });
+    await until(() => statuses.at(-1)?.state === "online");
+    expect(m.open()).toHaveLength(1);
+  });
+
+  it("drops a link whose hello goes unanswered", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l, statuses } = link(m);
+    l.start();
+    await l.ready();
+    m.helloFails = true;
+    await until(() => statuses.some((s) => s.state === "offline" && /no answer/.test(s.detail ?? "")));
+  });
+
+  it("reconnects when how to reach the machine changes, not when its label does", async () => {
+    const m = machine({ "10.0.10.16": "ok", "cvx-mac.local": "ok" });
+    const { l } = link(m);
+    await l.ready();
+    l.update({ ...HOST, label: "Garage Mac" }, false);
+    expect(m.open()).toHaveLength(1);
+    l.update({ ...HOST, addresses: ["cvx-mac.local"] }, true);
+    await until(() => l.address === "cvx-mac.local");
+  });
+});
+
+describe("statusFrom", () => {
+  it("is online when nothing is wrong, degraded with the reason otherwise", () => {
+    expect(statusFrom(PROBE, 5)).toEqual({ state: "online", lastSeenAt: 5 });
+    expect(statusFrom({ ...PROBE, freeDiskBytes: 2 * 1024 ** 3 }, 5)).toEqual({ state: "degraded", detail: "low disk: 2.0 GB free", lastSeenAt: 5 });
+    expect(statusFrom({ ...PROBE, tools: { ...PROBE.tools, git: null } }, 5).detail).toBe("git not found");
+  });
+});
