@@ -130,7 +130,7 @@ describe.skipIf(!posix)("install scripts (POSIX)", () => {
     const work = tmp();
     const root = join(work, ".dispatch-host");
     mkdirSync(join(root, "install.lock"), { recursive: true });
-    const old = new Date(Date.now() - 30 * 60_000);
+    const old = new Date(Date.now() - 45 * 60_000);
     utimesSync(join(root, "install.lock"), old, old);
     const { tar, t } = fakeNodeTarball(work, "24.22.2", 0);
     const r = runScript(installRuntimeScript(root, t), tar);

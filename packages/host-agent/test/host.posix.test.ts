@@ -6,7 +6,7 @@
  * them: `eval '<cmd>\n' </dev/null`, then the sentinel probe.
  */
 import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import { F, FrameDecoder, decodeJson, decodeOutput, encodeFrame, type ErrorMsg, 
 const DIST = fileURLToPath(new URL("../dist/dispatch-host.mjs", import.meta.url));
 const posix = process.platform !== "win32";
 const hasLsof = posix && spawnSync("sh", ["-c", "command -v lsof"]).status === 0;
+const hasSetsid = posix && spawnSync("sh", ["-c", "command -v setsid"]).status === 0;
 const run = posix && existsSync(DIST);
 const INSTANCE = "inst-test";
 
@@ -29,7 +30,8 @@ let seq = 0;
 
 beforeAll(() => {
   if (!run) return;
-  work = mkdtempSync(join(tmpdir(), "dh-it-"));
+  // Real path: macOS tmpdir is under /var, a symlink to /private/var, and bash reports the real one.
+  work = realpathSync(mkdtempSync(join(tmpdir(), "dh-it-")));
   root = join(work, "r");
   cwd = join(work, "proj");
   execFileSync("mkdir", ["-p", join(cwd, "sub")]);
@@ -251,6 +253,38 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     expect(await b.exited).toBe(0);
     expect(b.text()).toContain("before-exit");
     expect(b.of<ExitMsg>(F.exit)[0]).toMatchObject({ code: 3, reason: "exited" });
+  });
+
+  it.skipIf(!hasSetsid)("reports an exit promptly even when an escaped process holds the shell's output open", async () => {
+    const r = new Relay(sid());
+    await r.ready();
+    // Like `ssh -f`: a new session at once, still holding the shell's stdout.
+    await r.run("setsid sleep 31.7 &");
+    r.send(F.stdin, Buffer.from("exit 4\n"));
+    const exit = await r.waitFor(() => r.of<ExitMsg>(F.exit)[0], 5_000);
+    expect(exit).toMatchObject({ code: 4, reason: "exited" });
+    spawnSync("pkill", ["-f", "sleep 31.7"]);
+  });
+
+  it("starts ONE owner when two relays race to open the same new session", async () => {
+    const id = sid();
+    const a = new Relay(id);
+    const b = new Relay(id);
+    const [ra, rb] = await Promise.all([a.ready(), b.ready()]);
+    expect(ra.pid).toBe(rb.pid);
+    const rec = JSON.parse(readFileSync(sessionPaths(root, INSTANCE, id).record, "utf8")) as { ownerPid: number; state: string };
+    expect(rec.state).toBe("running");
+    expect(alive(rec.ownerPid)).toBe(true);
+    // The later attach replaced the earlier one. End the session from outside.
+    expect(cli("kill", "--sid", id)).toEqual({ killed: [id] });
+    await Promise.all([a.exited, b.exited]);
+  });
+
+  it("refuses an --env it can't use before starting anything", async () => {
+    const env = Buffer.from(JSON.stringify({ "A-B": "x" })).toString("base64");
+    const r = new Relay(sid(), ["--env", env]);
+    expect(await r.exited).toBe(1);
+    expect(r.of<ErrorMsg>(F.error)[0]).toMatchObject({ code: "bad-args" });
   });
 
   it("answers a resume of a session it never had with `gone`, instead of a fresh shell", async () => {

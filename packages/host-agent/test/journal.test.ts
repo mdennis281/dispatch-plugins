@@ -52,6 +52,32 @@ describe("StreamLog", () => {
     b.close();
   });
 
+  it("steps over a hole a failed write left, and keeps counting offsets through it", () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "out.0.log"), "abcd");
+    writeFileSync(join(dir, "out.10.log"), "klm");
+    const log = StreamLog.open(dir, "out");
+    expect(log.offset).toBe(13);
+    expect([...log.read(0)].map((p) => [p.offset, p.data.toString()])).toEqual([
+      [0, "abcd"],
+      [10, "klm"],
+    ]);
+    expect([...log.read(6)].map((p) => p.offset)).toEqual([10]);
+    log.close();
+  });
+
+  it("never throws on a write that fails: the offset moves on and the next append starts a segment", () => {
+    const dir = tmp();
+    const log = StreamLog.open(join(dir, "missing", "deeper"), "out");
+    const errors: unknown[] = [];
+    // A file where the journal directory should be: every write fails.
+    writeFileSync(join(dir, "missing"), "not a dir");
+    expect(log.append(Buffer.from("lost"), (e) => errors.push(e))).toBe(0);
+    expect(log.offset).toBe(4);
+    expect(errors).toHaveLength(1);
+    log.close();
+  });
+
   it("reads in bounded pieces", () => {
     const log = StreamLog.open(tmp(), "out");
     log.append(Buffer.alloc(10, 0x41));

@@ -24,7 +24,7 @@
 import { rmSync } from "node:fs";
 import { socketPath } from "./layout.js";
 import { killTree, type KillIo } from "./procs.js";
-import { lastContact, listRecords, writeRecord } from "./records.js";
+import { lastContact, listRecords, ownerLive, writeRecord } from "./records.js";
 import type { SessionRecord } from "./layout.js";
 import { join } from "node:path";
 
@@ -70,14 +70,13 @@ export async function sweepInstance(o: SweepOptions): Promise<SweepResult> {
       }
       continue;
     }
-    const owner = rows.find((r) => r.pid === rec.ownerPid);
-    const ownerLive = Boolean(owner) && (!rec.ownerStart || owner!.start === rec.ownerStart);
-    if (!ownerLive) {
-      await killTree(o.io, { root: rec.shellPid, tracked: rec.tracked, self: o.self });
+    const target = { root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: o.self };
+    if (!ownerLive(rows, rec)) {
+      await killTree(o.io, target);
       finish(dir, rec, o, "killed", "its owner process was gone");
       result.reaped.push(rec.sid);
     } else if (silentFor > o.deadManMs) {
-      await killTree(o.io, { root: rec.shellPid, tracked: rec.tracked, self: o.self });
+      await killTree(o.io, target);
       if (rec.ownerPid !== o.self) o.io.kill(rec.ownerPid, "SIGKILL");
       finish(dir, rec, o, "dead-man", `no Dispatch contact for ${Math.round(silentFor / 3_600_000)}h`);
       result.deadMan.push(rec.sid);

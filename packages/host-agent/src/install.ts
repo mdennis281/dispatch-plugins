@@ -5,7 +5,7 @@
  * `tar`, and `shasum` (macOS) or `sha256sum` (Linux).
  *
  * Every install holds `~/.dispatch-host/install.lock`, an atomic `mkdir`.
- * Stable and dev may install at the same moment. A lock older than ten
+ * Stable and dev may install at the same moment. A lock older than thirty
  * minutes was left by a dead installer and is broken.
  *
  * Every payload's SHA-256 is checked on the host as well as before sending.
@@ -41,8 +41,9 @@ function lock(root: string): string {
     `L=${sq(l)}`,
     "i=0",
     'while ! mkdir "$L" 2>/dev/null; do',
-    // Older than 10 minutes: its installer died holding it.
-    '  if [ -n "$(find "$L" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then rm -rf "$L"; continue; fi',
+    // Older than 30 minutes: its installer died holding it. (The runtime upload
+    // happens under the lock; 50 MB takes seconds on a LAN, not half an hour.)
+    '  if [ -n "$(find "$L" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then rm -rf "$L"; continue; fi',
     "  i=$((i+1))",
     `  if [ "$i" -gt 120 ]; then echo "another install holds $L" >&2; exit ${INSTALL_EXIT.locked}; fi`,
     "  sleep 1",
@@ -83,7 +84,10 @@ export function installRuntimeScript(root: string, t: NodeTarball): string {
     `if [ "$(sha "$T/node.tar.gz")" != ${sq(t.sha256)} ]; then rm -rf "$T"; echo "node tarball checksum mismatch" >&2; exit ${INSTALL_EXIT.checksum}; fi`,
     'tar -xzf "$T/node.tar.gz" -C "$T"',
     `if [ "$("$T"/${sq(t.dir)}/bin/node --version)" != ${sq(`v${t.version}`)} ]; then rm -rf "$T"; echo "unpacked node is not v${t.version}" >&2; exit ${INSTALL_EXIT.checksum}; fi`,
-    'if [ -e "$RT/node" ]; then mv "$RT/node" "$RT/.old.$$"; fi',
+    // Two renames: a directory can't be renamed over a non-empty one. For the
+    // instant between them the path is missing, and a session started in that
+    // instant fails to start and is retried by the plugin.
+    'if [ -e "$RT/node" ]; then mv "$RT/node" "$RT/.old.$"; fi',
     `mv "$T"/${sq(t.dir)} "$RT/node"`,
     'rm -rf "$T" "$RT/.old.$$"',
     `echo ${sq(`installed v${t.version}`)}`,

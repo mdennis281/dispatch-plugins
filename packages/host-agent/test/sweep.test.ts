@@ -83,6 +83,17 @@ describe("sweepInstance", () => {
     expect(f.alive()).toEqual([100]);
   });
 
+  it("doesn't touch a shell pid that now belongs to someone else", async () => {
+    const root = setup();
+    record(root, "s1", { ownerPid: 100, shellPid: 200, shellStart: "Sat Oct 31 08:00:00 2026" });
+    // 200 is alive, but started later: a reused pid, the leader of someone's own session.
+    const f = fakeIo([row(200, 1, 200), row(201, 200, 200)]);
+    const r = await sweepInstance({ root, instance: "inst", now: NOW, deadManMs: 12 * HOUR, self: 999, io: f.io });
+    expect(r.reaped).toEqual(["s1"]);
+    expect(f.killed).toEqual([]);
+    expect(f.alive()).toEqual([200, 201]);
+  });
+
   it("dead-man switch: no contact for too long kills every live session, owner and all, but never the caller", async () => {
     const root = setup();
     contactAt(root, NOW - 13 * HOUR);

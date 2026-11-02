@@ -108,3 +108,51 @@ jobs:
       - name: Test
         working-directory: dispatch-plugins
         run: pnpm test
+
+  # dispatch-host runs on the user's Macs, so its process handling (BSD ps,
+  # pgrep -s, lsof, /bin/bash 3.2, shasum) is tested on macOS too, not only
+  # on Linux. Only that package: the plugins' bundles are checked above.
+  host-agent-macos:
+    name: host-agent on macOS
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out dispatch-plugins
+        uses: actions/checkout@v4
+        with:
+          path: dispatch-plugins
+
+      - name: Check out Dispatch (for the plugin SDK)
+        uses: actions/checkout@v4
+        with:
+          repository: mdennis281/dispatch
+          ref: ${{ env.DISPATCH_REF }}
+          path: dispatch
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build @dispatch/shared and @dispatch/plugin-sdk
+        working-directory: dispatch
+        run: |
+          pnpm install --frozen-lockfile --filter "@dispatch/plugin-sdk..."
+          pnpm --filter @dispatch/shared --filter @dispatch/plugin-sdk build
+
+      - name: Install
+        working-directory: dispatch-plugins
+        env:
+          DISPATCH_REPO: ${{ github.workspace }}/dispatch
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck, build and test host-agent
+        working-directory: dispatch-plugins
+        run: |
+          pnpm --filter @dispatch-plugins/host-agent typecheck
+          pnpm --filter @dispatch-plugins/host-agent build
+          pnpm --filter @dispatch-plugins/host-agent test

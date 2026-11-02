@@ -26,6 +26,9 @@ describe("main", () => {
     await expect(main(["frobnicate"])).rejects.toThrow(UsageError);
     await expect(main(["list"])).rejects.toThrow(/--instance is required/);
     await expect(main(["list", "--instance", "../stable"])).rejects.toThrow(/must match/);
+    await expect(
+      main(["session", "--instance", "i", "--chat", "c", "--sid", "s", "--cwd", "/", "--resume-out", "1.5", "--resume-err", "0"]),
+    ).rejects.toThrow(/whole number/);
   });
 
   it("lists nothing for a fresh instance and notes the contact", async () => {

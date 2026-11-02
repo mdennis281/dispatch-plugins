@@ -64,6 +64,29 @@ export function descendantsOf(rows: readonly ProcRow[], roots: Iterable<number>)
   return out;
 }
 
+/**
+ * Whether `pid` is still the process that was recorded with start time
+ * `start`. With no recorded start (an older record), a live pid is taken on
+ * trust.
+ */
+export function sameProcess(rows: readonly ProcRow[], pid: number | undefined, start: string | undefined): boolean {
+  if (!pid) return false;
+  const r = rows.find((x) => x.pid === pid);
+  return Boolean(r) && (!start || r!.start === start);
+}
+
+/**
+ * Whether the pid recorded as a session's shell now belongs to some OTHER
+ * process. Then neither it nor its session id (`pgrep -s`) is ours: a kernel
+ * doesn't hand out a pid while a session or group still carries it, so the
+ * shell's old session must be empty.
+ */
+export function rootReused(rows: readonly ProcRow[], root: number | undefined, rootStart: string | undefined): boolean {
+  if (!root || !rootStart) return false;
+  const r = rows.find((x) => x.pid === root);
+  return Boolean(r) && r!.start !== rootStart;
+}
+
 /** The tracked processes that are still the SAME process: their pid is alive with the start time recorded. */
 export function liveTracked(rows: readonly ProcRow[], tracked: ReadonlyArray<{ pid: number; start: string }>): number[] {
   const byPid = new Map(rows.map((r) => [r.pid, r]));
@@ -81,12 +104,20 @@ export interface KillPlan {
  */
 export function killPlan(
   rows: readonly ProcRow[],
-  opts: { root?: number; sessionMembers?: readonly number[]; tracked?: ReadonlyArray<{ pid: number; start: string }>; self: number },
+  opts: {
+    root?: number;
+    /** The shell's start time. A root alive with a different one is someone else's process, and is left alone. */
+    rootStart?: string;
+    sessionMembers?: readonly number[];
+    tracked?: ReadonlyArray<{ pid: number; start: string }>;
+    self: number;
+  },
 ): KillPlan {
   const selfPgid = rows.find((r) => r.pid === opts.self)?.pgid;
+  const reused = rootReused(rows, opts.root, opts.rootStart);
   const seeds = new Set<number>([
-    ...(opts.root ? [opts.root] : []),
-    ...(opts.sessionMembers ?? []),
+    ...(opts.root && !reused ? [opts.root] : []),
+    ...(reused ? [] : (opts.sessionMembers ?? [])),
     ...liveTracked(rows, opts.tracked ?? []),
   ]);
   const pids = descendantsOf(rows, seeds);
@@ -170,6 +201,7 @@ export interface SessionTree {
   sid: string;
   chat: string;
   root?: number;
+  rootStart?: string;
   tracked?: ReadonlyArray<{ pid: number; start: string }>;
 }
 
@@ -183,7 +215,8 @@ export interface Attribution {
 export function attribute(listeners: readonly Listener[], rows: readonly ProcRow[], sessions: readonly SessionTree[]): Attribution {
   const owner = new Map<number, number>();
   sessions.forEach((s, i) => {
-    const seeds = [...(s.root ? [s.root] : []), ...liveTracked(rows, s.tracked ?? [])];
+    const root = s.root && !rootReused(rows, s.root, s.rootStart) ? [s.root] : [];
+    const seeds = [...root, ...liveTracked(rows, s.tracked ?? [])];
     for (const pid of descendantsOf(rows, seeds)) if (!owner.has(pid)) owner.set(pid, i);
   });
   const out: Attribution = { sessions: sessions.map((s) => ({ sid: s.sid, chat: s.chat, ports: [] })), unattributed: [] };
@@ -261,14 +294,18 @@ export const hostKillIo: KillIo = {
  * times, for anything forked in between. Resolves with how many processes it
  * signalled.
  */
-export async function killTree(
-  io: KillIo,
-  target: { root?: number; tracked?: ReadonlyArray<{ pid: number; start: string }>; self: number },
-): Promise<number> {
+export interface KillTarget {
+  root?: number;
+  rootStart?: string;
+  tracked?: ReadonlyArray<{ pid: number; start: string }>;
+  self: number;
+}
+
+export async function killTree(io: KillIo, target: KillTarget): Promise<number> {
   let signalled = 0;
   for (let pass = 0; pass < 3; pass++) {
     const rows = await io.listProcs();
-    const members = target.root ? await io.sessionMembers(target.root) : [];
+    const members = target.root && !rootReused(rows, target.root, target.rootStart) ? await io.sessionMembers(target.root) : [];
     const plan = killPlan(rows, { ...target, sessionMembers: members });
     if (!plan.pids.length) break;
     for (const g of plan.pgids) io.kill(-g, "SIGKILL");
@@ -280,12 +317,8 @@ export async function killTree(
 }
 
 /** Deliver `signal` to every process of the session, as `pkill -<SIG> -s` would, plus tracked escapees. */
-export async function signalTree(
-  io: KillIo,
-  target: { root?: number; tracked?: ReadonlyArray<{ pid: number; start: string }>; self: number },
-  signal: NodeJS.Signals,
-): Promise<void> {
+export async function signalTree(io: KillIo, target: KillTarget, signal: NodeJS.Signals): Promise<void> {
   const rows = await io.listProcs();
-  const members = target.root ? await io.sessionMembers(target.root) : [];
+  const members = target.root && !rootReused(rows, target.root, target.rootStart) ? await io.sessionMembers(target.root) : [];
   for (const p of killPlan(rows, { ...target, sessionMembers: members }).pids) io.kill(p, signal);
 }

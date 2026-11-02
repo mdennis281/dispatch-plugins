@@ -18,16 +18,34 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+class FakeStream extends EventEmitter {
+  destroyed = false;
+  destroy() {
+    this.destroyed = true;
+  }
+}
+
 class FakeShell extends EventEmitter {
   pid = 4242;
   written: string[] = [];
   ended = false;
-  stdin = { write: (b: Buffer) => void this.written.push(b.toString()), end: () => void (this.ended = true) };
-  stdout = new EventEmitter();
-  stderr = new EventEmitter();
+  stdin = {
+    write: (b: Buffer) => void this.written.push(b.toString()),
+    end: () => void (this.ended = true),
+    get writableEnded() {
+      return shellEnded(this);
+    },
+  };
+  stdout = new FakeStream();
+  stderr = new FakeStream();
   say(text: string, stream: "stdout" | "stderr" = "stdout") {
     this[stream].emit("data", Buffer.from(text));
   }
+}
+
+const ends = new WeakMap<object, FakeShell>();
+function shellEnded(stdin: object): boolean {
+  return ends.get(stdin)?.ended ?? false;
 }
 
 class FakeClient implements Client {
@@ -59,10 +77,11 @@ class FakeClient implements Client {
   }
 }
 
-function setup(opts: { heartbeatMs?: number; segmentBytes?: number; keep?: number; maxBacklog?: number } = {}) {
+function setup(opts: { heartbeatMs?: number; segmentBytes?: number; keep?: number; maxBacklog?: number; closeGraceMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dh-session-"));
   dirs.push(dir);
   const shell = new FakeShell();
+  ends.set(shell.stdin, shell);
   const clock = { t: 1_000 };
   const runs: RunEntry[] = [];
   const exits: ExitMsg[] = [];
@@ -80,6 +99,7 @@ function setup(opts: { heartbeatMs?: number; segmentBytes?: number; keep?: numbe
     now: () => clock.t,
     heartbeatMs: opts.heartbeatMs ?? 60_000,
     maxBacklog: opts.maxBacklog,
+    closeGraceMs: opts.closeGraceMs ?? 20,
     killTree: async () => {
       kills++;
     },
@@ -257,5 +277,58 @@ describe("Session", () => {
     session.attach(d, { v: 1, resume: { out: 0, err: 0 } });
     session.handle(d, frame(F.stdinEnd));
     expect(shell.ended).toBe(true);
+  });
+
+  it("finishes on the shell's exit even when an escaped process holds its output pipes open", async () => {
+    const { session, shell, exits } = setup({ closeGraceMs: 20 });
+    const c = new FakeClient();
+    session.attach(c, { v: 1 });
+    shell.say("last words\n");
+    shell.emit("exit", 0, null); // no "close": `ssh -f` still holds stdout
+    await new Promise((r) => setTimeout(r, 60));
+    expect(exits).toEqual([{ code: 0, signal: null, reason: "exited" }]);
+    expect(shell.stdout.destroyed).toBe(true);
+    expect(c.text()).toBe("last words\n");
+    expect(decodeJson<ExitMsg>(c.of(F.exit)[0]!.payload).code).toBe(0);
+  });
+
+  it("keeps killing a shell it is ending that hasn't gone", async () => {
+    const { session, clock, kills } = setup();
+    await session.terminate("killed");
+    expect(kills()).toBe(1);
+    clock.t += 1_000;
+    session.tick();
+    expect(kills()).toBe(1);
+    clock.t += 5_000;
+    session.tick();
+    await tick();
+    expect(kills()).toBe(2);
+    await session.terminate("heartbeat"); // asking again kills again; the first reason sticks
+    expect(kills()).toBe(3);
+  });
+
+  it("refuses a frame it can't read without throwing, so the owner drops just that client", () => {
+    const { session, shell } = setup();
+    const c = new FakeClient();
+    session.attach(c, { v: 1 });
+    expect(session.handle(c, frame(F.signal, "INT"))).toBe(false);
+    expect(session.handle(c, frame(F.runBegin, { background: true }))).toBe(false);
+    expect(session.handle(c, frame(F.signal, "null"))).toBe(true);
+    session.handle(c, frame(F.stdinEnd));
+    session.handle(c, frame(F.stdin, Buffer.from("too late\n")));
+    expect(shell.written).toEqual([]);
+  });
+
+  it("doesn't count a big replay against the backlog limit", () => {
+    const { session, shell } = setup({ maxBacklog: 100 });
+    shell.say("x".repeat(1_000));
+    const c = new FakeClient();
+    // Nothing drains: the whole replay is still queued.
+    Object.defineProperty(c, "writableLength", { get: () => c.frames.reduce((n, f) => n + f.payload.length + 5, 0) });
+    session.attach(c, { v: 1, resume: { out: 0, err: 0 } });
+    shell.say("y");
+    expect(c.destroyed).toBe(false);
+    shell.say("z".repeat(200));
+    expect(c.destroyed).toBe(true);
   });
 });

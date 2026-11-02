@@ -17,11 +17,16 @@ import { mkdirSync, openSync, statSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { StreamLog, readRuns } from "./journal.js";
 import { sessionPaths, type SessionRecord } from "./layout.js";
+import { decodeEnvArg } from "./env.js";
 import { NO_CWD_EXIT } from "./owner.js";
 import { F, PROTOCOL_VERSION, encodeFrame, type ErrorCode, type ExitMsg, type ReadyMsg } from "./protocol.js";
-import { pidAlive } from "./procs.js";
-import { readRecord, touchContact } from "./records.js";
+import { listProcs } from "./procs.js";
+import { claimRecord, ownerLive, readRecord, touchContact } from "./records.js";
 import { replay } from "./session.js";
+import { AGENT_VERSION } from "./version.js";
+
+/** A claimed record whose owner never wrote back within this long was a start that died. */
+const STARTING_STALE_MS = 30_000;
 
 export interface RelayArgs {
   root: string;
@@ -57,18 +62,41 @@ export async function runRelay(a: RelayArgs): Promise<number> {
 
   let sock = await tryConnect(paths.socket);
   if (!sock) {
-    if (rec && pidAlive(rec.ownerPid)) {
-      // Starting, or a socket that blinked: give it a moment.
-      sock = await waitForSocket(paths.socket, paths.record, 10_000);
-    } else if (a.resume || rec) {
-      return error("gone", `session ${a.sid} is no longer on this host (its owner has exited)`);
+    const rows = await listProcs().catch(() => []);
+    if (rec) {
+      const starting = rec.state === "starting" && Date.now() - Date.parse(rec.startedAt) < STARTING_STALE_MS;
+      if (starting || ownerLive(rows, rec)) {
+        // Starting, or a socket that blinked: give it a moment.
+        sock = await waitForSocket(paths.socket, paths.record, 20_000);
+      } else {
+        return error("gone", `session ${a.sid} is no longer on this host (its owner has exited)`);
+      }
+    } else if (a.resume) {
+      return error("gone", `session ${a.sid} is not on this host`);
     } else {
       try {
         if (!statSync(a.cwd).isDirectory()) return error("no-cwd", `${a.cwd} is not a directory on this host`);
       } catch {
         return error("no-cwd", `${a.cwd} does not exist on this host`);
       }
-      startOwner(a, paths.ownerLog, paths.dir);
+      try {
+        decodeEnvArg(a.envB64);
+      } catch (e) {
+        return error("bad-args", e instanceof Error ? e.message : String(e));
+      }
+      // Whoever creates the record starts the owner; a racing relay waits for it.
+      const won = claimRecord(paths.record, {
+        v: 1,
+        instance: a.instance,
+        chat: a.chat,
+        sid: a.sid,
+        agentVersion: AGENT_VERSION,
+        cwd: a.cwd,
+        ownerPid: 0,
+        state: "starting",
+        startedAt: new Date().toISOString(),
+      });
+      if (won) startOwner(a, paths.ownerLog, paths.dir);
       sock = await waitForSocket(paths.socket, paths.record, 20_000);
     }
   }
@@ -137,6 +165,13 @@ function pipe(a: RelayArgs, sock: Socket): Promise<number> {
       sock.destroy();
       resolve(0);
     };
+    // The channel closed (Dispatch is gone, or detached). Half-close, so
+    // frames it sent last (a KILL, say) still reach the owner, then finish
+    // when the owner closes its side. The owner keeps the shell.
+    const hangUp = () => {
+      sock.end();
+      setTimeout(finish, 2_000).unref();
+    };
     sock.write(encodeFrame(F.attach, { v: PROTOCOL_VERSION, ...(a.resume ? { resume: a.resume } : {}) }));
     a.input.on("data", (c: Buffer) => {
       if (!sock.write(c)) {
@@ -144,9 +179,8 @@ function pipe(a: RelayArgs, sock: Socket): Promise<number> {
         sock.once("drain", () => a.input.resume());
       }
     });
-    // The channel closed: Dispatch is gone (or detached). The owner keeps the shell.
-    a.input.on("end", finish);
-    a.input.on("error", finish);
+    a.input.on("end", hangUp);
+    a.input.on("error", hangUp);
     sock.on("data", (c: Buffer) => {
       if (!a.output.write(c)) {
         sock.pause();

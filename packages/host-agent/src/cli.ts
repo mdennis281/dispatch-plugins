@@ -23,9 +23,11 @@ import { fileURLToPath } from "node:url";
 import { assertId, rootDir } from "./layout.js";
 import { runOwner } from "./owner.js";
 import { probe } from "./probe.js";
-import { attribute, hostKillIo, killTree, listListeners, listProcs, pidAlive } from "./procs.js";
+import { decodeEnvArg } from "./env.js";
+import { attribute, hostKillIo, killTree, listListeners, listProcs, type KillTarget } from "./procs.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
-import { listRecords, readRecord, touchContact, writeRecord } from "./records.js";
+import { listRecords, ownerLive, readRecord, touchContact, writeRecord } from "./records.js";
+import type { SessionRecord } from "./layout.js";
 import { runRelay } from "./relay.js";
 import { sweepInstance } from "./sweep.js";
 import { AGENT_VERSION } from "./version.js";
@@ -74,11 +76,11 @@ function num(opts: Record<string, string>, key: string, dflt: number): number {
   return n;
 }
 
-function decodeEnv(b64: string | undefined): Record<string, string> {
-  if (!b64) return {};
-  const parsed: unknown = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new UsageError("--env must be base64 JSON of an object");
-  return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+/** A byte offset: a whole number. `1.5` would reach a read as a fractional position. */
+function offset(opts: Record<string, string>, key: string): number {
+  const n = num(opts, key, 0);
+  if (!Number.isSafeInteger(n)) throw new UsageError(`--${key} must be a whole number of bytes`);
+  return n;
 }
 
 function print(value: unknown): void {
@@ -106,7 +108,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         cwd: need(opts, "cwd"),
         ...(opts.env ? { envB64: opts.env } : {}),
         ...(resumeOut !== undefined || resumeErr !== undefined
-          ? { resume: { out: num(opts, "resume-out", 0), err: num(opts, "resume-err", 0) } }
+          ? { resume: { out: offset(opts, "resume-out"), err: offset(opts, "resume-err") } }
           : {}),
         heartbeatMs: num(opts, "heartbeat-ms", DEFAULT_HEARTBEAT_MS),
         deadManHours: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS),
@@ -123,7 +125,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         chat: assertId("chat", need(opts, "chat")),
         sid: assertId("sid", need(opts, "sid")),
         cwd: need(opts, "cwd"),
-        extraEnv: decodeEnv(opts.env),
+        extraEnv: decodeEnvArg(opts.env),
         heartbeatMs: num(opts, "heartbeat-ms", DEFAULT_HEARTBEAT_MS),
         deadManMs: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS) * 3_600_000,
       });
@@ -143,12 +145,13 @@ export async function main(argv: readonly string[]): Promise<number> {
     case "list": {
       const id = instance();
       touchContact(root, id);
+      const rows = await listProcs().catch(() => []);
       print(
         listRecords(root, id).map(({ rec }) => ({
           sid: rec.sid,
           chat: rec.chat,
           state: rec.state,
-          ownerAlive: rec.state !== "exited" && pidAlive(rec.ownerPid),
+          ownerAlive: ownerLive(rows, rec),
           shellPid: rec.shellPid ?? null,
           cwd: rec.cwd,
           agentVersion: rec.agentVersion,
@@ -162,12 +165,12 @@ export async function main(argv: readonly string[]): Promise<number> {
     case "ports": {
       const id = instance();
       touchContact(root, id);
-      const live = listRecords(root, id).filter(({ rec }) => rec.state === "running" && pidAlive(rec.ownerPid));
       const [rows, listeners] = await Promise.all([listProcs(), listListeners()]);
+      const live = listRecords(root, id).filter(({ rec }) => rec.state === "running" && ownerLive(rows, rec));
       const att = attribute(
         listeners,
         rows,
-        live.map(({ rec }) => ({ sid: rec.sid, chat: rec.chat, root: rec.shellPid, tracked: rec.tracked })),
+        live.map(({ rec }) => ({ sid: rec.sid, chat: rec.chat, root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked })),
       );
       const chat = opts.chat;
       print({
@@ -188,7 +191,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       for (const { dir, rec } of listRecords(root, id)) {
         if (rec.state === "exited") continue;
         if (!all && rec.sid !== sid && rec.chat !== chat) continue;
-        await killSession(join(dir, "session.json"), rec.ownerPid, rec.shellPid, rec.tracked);
+        await killSession(join(dir, "session.json"), rec);
         killed.push(rec.sid);
       }
       print({ killed });
@@ -221,15 +224,13 @@ export async function main(argv: readonly string[]): Promise<number> {
  * `killed`). An owner that doesn't finish within 5 s, or is already gone, has
  * the tree killed from here and the record closed.
  */
-async function killSession(
-  recordFile: string,
-  ownerPid: number,
-  shellPid: number | undefined,
-  tracked: ReadonlyArray<{ pid: number; start: string }> | undefined,
-): Promise<void> {
-  if (pidAlive(ownerPid)) {
+async function killSession(recordFile: string, rec: SessionRecord): Promise<void> {
+  // Only signal the owner while it is provably still that process: a pid
+  // alone may have been reused by something of the user's.
+  const owner = async () => ownerLive(await listProcs(), rec);
+  if (await owner()) {
     try {
-      process.kill(ownerPid, "SIGTERM");
+      process.kill(rec.ownerPid, "SIGTERM");
     } catch {
       /* gone */
     }
@@ -239,16 +240,19 @@ async function killSession(
       await new Promise((r) => setTimeout(r, 100));
     }
   }
-  await killTree(hostKillIo, { root: shellPid, tracked, self: process.pid });
-  try {
-    process.kill(ownerPid, "SIGKILL");
-  } catch {
-    /* gone */
+  const target: KillTarget = { root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: process.pid };
+  await killTree(hostKillIo, target);
+  if (await owner()) {
+    try {
+      process.kill(rec.ownerPid, "SIGKILL");
+    } catch {
+      /* gone */
+    }
   }
-  const rec = readRecord(recordFile);
-  if (rec && rec.state !== "exited") {
+  const now = readRecord(recordFile);
+  if (now && now.state !== "exited") {
     writeRecord(recordFile, {
-      ...rec,
+      ...now,
       state: "exited",
       exit: { code: null, signal: "SIGKILL", reason: "killed", detail: "dispatch-host kill", at: new Date().toISOString() },
     });

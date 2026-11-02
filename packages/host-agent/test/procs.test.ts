@@ -65,6 +65,15 @@ describe("the session's tree", () => {
     expect(plan.pgids).not.toContain(900);
   });
 
+  it("leaves a shell pid alone, and its session id too, once it belongs to another process", () => {
+    // 800 restarted at a later time: a reboot, or the pid came round again.
+    const reused = rows.map((r) => (r.pid === 800 ? { ...r, start: "Mon Nov  2 08:00:00 2026" } : r));
+    const plan = killPlan(reused, { root: 800, rootStart: start(800), sessionMembers: [800, 810, 820, 840], self: 700 });
+    expect(plan.pids).toEqual([]);
+    const same = killPlan(rows, { root: 800, rootStart: start(800), self: 700 });
+    expect(same.pids).toEqual([800, 810, 815, 820]);
+  });
+
   it("never plans the owner's own process group, even if the tree claims it", () => {
     const twisted: ProcRow[] = [...rows, { pid: 850, ppid: 800, pgid: 700, start: "x", command: "odd" }];
     const plan = killPlan(twisted, { root: 800, self: 700 });

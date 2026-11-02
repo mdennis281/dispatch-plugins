@@ -134,6 +134,8 @@ export interface SessionRecord {
   ownerStart?: string;
   /** The shell; also its session id and process group. */
   shellPid?: number;
+  /** The shell's start time (`ps -o lstart=`). A shell pid alive with another start time was reused: not ours. */
+  shellStart?: string;
   state: "starting" | "running" | "exited";
   startedAt: string;
   exit?: { code: number | null; signal: string | null; reason: string; detail?: string; at: string };

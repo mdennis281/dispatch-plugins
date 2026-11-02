@@ -16,7 +16,7 @@ import { appendRun, StreamLog } from "./journal.js";
 import { sessionPaths, type SessionRecord } from "./layout.js";
 import { captureLoginEnv, loginShell, shellEnv } from "./env.js";
 import { FrameDecoder, F, decodeJson, type AttachMsg, type ExitMsg } from "./protocol.js";
-import { escapees, hostKillIo, killTree, signalTree, sessionMembers, listProcs } from "./procs.js";
+import { escapees, hostKillIo, killTree, listProcs, sameProcess, sessionMembers, signalTree } from "./procs.js";
 import { lastContact, readRecord, touchContact, writeRecord } from "./records.js";
 import { Session, type Client } from "./session.js";
 import { sweepInstance } from "./sweep.js";
@@ -36,7 +36,7 @@ export interface OwnerArgs {
 /** Exit code when the working directory is missing. remote-core's `NO_CWD_EXIT`. */
 export const NO_CWD_EXIT = 97;
 
-/** At most this many escapees are tracked per session. */
+/** At most this many escapees are tracked per session (dead ones are pruned first). */
 const MAX_TRACKED = 256;
 
 /** bash, which core's probe and wrapping are written for: /bin/bash is there on macOS (3.2) and Linux. */
@@ -45,11 +45,32 @@ function bashPath(): string {
   return "bash";
 }
 
+/** A RESUME point is two whole, non-negative byte offsets; anything else is a fresh attach. */
+function attachMsg(payload: Buffer): AttachMsg {
+  const m = decodeJson<AttachMsg>(payload);
+  const r = m?.resume;
+  const ok = (n: unknown) => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+  if (r !== undefined && !(ok(r.out) && ok(r.err))) throw new Error("ATTACH with a malformed resume point");
+  return { v: Number(m?.v) || 0, ...(r ? { resume: { out: r.out, err: r.err } } : {}) };
+}
+
 export async function runOwner(a: OwnerArgs): Promise<void> {
   const paths = sessionPaths(a.root, a.instance, a.sid);
   mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
   mkdirSync(`${a.root}/run`, { recursive: true, mode: 0o700 });
   const log = (line: string) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
+
+  // One owner per session. The relay's exclusive claim on the record should
+  // make a second impossible, but a second must never journal into the same
+  // files or take over the socket.
+  const prev = readRecord(paths.record);
+  if (prev && prev.state === "running" && prev.ownerPid !== process.pid) {
+    const rows = await listProcs().catch(() => []);
+    if (sameProcess(rows, prev.ownerPid, prev.ownerStart)) {
+      log(`session ${a.sid} already has an owner (${prev.ownerPid}); exiting`);
+      process.exit(0);
+    }
+  }
 
   const rec: SessionRecord = {
     v: 1,
@@ -66,20 +87,37 @@ export async function runOwner(a: OwnerArgs): Promise<void> {
   const fail = (code: number, reason: string, detail: string): never => {
     rec.state = "exited";
     rec.exit = { code, signal: null, reason, detail, at: new Date().toISOString() };
-    save();
+    try {
+      save();
+    } catch {
+      /* nothing more to do */
+    }
     log(`not started: ${detail}`);
     process.exit(code);
   };
-  save();
 
-  let isDir = false;
   try {
-    isDir = statSync(a.cwd).isDirectory();
-  } catch {
-    /* missing */
+    save();
+    let isDir = false;
+    try {
+      isDir = statSync(a.cwd).isDirectory();
+    } catch {
+      /* missing */
+    }
+    if (!isDir) fail(NO_CWD_EXIT, "start-failed", "no-cwd");
+    await serve(a, paths, rec, save, log);
+  } catch (e) {
+    fail(1, "start-failed", e instanceof Error ? e.message : String(e));
   }
-  if (!isDir) fail(NO_CWD_EXIT, "start-failed", "no-cwd");
+}
 
+async function serve(
+  a: OwnerArgs,
+  paths: ReturnType<typeof sessionPaths>,
+  rec: SessionRecord,
+  save: () => void,
+  log: (line: string) => void,
+): Promise<void> {
   const login = await captureLoginEnv({ shell: loginShell(process.env, process.platform), node: process.execPath }).catch(
     (err: unknown) => {
       log(`login environment not read (${String(err)}); using the fallback PATH`);
@@ -90,18 +128,22 @@ export async function runOwner(a: OwnerArgs): Promise<void> {
 
   const shell = spawn(bashPath(), ["--noprofile", "--norc"], { cwd: a.cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
   if (!shell.pid) {
-    await new Promise<void>((r) => shell.once("error", () => r()));
-    fail(1, "start-failed", "bash did not start");
+    const err = await new Promise<Error>((r) => shell.once("error", r));
+    throw new Error(`bash did not start: ${err.message}`);
   }
+  // A write racing the shell's exit must not crash the owner.
+  shell.stdin.on("error", () => {});
   rec.shellPid = shell.pid;
   rec.state = "running";
-  rec.ownerStart = (await listProcs().catch(() => [])).find((r) => r.pid === process.pid)?.start;
+  const rows = await listProcs().catch(() => []);
+  rec.ownerStart = rows.find((r) => r.pid === process.pid)?.start;
+  rec.shellStart = rows.find((r) => r.pid === shell.pid)?.start;
   save();
   log(`session ${a.sid} for chat ${a.chat}: bash ${shell.pid} in ${a.cwd}`);
 
   const out = StreamLog.open(paths.dir, "out");
   const err = StreamLog.open(paths.dir, "err");
-  const target = () => ({ root: rec.shellPid, tracked: rec.tracked, self: process.pid });
+  const target = () => ({ root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: process.pid });
 
   let lastTouch = 0;
   const contact = () => {
@@ -125,7 +167,13 @@ export async function runOwner(a: OwnerArgs): Promise<void> {
     shell,
     out,
     err,
-    journalRun: (e) => appendRun(paths.runs, e),
+    journalRun: (e) => {
+      try {
+        appendRun(paths.runs, e);
+      } catch (x) {
+        log(`runs journal: ${String(x)}`);
+      }
+    },
     now: () => performance.now(),
     heartbeatMs: a.heartbeatMs,
     killTree: async () => {
@@ -137,7 +185,11 @@ export async function runOwner(a: OwnerArgs): Promise<void> {
     onExit: (exit: ExitMsg) => {
       rec.state = "exited";
       rec.exit = { ...exit, at: new Date().toISOString() };
-      save();
+      try {
+        save();
+      } catch (x) {
+        log(`record: ${String(x)}`);
+      }
       log(`session over: ${exit.reason} (code ${exit.code ?? "none"}${exit.detail ? `, ${exit.detail}` : ""})`);
       for (const t of timers) clearInterval(t);
       server.close();
@@ -154,26 +206,22 @@ export async function runOwner(a: OwnerArgs): Promise<void> {
     const dec = new FrameDecoder();
     let attached = false;
     sock.on("data", (chunk: Buffer) => {
-      let frames;
       try {
-        frames = dec.push(chunk);
-      } catch (e) {
-        log(`bad frame from a client: ${String(e)}`);
-        sock.destroy();
-        return;
-      }
-      for (const f of frames) {
-        if (!attached) {
-          if (f.type !== F.attach) {
-            sock.destroy();
-            return;
+        for (const f of dec.push(chunk)) {
+          if (!attached) {
+            if (f.type !== F.attach) throw new Error(`first frame 0x${f.type.toString(16)} is not ATTACH`);
+            attached = true;
+            contact();
+            session.attach(client, attachMsg(f.payload));
+          } else if (!session.handle(client, f)) {
+            throw new Error("the client sent a frame it could not have meant");
           }
-          attached = true;
-          contact();
-          session.attach(client, decodeJson<AttachMsg>(f.payload));
-        } else {
-          session.handle(client, f);
         }
+      } catch (e) {
+        // One confused client must not end the session: drop it, keep the shell.
+        log(`dropping a client: ${String(e)}`);
+        session.detachClient(client);
+        sock.destroy();
       }
     });
     sock.on("close", () => session.detachClient(client));
@@ -192,17 +240,19 @@ export async function runOwner(a: OwnerArgs): Promise<void> {
   timers.push(setInterval(() => session.tick(), 1_000));
 
   // Escapees: processes that left the shell's tree. Recorded so a kill (or a
-  // later sweep, if this owner dies first) still finds them.
+  // later sweep, if this owner dies first) still finds them. Dead ones are
+  // pruned, so a burst of short-lived detached processes can't push out a
+  // long-lived one.
   timers.push(
     setInterval(() => {
       if (!rec.shellPid || session.exited) return;
       void (async () => {
-        const rows = await listProcs();
-        const found = escapees(rows, rec.shellPid!, await sessionMembers(rec.shellPid!));
-        const known = new Set((rec.tracked ?? []).map((t) => `${t.pid}@${t.start}`));
-        const fresh = found.filter((t) => !known.has(`${t.pid}@${t.start}`));
-        if (!fresh.length) return;
-        rec.tracked = [...(rec.tracked ?? []), ...fresh].slice(-MAX_TRACKED);
+        const now = await listProcs();
+        const kept = (rec.tracked ?? []).filter((t) => sameProcess(now, t.pid, t.start));
+        const known = new Set(kept.map((t) => `${t.pid}@${t.start}`));
+        const fresh = escapees(now, rec.shellPid!, await sessionMembers(rec.shellPid!)).filter((t) => !known.has(`${t.pid}@${t.start}`));
+        if (!fresh.length && kept.length === (rec.tracked ?? []).length) return;
+        rec.tracked = [...kept, ...fresh].slice(-MAX_TRACKED);
         if (!session.exited) save();
       })().catch(() => {});
     }, 5_000),
@@ -235,10 +285,4 @@ export async function runOwner(a: OwnerArgs): Promise<void> {
   process.on("SIGTERM", () => void session.terminate("killed", "SIGTERM"));
   for (const t of timers) t.unref?.();
   // The server keeps the process alive until onExit closes it.
-}
-
-
-/** Whether a session's record says it exists and its owner might still be serving it. */
-export function recordFor(root: string, instance: string, sid: string): SessionRecord | undefined {
-  return readRecord(sessionPaths(root, instance, sid).record);
 }

@@ -60,6 +60,28 @@ export function shellEnv(opts: {
   return env;
 }
 
+/**
+ * The plugin's extra variables, as `--env` carries them: base64 of a JSON
+ * object of name → string. Throws on anything else, or on a bad name, so the
+ * relay refuses it before an owner ever starts.
+ */
+export function decodeEnvArg(b64: string | undefined): Record<string, string> {
+  if (!b64) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+  } catch {
+    throw new Error("--env must be base64 JSON of an object");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("--env must be base64 JSON of an object");
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!NAME.test(k)) throw new Error(`not an environment variable name: ${JSON.stringify(k)}`);
+    out[k] = String(v);
+  }
+  return out;
+}
+
 /** Printed by the capture command before the JSON, so a chatty `.zprofile` can't corrupt it. */
 const MARK = "__DISPATCH_HOST_ENV__";
 

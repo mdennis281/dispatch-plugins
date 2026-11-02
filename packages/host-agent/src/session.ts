@@ -32,9 +32,9 @@ import {
 /** The shell, as `child_process.spawn` returns it. */
 export interface ShellProc extends EventEmitter {
   pid?: number;
-  stdin: { write(data: Buffer): unknown; end(): unknown } | null;
-  stdout: EventEmitter | null;
-  stderr: EventEmitter | null;
+  stdin: { write(data: Buffer): unknown; end(): unknown; readonly writableEnded?: boolean; readonly destroyed?: boolean } | null;
+  stdout: (EventEmitter & { destroy?(): unknown }) | null;
+  stderr: (EventEmitter & { destroy?(): unknown }) | null;
 }
 
 /** An attached client: the relay's end of the socket. */
@@ -60,6 +60,12 @@ export interface SessionDeps {
   heartbeatMs: number;
   /** Drop a client that has this much output queued. It re-attaches and replays. Default 8 MiB. */
   maxBacklog?: number;
+  /**
+   * After the shell exits, how long to wait for its output pipes to close
+   * before closing them ourselves. Default 1 s. Something that escaped the
+   * session (`ssh -f`, a double fork) can hold them open forever.
+   */
+  closeGraceMs?: number;
   /** Kill the shell's whole tree. */
   killTree(): Promise<void>;
   /** Deliver a signal (a bare name: `INT`) to the session. */
@@ -81,6 +87,19 @@ export class Session {
   private exitMsg?: ExitMsg;
   /** Why we are killing the shell, so its exit is reported as that and not as `exited`. */
   private ending?: { reason: ExitReason; detail?: string };
+  /** When the last kill was sent while ending, so `tick` can send another. */
+  private lastKill = 0;
+  /** The shell's own exit, once it happened. */
+  private shellExit?: { code: number | null; signal: NodeJS.Signals | null };
+  private closed = false;
+  private onClosed?: () => void;
+  /**
+   * Replay bytes queued to the current client, which may exceed the backlog
+   * limit on their own. Forgiven until the client has caught up.
+   */
+  private allowance = 0;
+  /** The journal's last write failed (a full disk). Logged once, not per chunk. */
+  private journalFailing = false;
   private readonly scanner = new SentinelScanner();
   /** Recent run ends, so a client that was away when one landed still gets its RUN_END. */
   private readonly ends: Array<RunEndMsg & { out: number }> = [];
@@ -89,11 +108,18 @@ export class Session {
     this.lastBeat = d.now();
     d.shell.stdout?.on("data", (c: Buffer) => this.output(F.stdout, c));
     d.shell.stderr?.on("data", (c: Buffer) => this.output(F.stderr, c));
-    // `close`, not `exit`: it comes after the last stdout/stderr data.
-    d.shell.on("close", (code: number | null, signal: NodeJS.Signals | null) => void this.shellEnded(code, signal));
+    // `exit` starts the end. `close` (all output read) normally follows at
+    // once, but not when an escaped process still holds the pipes.
+    d.shell.on("exit", (code: number | null, signal: NodeJS.Signals | null) => this.shellExited(code, signal));
+    d.shell.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      this.closed = true;
+      this.onClosed?.();
+      this.shellExited(code, signal);
+    });
     d.shell.on("error", (err: Error) => {
       this.ending ??= { reason: "start-failed", detail: err.message };
-      void this.shellEnded(null, null);
+      this.closed = true;
+      this.shellExited(null, null);
     });
   }
 
@@ -132,8 +158,10 @@ export class Session {
       ...(gap.out !== undefined || gap.err !== undefined ? { gap } : {}),
     };
     client.write(encodeFrame(F.ready, ready));
-    for (const frame of replay(this.d.out, from.out, F.stdout)) client.write(frame);
-    for (const frame of replay(this.d.err, from.err, F.stderr)) client.write(frame);
+    let replayed = 0;
+    for (const frame of replay(this.d.out, from.out, F.stdout)) replayed += write(client, frame);
+    for (const frame of replay(this.d.err, from.err, F.stderr)) replayed += write(client, frame);
+    this.allowance = Math.max(replayed, client.writableLength);
     // After the bytes that hold their sentinels: ends the client hasn't seen.
     for (const e of this.ends) if (e.out > from.out) client.write(encodeFrame(F.runEnd, { runId: e.runId, exitCode: e.exitCode, cwd: e.cwd }));
     if (this.exitMsg) {
@@ -148,30 +176,47 @@ export class Session {
     if (this.client === client) this.client = undefined;
   }
 
-  /** A frame from `client`. Frames from a client that has been replaced are ignored. */
-  handle(client: Client, frame: Frame): void {
-    if (client !== this.client) return;
+  /**
+   * A frame from `client`. Frames from a client that has been replaced are
+   * ignored. Returns false for a frame that could not be understood; the
+   * caller drops that client, and the session carries on.
+   */
+  handle(client: Client, frame: Frame): boolean {
+    if (client !== this.client) return true;
+    try {
+      this.handleFrame(client, frame);
+      return true;
+    } catch (e) {
+      this.d.log?.(`bad frame 0x${frame.type.toString(16)} from the client: ${String(e)}`);
+      return false;
+    }
+  }
+
+  private handleFrame(client: Client, frame: Frame): void {
     this.lastBeat = this.d.now();
+    const stdin = this.d.shell.stdin;
+    const writable = Boolean(stdin) && !stdin!.writableEnded && !stdin!.destroyed;
     switch (frame.type) {
       case F.stdin:
-        this.d.shell.stdin?.write(frame.payload);
+        if (writable) stdin!.write(frame.payload);
         break;
       case F.stdinEnd:
-        this.d.shell.stdin?.end();
+        if (writable) stdin!.end();
         break;
       case F.heartbeat:
         client.write(encodeFrame(F.heartbeatAck));
         this.d.onContact?.();
         break;
       case F.signal: {
-        const name = String(decodeJson<SignalMsg>(frame.payload).signal ?? "").toUpperCase().replace(/^SIG/, "");
+        const name = String(decodeJson<SignalMsg>(frame.payload)?.signal ?? "").toUpperCase().replace(/^SIG/, "");
         if (name === "KILL") void this.terminate("killed");
         else if (SIGNALS.has(name)) void this.d.signal(name).catch((e: unknown) => this.d.log?.(`signal ${name}: ${String(e)}`));
         break;
       }
       case F.runBegin: {
         const m = decodeJson<RunBeginMsg>(frame.payload);
-        this.activeRun = String(m.runId);
+        if (!m || typeof m.runId !== "string" || !m.runId) throw new Error("RUN_BEGIN without a runId");
+        this.activeRun = m.runId;
         this.d.journalRun({
           t: "begin",
           runId: this.activeRun,
@@ -194,31 +239,56 @@ export class Session {
     }
   }
 
-  /** Run every second or so: kills the session once Dispatch has been silent past the heartbeat timeout. */
+  /**
+   * Run every second or so: kills the session once Dispatch has been silent
+   * past the heartbeat timeout, and kills again every few seconds while a
+   * shell we are ending hasn't gone.
+   */
   tick(): void {
-    if (this.exitMsg || this.ending) return;
+    if (this.exitMsg) return;
+    if (this.ending) {
+      if (!this.shellExit && this.d.now() - this.lastKill > 5_000) void this.kill();
+      return;
+    }
     const silent = this.d.now() - this.lastBeat;
     if (silent > this.d.heartbeatMs) {
       void this.terminate("heartbeat", `no heartbeat for ${Math.round(silent / 1000)}s`);
     }
   }
 
-  /** End the session for `reason`: kill the tree; the shell's close reports it. */
+  /**
+   * End the session for `reason`: kill the tree; the shell's exit reports it.
+   * The first reason sticks. Asking again kills again.
+   */
   async terminate(reason: ExitReason, detail?: string): Promise<void> {
-    if (this.exitMsg || this.ending) return;
-    this.ending = { reason, ...(detail ? { detail } : {}) };
-    this.d.log?.(`ending session: ${reason}${detail ? ` (${detail})` : ""}`);
+    if (this.exitMsg) return;
+    if (!this.ending) {
+      this.ending = { reason, ...(detail ? { detail } : {}) };
+      this.d.log?.(`ending session: ${reason}${detail ? ` (${detail})` : ""}`);
+    }
+    await this.kill();
+  }
+
+  private async kill(): Promise<void> {
+    this.lastKill = this.d.now();
     await this.d.killTree().catch((e: unknown) => this.d.log?.(`kill: ${String(e)}`));
   }
 
   private output(type: number, data: Buffer): void {
     const log = type === F.stdout ? this.d.out : this.d.err;
-    const offset = log.append(data);
+    const offset = log.append(data, (e) => {
+      if (!this.journalFailing) this.d.log?.(`journal write failed, output is not being kept: ${String(e)}`);
+      this.journalFailing = true;
+    });
     const ends = type === F.stdout ? this.scanner.push(data) : [];
     const c = this.client;
     if (c) {
       for (const frame of encodeOutput(type, offset, data)) c.write(frame);
     }
+    // The first sentinel-shaped line after RUN_BEGIN ends the run. A command
+    // that prints one itself (`cat` of a journal) ends it early, in the
+    // journal only: core matches its own nonce, which the plugin can't know
+    // without reading what core writes to stdin.
     for (const end of ends) {
       if (!this.activeRun) continue; // a run the plugin never announced
       const runId = this.activeRun;
@@ -237,22 +307,46 @@ export class Session {
       c?.write(encodeFrame(F.runEnd, { runId, exitCode: end.exitCode, cwd: end.cwd }));
     }
     // A client this far behind is a stalled link. Let it go: the journal has
-    // every byte, and it replays them when it comes back.
-    if (c && c.writableLength > (this.d.maxBacklog ?? 8 * 1024 * 1024)) {
+    // every byte, and it replays them when it comes back. What its own replay
+    // queued doesn't count until it has caught up.
+    const max = this.d.maxBacklog ?? 8 * 1024 * 1024;
+    if (c && c.writableLength <= max) this.allowance = 0;
+    if (c && c.writableLength > max + this.allowance) {
       this.d.log?.(`client ${c.writableLength} bytes behind; dropping it until it re-attaches`);
       this.client = undefined;
       c.destroy();
     }
   }
 
-  private async shellEnded(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
-    if (this.exitMsg) return;
+  /** The shell exited (or closed, or never started). Finishes the session once, whichever comes first. */
+  private shellExited(code: number | null, signal: NodeJS.Signals | null): void {
+    if (this.shellExit) return;
+    this.shellExit = { code, signal: signal ?? null };
+    void this.finish();
+  }
+
+  private async finish(): Promise<void> {
     // The shell is gone; whatever it left running in the background goes with it.
-    if (!this.ending) await this.d.killTree().catch((e: unknown) => this.d.log?.(`kill: ${String(e)}`));
+    if (!this.ending) await this.kill();
+    // Let its last output arrive, but don't wait on a pipe an escapee holds.
+    if (!this.closed) {
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, this.d.closeGraceMs ?? 1_000);
+        this.onClosed = () => {
+          clearTimeout(t);
+          resolve();
+        };
+      });
+      this.onClosed = undefined;
+      if (!this.closed) {
+        this.d.shell.stdout?.destroy?.();
+        this.d.shell.stderr?.destroy?.();
+      }
+    }
     if (this.exitMsg) return;
     const exit: ExitMsg = {
-      code,
-      signal: signal ?? null,
+      code: this.shellExit!.code,
+      signal: this.shellExit!.signal,
       reason: this.ending?.reason ?? "exited",
       ...(this.ending?.detail ? { detail: this.ending.detail } : {}),
     };
@@ -265,6 +359,11 @@ export class Session {
     }
     this.d.onExit(exit);
   }
+}
+
+function write(client: Client, frame: Buffer): number {
+  client.write(frame);
+  return frame.length;
 }
 
 /** Output frames for everything `log` holds from `from` on. */

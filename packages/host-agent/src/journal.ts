@@ -8,6 +8,11 @@
  * Output is kept in segments so a dev server that logs for days can't fill the
  * disk. Only the newest `keep` segments are kept. A client that was gone
  * long enough to miss the dropped ones is told where the replay really starts.
+ *
+ * A write that fails (a full disk) never takes the session down: the offset
+ * still advances, the bytes are simply not journaled, and the next append
+ * starts a new segment. A replay steps over that hole, and the client sees
+ * the offsets jump.
  */
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
@@ -30,6 +35,10 @@ interface Segment {
 export class StreamLog {
   private segments: Segment[] = [];
   private fd?: number;
+  /** The offset of the next byte. Ahead of the segments after a failed write. */
+  private next = 0;
+  /** The last write failed: start a fresh segment rather than append after a hole. */
+  private broken = false;
   private readonly segmentBytes: number;
   private readonly keep: number;
 
@@ -58,13 +67,14 @@ export class StreamLog {
       }
     }
     log.segments.sort((a, b) => a.base - b.base);
+    const last = log.segments.at(-1);
+    log.next = last ? last.base + last.size : 0;
     return log;
   }
 
   /** The offset the next byte will have: how many bytes the stream has ever had. */
   get offset(): number {
-    const last = this.segments.at(-1);
-    return last ? last.base + last.size : 0;
+    return this.next;
   }
 
   /** The oldest offset still held. */
@@ -72,23 +82,46 @@ export class StreamLog {
     return this.segments[0]?.base ?? this.offset;
   }
 
-  /** Append `data`; returns the offset of its first byte. */
-  append(data: Buffer): number {
-    const at = this.offset;
+  /**
+   * Append `data`; returns the offset of its first byte. Never throws: a
+   * failed write is reported to `onError` and leaves a hole.
+   */
+  append(data: Buffer, onError?: (err: unknown) => void): number {
+    const at = this.next;
     if (!data.length) return at;
-    let cur = this.segments.at(-1);
-    if (!cur || cur.size >= this.segmentBytes) {
-      if (this.fd !== undefined) closeSync(this.fd);
-      this.fd = undefined;
-      mkdirSync(this.dir, { recursive: true });
-      cur = { base: at, file: join(this.dir, `${this.name}.${at}.log`), size: 0 };
-      this.segments.push(cur);
-      while (this.segments.length > this.keep) rmSync(this.segments.shift()!.file, { force: true });
+    this.next += data.length;
+    try {
+      let cur = this.segments.at(-1);
+      if (!cur || cur.size >= this.segmentBytes || this.broken) {
+        this.closeFd();
+        mkdirSync(this.dir, { recursive: true });
+        cur = { base: at, file: join(this.dir, `${this.name}.${at}.log`), size: 0 };
+        this.segments.push(cur);
+        this.broken = false;
+        while (this.segments.length > this.keep) rmSync(this.segments.shift()!.file, { force: true });
+      }
+      if (this.fd === undefined) this.fd = openSync(cur.file, "a");
+      for (let done = 0; done < data.length; ) {
+        const n = writeSync(this.fd, data, done);
+        done += n;
+        cur.size += n;
+      }
+    } catch (err) {
+      this.broken = true;
+      this.closeFd();
+      onError?.(err);
     }
-    if (this.fd === undefined) this.fd = openSync(cur.file, "a");
-    writeSync(this.fd, data);
-    cur.size += data.length;
     return at;
+  }
+
+  private closeFd(): void {
+    if (this.fd === undefined) return;
+    try {
+      closeSync(this.fd);
+    } catch {
+      /* already gone */
+    }
+    this.fd = undefined;
   }
 
   /**
@@ -100,6 +133,7 @@ export class StreamLog {
     for (const seg of this.segments) {
       const end = seg.base + seg.size;
       if (end <= at) continue;
+      if (seg.base > at) at = seg.base; // a hole a failed write left
       const fd = openSync(seg.file, "r");
       try {
         while (at < end) {
@@ -117,8 +151,7 @@ export class StreamLog {
   }
 
   close(): void {
-    if (this.fd !== undefined) closeSync(this.fd);
-    this.fd = undefined;
+    this.closeFd();
   }
 }
 
