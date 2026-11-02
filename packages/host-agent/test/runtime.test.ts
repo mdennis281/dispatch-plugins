@@ -4,7 +4,7 @@
  * text is checked.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,6 +115,8 @@ describe.skipIf(!posix)("install scripts (POSIX)", () => {
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout.trim()).toBe("installed v24.22.2");
     expect(execFileSync(join(root, "runtime", "node", "bin", "node"), ["--version"]).toString().trim()).toBe("v24.22.2");
+    // The old runtime is gone, not parked beside the new one.
+    expect(readdirSync(join(root, "runtime"))).toEqual(["node"]);
   });
 
   it("refuses a tarball whose checksum is wrong, and installs nothing", () => {

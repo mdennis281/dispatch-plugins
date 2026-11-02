@@ -87,7 +87,7 @@ export function installRuntimeScript(root: string, t: NodeTarball): string {
     // Two renames: a directory can't be renamed over a non-empty one. For the
     // instant between them the path is missing, and a session started in that
     // instant fails to start and is retried by the plugin.
-    'if [ -e "$RT/node" ]; then mv "$RT/node" "$RT/.old.$"; fi',
+    'if [ -e "$RT/node" ]; then mv "$RT/node" "$RT/.old.$$"; fi',
     `mv "$T"/${sq(t.dir)} "$RT/node"`,
     'rm -rf "$T" "$RT/.old.$$"',
     `echo ${sq(`installed v${t.version}`)}`,

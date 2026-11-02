@@ -1,0 +1,144 @@
+/**
+ * The plugin's HTTP surface, under `/api/plugins/remote-host/`, for the
+ * Settings pane. Every write here is a human's edit, and these are the only
+ * places settings are written.
+ *
+ *   GET    /hosts                 paired machines, with live status and the last probe
+ *   POST   /pair/scan             { address, port? } → the host key, to confirm
+ *   POST   /pair/start            { slug, label?, address, addresses?, port?, user, hostKey, hostKeyType?, allowFrom?, replace? }
+ *   POST   /pair/finish           { pairingId, password? }
+ *   POST   /pair/cancel           { pairingId }
+ *   PUT    /hosts/:slug           { label?, addresses? }   rename, or change where to look
+ *   POST   /hosts/:slug/check     reconnect and probe now
+ *   DELETE /hosts/:slug           take the key off the machine, end this instance's sessions, forget it
+ */
+import type { PluginContext, PluginReply, PluginRequest, PluginRouter } from "@dispatch/plugin-sdk";
+import { shCommand } from "@dispatch-plugins/host-agent";
+import { errText, publicKeyOf } from "@dispatch-plugins/remote-core";
+import { keyBlobOf, removeKeyScript } from "./authorized-keys.js";
+import { keySecretName, validAddress, type HostConfig } from "./hosts.js";
+import { UserError, type Pairing } from "./pairing.js";
+import type { HostRegistry } from "./registry.js";
+
+export interface RoutesDeps {
+  ctx: PluginContext;
+  instanceId: string;
+  registry: HostRegistry;
+  pairing: Pairing;
+  hosts: () => HostConfig[];
+  saveHosts: (hosts: HostConfig[]) => Promise<void>;
+}
+
+type Handler = (req: PluginRequest) => Promise<unknown> | unknown;
+
+function wrap(log: PluginContext["log"], fn: Handler) {
+  return async (req: PluginRequest, reply: PluginReply) => {
+    try {
+      return await fn(req);
+    } catch (err) {
+      const status = err instanceof UserError ? err.status : 500;
+      if (status >= 500) log.warn(`remote-host ${req.method} ${req.url}: ${errText(err)}`);
+      reply.code(status);
+      return { error: errText(err) };
+    }
+  };
+}
+
+function body(req: PluginRequest): Record<string, unknown> {
+  return req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+}
+
+export function defineRoutes(deps: RoutesDeps): (r: PluginRouter<PluginRequest, PluginReply>) => void {
+  const { ctx, registry, pairing } = deps;
+  const h = (fn: Handler) => wrap(ctx.log, fn);
+
+  const find = (req: PluginRequest): HostConfig => {
+    const slug = String(req.params.slug ?? "");
+    const host = deps.hosts().find((x) => x.slug === slug);
+    if (!host) throw new UserError(`no paired machine called ${slug}`, 404);
+    return host;
+  };
+
+  return (r) => {
+    r.get("/hosts", h(() => ({ hosts: registry.list() })));
+
+    r.post("/pair/scan", h((req) => pairing.scan(body(req))));
+    r.post("/pair/start", h((req) => pairing.start(body(req))));
+    r.post("/pair/finish", h(async (req) => {
+      const done = await pairing.finish(body(req));
+      registry.sync(deps.hosts());
+      return done;
+    }));
+    r.post("/pair/cancel", h((req) => pairing.cancel(body(req))));
+
+    r.put("/hosts/:slug", h(async (req) => {
+      const host = find(req);
+      const b = body(req);
+      const next: HostConfig = { ...host };
+      if (b.label !== undefined) {
+        const label = typeof b.label === "string" ? b.label.trim() : "";
+        if (!label || label.length > 80) throw new UserError("label must be 1 to 80 characters");
+        next.label = label;
+      }
+      if (b.addresses !== undefined) {
+        const list = Array.isArray(b.addresses) ? [...new Set(b.addresses.map((a) => String(a).trim()).filter(Boolean))] : [];
+        if (!list.length) throw new UserError("addresses must list at least one name or address");
+        for (const a of list) if (!validAddress(a)) throw new UserError(`not a host name or address: ${a}`);
+        next.addresses = list;
+      }
+      await deps.saveHosts(deps.hosts().map((x) => (x.slug === host.slug ? next : x)));
+      registry.sync(deps.hosts());
+      return { host: next };
+    }));
+
+    r.post("/hosts/:slug/check", h(async (req) => {
+      const host = find(req);
+      const e = registry.get(host.slug);
+      if (!e) throw new UserError(`${host.slug} is not registered in this instance`, 409);
+      const status = await e.link.checkNow();
+      return { status, ...(e.link.probe ? { probe: e.link.probe } : {}) };
+    }));
+
+    r.delete("/hosts/:slug", h(async (req) => {
+      const host = find(req);
+      const e = registry.get(host.slug);
+      const name = keySecretName(host.slug);
+      // While the key still works: end this instance's sessions there and
+      // take the key's line out of authorized_keys. The other instance's
+      // sessions end on their own once it notices (its heartbeat stops).
+      let keyLine: "removed" | "absent" | "unreachable" = "unreachable";
+      let sessions = 0;
+      const key = await ctx.secrets?.get(name);
+      if (e && key) {
+        try {
+          await e.link.ready(AbortSignal.timeout(20_000));
+          const killed = await e.link
+            .agent<{ killed?: string[] }>(["kill", "--instance", deps.instanceId, "--all"], 30_000)
+            .catch(() => ({ killed: [] }));
+          sessions = killed?.killed?.length ?? 0;
+          const res = await e.link.exec(shCommand(removeKeyScript(keyBlobOf(publicKeyOf(key)))), { timeoutMs: 30_000 });
+          keyLine = res.code === 0 ? (res.stdout.includes("removed") ? "removed" : "absent") : "unreachable";
+        } catch (err) {
+          ctx.log.warn(`remote-host ${host.slug}: removing its key on the machine failed: ${errText(err)}`);
+        }
+      }
+      await deps.saveHosts(deps.hosts().filter((x) => x.slug !== host.slug));
+      registry.sync(deps.hosts());
+      await ctx.secrets?.delete?.(name);
+      await ctx.kv?.delete(`host:${host.slug}`);
+      return {
+        removed: host.slug,
+        keyLine,
+        sessionsEnded: sessions,
+        ...(keyLine === "unreachable"
+          ? {
+              note:
+                `The machine could not be reached, so its authorized_keys still lets this key in (it is deleted here, so ` +
+                `nobody holds it). To tidy up, delete the line ending in "dispatch-remote-host:${host.slug}@…" from ` +
+                `~${host.user}/.ssh/authorized_keys on it.`,
+            }
+          : {}),
+      };
+    }));
+  };
+}

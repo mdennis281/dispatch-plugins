@@ -6,7 +6,8 @@
   "description": "What a Dispatch terminal backend on a remote machine needs: one SSH connection per machine, a synced checkout, port forwarding and a crash-proof cleanup lifecycle.",
   "exports": {
     ".": "./src/index.ts",
-    "./vite": "./vite/ssh2.mjs"
+    "./vite": "./vite/ssh2.mjs",
+    "./testing": "./test/ssh-server.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

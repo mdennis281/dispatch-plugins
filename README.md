@@ -8,7 +8,7 @@ Plugins for [Dispatch](https://github.com/mdennis281/dispatch). Each one lives i
 
 ## Planned
 
-- **Remote host** (`remote-host`): run a chat's terminals, a synced worktree and its browser MCPs on your own machines, Mac first. Design: [docs/design/remote-host.md](docs/design/remote-host.md). Preparing a Mac: [docs/setup/macos-host.md](docs/setup/macos-host.md).
+- **Remote host** (`remote-host`): run a chat's terminals, a synced worktree and its browser MCPs on your own machines, Mac first. Being built in [plugins/remote-host](plugins/remote-host). It isn't listed for install until it is usable. Design: [docs/design/remote-host.md](docs/design/remote-host.md). Preparing a Mac: [docs/setup/macos-host.md](docs/setup/macos-host.md).
 
 ## Install
 
@@ -50,8 +50,10 @@ Settings, the enabled switch, secrets and the plugin's kv store (which records t
 dispatch-plugins.yaml        which directories are plugins; Dispatch lists exactly these
 plugins/<name>/              one plugin: plugin.yaml, README, LICENSE, src/, test/, and
   server/index.js            its BUILT server module, committed
-packages/<name>/             code two or more plugins share; remote-core is the SSH,
-                             sync, ports and cleanup half of a remote terminal backend
+packages/<name>/             code plugins share or carry; remote-core is the SSH,
+                             sync, ports and cleanup half of a remote terminal backend;
+                             host-agent is dispatch-host, which remote-host installs
+                             on each machine it pairs
 ```
 
 - **A plugin directory stands alone.** Dispatch installs it with no `node_modules` and nothing from outside it, so it carries its own `README.md` and `LICENSE`, and its built output.

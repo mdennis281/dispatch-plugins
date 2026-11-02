@@ -8,6 +8,8 @@
  */
 export { SshConnection, type ExecResult, type SshAuth, type SshTarget } from "./ssh/connection.js";
 export { hostKeyFingerprint, pinnedHostKey, tofuHostKey, trustProvisioner, type HostVerifier } from "./ssh/host-verifier.js";
+export { generateKeyPair, publicKeyOf, type SshKeyPair } from "./ssh/keys.js";
+export { keyTypeOf, scanHostKey, type HostKeyScan } from "./ssh/scan.js";
 export { NO_CWD_EXIT, RemoteShell, ShellStartError, remoteShellCommand, signalName } from "./shell/remote-shell.js";
 export { sq } from "./shell/quote.js";
 export { git, localHas, pack, remotePathFor, repoInfo, snapshot, type RepoInfo } from "./sync/snapshot.js";

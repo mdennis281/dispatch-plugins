@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Remote host",
+  "type": "object",
+  "properties": {
+    "hosts": {
+      "type": "array",
+      "readOnly": true,
+      "title": "Paired machines",
+      "description": "Written only by pairing, renaming and removing a machine. Shared by every Dispatch instance on this computer.",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["slug", "label", "user", "addresses", "hostKey", "hostKeyType", "keyFingerprint", "allowFrom", "pairedAt"],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "The machine's name in its terminal location id, remote-host/<slug>. Fixed at pairing.",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,47}$"
+          },
+          "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "user": { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$" },
+          "addresses": {
+            "type": "array",
+            "description": "Tried in order. The host key decides whether an address is this machine.",
+            "minItems": 1,
+            "items": { "type": "string", "pattern": "^[A-Za-z0-9._:%-]{1,253}$" }
+          },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "hostKey": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}$" },
+          "hostKeyType": { "type": "string", "enum": ["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa"] },
+          "keyFingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}$" },
+          "allowFrom": {
+            "type": "array",
+            "description": "The addresses the machine accepts this key from (its authorized_keys from= list).",
+            "minItems": 1,
+            "items": { "type": "string", "pattern": "^[0-9a-fA-F:.]+(/[0-9]{1,3})?$" }
+          },
+          "pairedAt": { "type": "string" }
+        }
+      }
+    }
+  }
+}
