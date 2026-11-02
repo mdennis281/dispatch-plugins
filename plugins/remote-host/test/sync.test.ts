@@ -5,9 +5,9 @@
  * exec bits, no symlinks.
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TerminalAfterRunInfo, TerminalRunInfo } from "@dispatch/plugin-sdk";
 import { repoTop, within } from "../src/backend.js";
@@ -463,7 +463,7 @@ describe("pieces", () => {
 
   it("syncs a repository from its top, and nothing outside one", async () => {
     const t = setup();
-    expect(await repoTop(join(t.local, "src"))).toBe(resolve(t.local));
+    expect(await repoTop(join(t.local, "src"))).toBe(realpathSync.native(t.local));
     const plain = mkdtempSync(join(tmpdir(), "rh-plain-"));
     dirs.push(plain);
     expect(await repoTop(plain)).toBeUndefined();

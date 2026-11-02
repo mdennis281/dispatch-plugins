@@ -11,6 +11,7 @@
  * starts there, and a command whose files can't be synced doesn't run.
  */
 import { randomBytes } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
 import type {
   PluginContext,
@@ -74,8 +75,10 @@ export class HostBackend implements TerminalBackend {
     // checkout there. The checkout itself is filled by the first command's
     // sync, not here: spawn stays quick.
     const root = await repoTop(info.worktreePath ?? info.repoPath);
+    // git reports the top as a real path (macOS's /var is /private/var): compare like with like.
+    const local = root ? await realpath(info.cwd).catch(() => info.cwd) : info.cwd;
     const cwd = root
-      ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, info.cwd))
+      ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, local))
       : chatDir(linked.paths, this.deps.instanceId, chatId);
     if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
     const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 30_000 });

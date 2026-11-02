@@ -22,7 +22,7 @@ import require$$1$2 from "zlib";
 import { StringDecoder } from "node:string_decoder";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, rename, rm, stat, lstat, readlink, writeFile, chmod, mkdtemp, copyFile, access } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, lstat, readlink, writeFile, chmod, mkdtemp, copyFile, access, realpath } from "node:fs/promises";
 import { tmpdir, hostname, networkInterfaces } from "node:os";
 import { posix, join, basename, resolve, dirname, sep, isAbsolute, relative } from "node:path";
 import { createWriteStream, createReadStream } from "node:fs";
@@ -23084,7 +23084,8 @@ class HostBackend {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
     const root = await repoTop(info.worktreePath ?? info.repoPath);
-    const cwd = root ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, info.cwd)) : chatDir(linked.paths, this.deps.instanceId, chatId);
+    const local = root ? await realpath(info.cwd).catch(() => info.cwd) : info.cwd;
+    const cwd = root ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, local)) : chatDir(linked.paths, this.deps.instanceId, chatId);
     if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
     const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 3e4 });
     if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
