@@ -103,6 +103,7 @@ export class HostRegistry {
       link: entry.link,
       instanceId: this.deps.instanceId,
       log: ctx.log,
+      ...(ctx.kv ? { kv: ctx.kv } : {}),
       ...(this.deps.shell ? { shell: this.deps.shell } : {}),
     });
     try {

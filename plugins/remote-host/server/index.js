@@ -21,12 +21,12 @@ import require$$0$5 from "util";
 import require$$1$2 from "zlib";
 import { StringDecoder } from "node:string_decoder";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import "node:child_process";
-import { mkdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdir, readFile, rename, rm, stat, writeFile, mkdtemp, copyFile, access } from "node:fs/promises";
 import { tmpdir, hostname, networkInterfaces } from "node:os";
-import { posix, join } from "node:path";
+import { posix, join, basename, resolve, dirname, sep, isAbsolute, relative } from "node:path";
 import { createWriteStream, createReadStream } from "node:fs";
-import { Readable } from "node:stream";
+import { Readable, PassThrough } from "node:stream";
 import { pipeline } from "node:stream/promises";
 function definePlugin(mod) {
   return mod;
@@ -231,12 +231,12 @@ function requireReader() {
     }
     return offset;
   };
-  Reader.prototype.readSequence = function(tag) {
+  Reader.prototype.readSequence = function(tag2) {
     var seq = this.peek();
     if (seq === null)
       return null;
-    if (tag !== void 0 && tag !== seq)
-      throw newInvalidAsn1Error("Expected 0x" + tag.toString(16) + ": got 0x" + seq.toString(16));
+    if (tag2 !== void 0 && tag2 !== seq)
+      throw newInvalidAsn1Error("Expected 0x" + tag2.toString(16) + ": got 0x" + seq.toString(16));
     var o = this.readLength(this._offset + 1);
     if (o === null)
       return null;
@@ -252,14 +252,14 @@ function requireReader() {
   Reader.prototype.readEnumeration = function() {
     return this._readTag(ASN1.Enumeration);
   };
-  Reader.prototype.readString = function(tag, retbuf) {
-    if (!tag)
-      tag = ASN1.OctetString;
+  Reader.prototype.readString = function(tag2, retbuf) {
+    if (!tag2)
+      tag2 = ASN1.OctetString;
     var b = this.peek();
     if (b === null)
       return null;
-    if (b !== tag)
-      throw newInvalidAsn1Error("Expected 0x" + tag.toString(16) + ": got 0x" + b.toString(16));
+    if (b !== tag2)
+      throw newInvalidAsn1Error("Expected 0x" + tag2.toString(16) + ": got 0x" + b.toString(16));
     var o = this.readLength(this._offset + 1);
     if (o === null)
       return null;
@@ -272,10 +272,10 @@ function requireReader() {
     this._offset += this.length;
     return retbuf ? str2 : str2.toString("utf8");
   };
-  Reader.prototype.readOID = function(tag) {
-    if (!tag)
-      tag = ASN1.OID;
-    var b = this.readString(tag, true);
+  Reader.prototype.readOID = function(tag2) {
+    if (!tag2)
+      tag2 = ASN1.OID;
+    var b = this.readString(tag2, true);
     if (b === null)
       return null;
     var values = [];
@@ -294,13 +294,13 @@ function requireReader() {
     values.unshift(value / 40 >> 0);
     return values.join(".");
   };
-  Reader.prototype._readTag = function(tag) {
-    assert.ok(tag !== void 0);
+  Reader.prototype._readTag = function(tag2) {
+    assert.ok(tag2 !== void 0);
     var b = this.peek();
     if (b === null)
       return null;
-    if (b !== tag)
-      throw newInvalidAsn1Error("Expected 0x" + tag.toString(16) + ": got 0x" + b.toString(16));
+    if (b !== tag2)
+      throw newInvalidAsn1Error("Expected 0x" + tag2.toString(16) + ": got 0x" + b.toString(16));
     var o = this.readLength(this._offset + 1);
     if (o === null)
       return null;
@@ -371,11 +371,11 @@ function requireWriter() {
     this._ensure(1);
     this._buf[this._offset++] = b;
   };
-  Writer.prototype.writeInt = function(i, tag) {
+  Writer.prototype.writeInt = function(i, tag2) {
     if (typeof i !== "number")
       throw new TypeError("argument must be a Number");
-    if (typeof tag !== "number")
-      tag = ASN1.Integer;
+    if (typeof tag2 !== "number")
+      tag2 = ASN1.Integer;
     var sz = 4;
     while (((i & 4286578688) === 0 || (i & 4286578688) === 4286578688 >> 0) && sz > 1) {
       sz--;
@@ -384,7 +384,7 @@ function requireWriter() {
     if (sz > 4)
       throw newInvalidAsn1Error("BER ints cannot be > 0xffffffff");
     this._ensure(2 + sz);
-    this._buf[this._offset++] = tag;
+    this._buf[this._offset++] = tag2;
     this._buf[this._offset++] = sz;
     while (sz-- > 0) {
       this._buf[this._offset++] = (i & 4278190080) >>> 24;
@@ -395,30 +395,30 @@ function requireWriter() {
     this.writeByte(ASN1.Null);
     this.writeByte(0);
   };
-  Writer.prototype.writeEnumeration = function(i, tag) {
+  Writer.prototype.writeEnumeration = function(i, tag2) {
     if (typeof i !== "number")
       throw new TypeError("argument must be a Number");
-    if (typeof tag !== "number")
-      tag = ASN1.Enumeration;
-    return this.writeInt(i, tag);
+    if (typeof tag2 !== "number")
+      tag2 = ASN1.Enumeration;
+    return this.writeInt(i, tag2);
   };
-  Writer.prototype.writeBoolean = function(b, tag) {
+  Writer.prototype.writeBoolean = function(b, tag2) {
     if (typeof b !== "boolean")
       throw new TypeError("argument must be a Boolean");
-    if (typeof tag !== "number")
-      tag = ASN1.Boolean;
+    if (typeof tag2 !== "number")
+      tag2 = ASN1.Boolean;
     this._ensure(3);
-    this._buf[this._offset++] = tag;
+    this._buf[this._offset++] = tag2;
     this._buf[this._offset++] = 1;
     this._buf[this._offset++] = b ? 255 : 0;
   };
-  Writer.prototype.writeString = function(s, tag) {
+  Writer.prototype.writeString = function(s, tag2) {
     if (typeof s !== "string")
       throw new TypeError("argument must be a string (was: " + typeof s + ")");
-    if (typeof tag !== "number")
-      tag = ASN1.OctetString;
+    if (typeof tag2 !== "number")
+      tag2 = ASN1.OctetString;
     var len = Buffer2.byteLength(s);
-    this.writeByte(tag);
+    this.writeByte(tag2);
     this.writeLength(len);
     if (len) {
       this._ensure(len);
@@ -426,12 +426,12 @@ function requireWriter() {
       this._offset += len;
     }
   };
-  Writer.prototype.writeBuffer = function(buf, tag) {
-    if (typeof tag !== "number")
+  Writer.prototype.writeBuffer = function(buf, tag2) {
+    if (typeof tag2 !== "number")
       throw new TypeError("tag must be a number");
     if (!Buffer2.isBuffer(buf))
       throw new TypeError("argument must be a buffer");
-    this.writeByte(tag);
+    this.writeByte(tag2);
     this.writeLength(buf.length);
     this._ensure(buf.length);
     buf.copy(this._buf, this._offset, 0, buf.length);
@@ -445,11 +445,11 @@ function requireWriter() {
       self2.writeString(s);
     });
   };
-  Writer.prototype.writeOID = function(s, tag) {
+  Writer.prototype.writeOID = function(s, tag2) {
     if (typeof s !== "string")
       throw new TypeError("argument must be a string");
-    if (typeof tag !== "number")
-      tag = ASN1.OID;
+    if (typeof tag2 !== "number")
+      tag2 = ASN1.OID;
     if (!/^([0-9]+\.){3,}[0-9]+$/.test(s))
       throw new Error("argument is not a valid OID string");
     function encodeOctet(bytes2, octet) {
@@ -483,7 +483,7 @@ function requireWriter() {
     });
     var self2 = this;
     this._ensure(2 + bytes.length);
-    this.writeByte(tag);
+    this.writeByte(tag2);
     this.writeLength(bytes.length);
     bytes.forEach(function(b) {
       self2.writeByte(b);
@@ -511,10 +511,10 @@ function requireWriter() {
       throw newInvalidAsn1Error("Length too long (> 4 bytes)");
     }
   };
-  Writer.prototype.startSequence = function(tag) {
-    if (typeof tag !== "number")
-      tag = ASN1.Sequence | ASN1.Constructor;
-    this.writeByte(tag);
+  Writer.prototype.startSequence = function(tag2) {
+    if (typeof tag2 !== "number")
+      tag2 = ASN1.Sequence | ASN1.Constructor;
+    this.writeByte(tag2);
     this._seq.push(this._offset);
     this._ensure(3);
     this._offset += 3;
@@ -4561,10 +4561,10 @@ function requireUtils$1() {
           return !!buffer[pos++];
       },
       readList: () => {
-        const list = self2.readString(true);
-        if (list === void 0)
+        const list2 = self2.readString(true);
+        if (list2 === void 0)
           return;
-        return list ? list.split(",") : [];
+        return list2 ? list2.split(",") : [];
       },
       readString: (dest, maxLen) => {
         if (typeof dest === "number") {
@@ -5489,8 +5489,8 @@ function requireCrypto() {
       const final = cipher.final();
       if (final.length)
         this._onWrite(final);
-      const tag = cipher.getAuthTag();
-      this._onWrite(tag);
+      const tag2 = cipher.getAuthTag();
+      this._onWrite(tag2);
       ivIncrement(this._encIV);
       this.outSeqno = this.outSeqno + 1 >>> 0;
     }
@@ -6521,7 +6521,7 @@ function requireCrypto() {
     MAC_INFO,
     bindingAvailable: !!binding,
     init: (() => {
-      return new Promise(async (resolve, reject) => {
+      return new Promise(async (resolve2, reject) => {
         try {
           POLY1305_WASM_MODULE = await requirePoly1305()();
           POLY1305_RESULT_MALLOC = POLY1305_WASM_MODULE._malloc(16);
@@ -6533,7 +6533,7 @@ function requireCrypto() {
         } catch (ex) {
           return reject(ex);
         }
-        resolve();
+        resolve2();
       });
     })(),
     NullCipher,
@@ -7791,9 +7791,9 @@ function requireAgent() {
   hasRequiredAgent = 1;
   const { Socket } = require$$0$4;
   const { Duplex } = require$$1$1;
-  const { resolve } = require$$0$3;
+  const { resolve: resolve2 } = require$$0$3;
   const { readFile: readFile2 } = require$$1;
-  const { execFile, spawn } = require$$4;
+  const { execFile: execFile2, spawn: spawn2 } = require$$4;
   const { isParsedKey, parseKey } = requireKeyParser();
   const {
     makeBufferParser,
@@ -7927,7 +7927,7 @@ function requireAgent() {
     const RET_ERR_BINSTDIN = 13;
     const RET_ERR_BINSTDOUT = 14;
     const RET_ERR_BADLEN = 15;
-    const EXEPATH = resolve(__dirname, "..", "util/pagent.exe");
+    const EXEPATH = resolve2(__dirname, "..", "util/pagent.exe");
     const ERROR = {
       [RET_ERR_BADARGS]: new Error("Invalid pagent.exe arguments"),
       [RET_ERR_UNAVAILABLE]: new Error("Pageant is not running"),
@@ -7970,7 +7970,7 @@ function requireAgent() {
           return cb(new Error("Unexpected multiple agent requests"));
         this.buffer = null;
         let error;
-        const proc = this.proc = spawn(EXEPATH, [data.length]);
+        const proc = this.proc = spawn2(EXEPATH, [data.length]);
         proc.stdout.on("data", (data2) => {
           this.push(data2);
         });
@@ -8014,7 +8014,7 @@ function requireAgent() {
           if (err) {
             if (triedCygpath)
               return cb(new Error("Invalid cygwin unix socket path"));
-            execFile("cygpath", ["-w", socketPath], (err2, stdout, stderr) => {
+            execFile2("cygpath", ["-w", socketPath], (err2, stdout, stderr) => {
               if (err2 || stdout.length === 0)
                 return cb(new Error("Invalid cygwin unix socket path"));
               triedCygpath = true;
@@ -13746,7 +13746,7 @@ function requireSFTP() {
         const reread = (err, handle) => {
           if (err)
             return cb(err);
-          this.readdir(handle, opts, (err2, list) => {
+          this.readdir(handle, opts, (err2, list2) => {
             const eof = err2 && err2.code === STATUS_CODE.EOF;
             if (err2 && !eof)
               return this.close(handle, () => cb(err2));
@@ -13757,8 +13757,8 @@ function requireSFTP() {
                 cb(void 0, entries);
               });
             }
-            for (let i = 0; i < list.length; ++i, ++e)
-              entries[e] = list[i];
+            for (let i = 0; i < list2.length; ++i, ++e)
+              entries[e] = list2[i];
             reread(void 0, handle);
           });
         };
@@ -13774,16 +13774,16 @@ function requireSFTP() {
       writeUInt32BE(buf, handleLen, p);
       buf.set(where, p += 4);
       this._requests[reqid] = {
-        cb: doFilter ? (err, list) => {
+        cb: doFilter ? (err, list2) => {
           if (typeof cb !== "function")
             return;
           if (err)
             return cb(err);
-          for (let i = list.length - 1; i >= 0; --i) {
-            if (list[i].filename === "." || list[i].filename === "..")
-              list.splice(i, 1);
+          for (let i = list2.length - 1; i >= 0; --i) {
+            if (list2[i].filename === "." || list2[i].filename === "..")
+              list2.splice(i, 1);
           }
-          cb(void 0, list);
+          cb(void 0, list2);
         } : cb
       };
       const isBuffered = sendOrBuffer(this, buf);
@@ -16478,7 +16478,7 @@ function requireUtils() {
     }
     if (typeof algoList === "object" && algoList !== null) {
       const keys = Object.keys(algoList);
-      let list = defaultList;
+      let list2 = defaultList;
       for (let i = 0; i < keys.length; ++i) {
         const key = keys[i];
         let val = algoList[key];
@@ -16490,22 +16490,22 @@ function requireUtils() {
               for (let j = 0; j < val.length; ++j) {
                 const append = val[j];
                 if (typeof append === "string") {
-                  if (!append || list.indexOf(append) !== -1)
+                  if (!append || list2.indexOf(append) !== -1)
                     continue;
                   if (supportedList.indexOf(append) === -1)
                     throw new Error(`Unsupported algorithm: ${append}`);
-                  if (list === defaultList)
-                    list = list.slice();
-                  list.push(append);
+                  if (list2 === defaultList)
+                    list2 = list2.slice();
+                  list2.push(append);
                 } else if (isRegExp(append)) {
                   for (let k = 0; k < supportedList.length; ++k) {
                     const algo = supportedList[k];
                     if (append.test(algo)) {
-                      if (list.indexOf(algo) !== -1)
+                      if (list2.indexOf(algo) !== -1)
                         continue;
-                      if (list === defaultList)
-                        list = list.slice();
-                      list.push(algo);
+                      if (list2 === defaultList)
+                        list2 = list2.slice();
+                      list2.push(algo);
                     }
                   }
                 }
@@ -16519,22 +16519,22 @@ function requireUtils() {
               for (let j = val.length; j >= 0; --j) {
                 const prepend = val[j];
                 if (typeof prepend === "string") {
-                  if (!prepend || list.indexOf(prepend) !== -1)
+                  if (!prepend || list2.indexOf(prepend) !== -1)
                     continue;
                   if (supportedList.indexOf(prepend) === -1)
                     throw new Error(`Unsupported algorithm: ${prepend}`);
-                  if (list === defaultList)
-                    list = list.slice();
-                  list.unshift(prepend);
+                  if (list2 === defaultList)
+                    list2 = list2.slice();
+                  list2.unshift(prepend);
                 } else if (isRegExp(prepend)) {
                   for (let k = supportedList.length; k >= 0; --k) {
                     const algo = supportedList[k];
                     if (prepend.test(algo)) {
-                      if (list.indexOf(algo) !== -1)
+                      if (list2.indexOf(algo) !== -1)
                         continue;
-                      if (list === defaultList)
-                        list = list.slice();
-                      list.unshift(algo);
+                      if (list2 === defaultList)
+                        list2 = list2.slice();
+                      list2.unshift(algo);
                     }
                   }
                 }
@@ -16550,18 +16550,18 @@ function requireUtils() {
                 if (typeof search === "string") {
                   if (!search)
                     continue;
-                  const idx = list.indexOf(search);
+                  const idx = list2.indexOf(search);
                   if (idx === -1)
                     continue;
-                  if (list === defaultList)
-                    list = list.slice();
-                  list.splice(idx, 1);
+                  if (list2 === defaultList)
+                    list2 = list2.slice();
+                  list2.splice(idx, 1);
                 } else if (isRegExp(search)) {
-                  for (let k = 0; k < list.length; ++k) {
-                    if (search.test(list[k])) {
-                      if (list === defaultList)
-                        list = list.slice();
-                      list.splice(k, 1);
+                  for (let k = 0; k < list2.length; ++k) {
+                    if (search.test(list2[k])) {
+                      if (list2 === defaultList)
+                        list2 = list2.slice();
+                      list2.splice(k, 1);
                       --k;
                     }
                   }
@@ -16571,7 +16571,7 @@ function requireUtils() {
             break;
         }
       }
-      return list;
+      return list2;
     }
     return defaultList;
   }
@@ -20142,7 +20142,7 @@ class RemoteShell extends EventEmitter {
     this.ch = ch;
     this.cwd = cwd;
     this.killer = killer;
-    this.ready = new Promise((resolve, reject) => this.settle = { resolve, reject });
+    this.ready = new Promise((resolve2, reject) => this.settle = { resolve: resolve2, reject });
     this.ready.catch(() => {
     });
     this.stdin = {
@@ -20278,7 +20278,7 @@ class SshConnection extends EventEmitter {
    * reason to wait.
    */
   connectOnce() {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       const client2 = new libExports.Client();
       const cfg = {
         host: this.target.host,
@@ -20309,7 +20309,7 @@ class SshConnection extends EventEmitter {
         });
         client2.on("error", () => {
         });
-        resolve();
+        resolve2();
       }).once("error", (err) => {
         client2.end();
         reject(err);
@@ -20323,7 +20323,7 @@ class SshConnection extends EventEmitter {
   /** Run a command to completion; optionally feed it stdin. */
   exec(command, opts = {}) {
     const client2 = this.requireClient();
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       client2.exec(command, (err, ch) => {
         if (err) return reject(err);
         const stdout = [];
@@ -20338,7 +20338,7 @@ class SshConnection extends EventEmitter {
         ch.on("exit", (c) => code = c);
         ch.on("close", () => {
           if (timer) clearTimeout(timer);
-          resolve({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+          resolve2({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
         });
         if (opts.stdin) {
           opts.stdin(ch).catch((e) => {
@@ -20358,8 +20358,8 @@ class SshConnection extends EventEmitter {
    */
   channel(command) {
     const client2 = this.requireClient();
-    return new Promise((resolve, reject) => {
-      client2.exec(command, (err, ch) => err ? reject(err) : resolve(ch));
+    return new Promise((resolve2, reject) => {
+      client2.exec(command, (err, ch) => err ? reject(err) : resolve2(ch));
     });
   }
   /** `exec`, throwing on a non-zero exit with stderr in the message. */
@@ -20378,7 +20378,7 @@ class SshConnection extends EventEmitter {
     const client2 = this.requireClient();
     const cmd = remoteShellCommand(cwd, env);
     const host = this.target.host;
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       client2.exec(cmd, (err, ch) => {
         if (err) return reject(err);
         const sh = new RemoteShell(ch, cwd, (pid, signal) => this.signalSession(pid, signal));
@@ -20389,7 +20389,7 @@ class SshConnection extends EventEmitter {
         sh.ready.then(
           () => {
             clearTimeout(timer);
-            resolve(sh);
+            resolve2(sh);
           },
           (e) => {
             clearTimeout(timer);
@@ -20415,7 +20415,7 @@ class SshConnection extends EventEmitter {
    * 127.0.0.1:<remotePort> on the machine. Resolves with the local port.
    */
   forward(remotePort, remoteHost = "127.0.0.1") {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       const server2 = createServer((sock) => {
         if (!this.isOpen) return sock.destroy();
         this.client.forwardOut("127.0.0.1", 0, remoteHost, remotePort, (err, stream) => {
@@ -20429,7 +20429,7 @@ class SshConnection extends EventEmitter {
       server2.on("error", reject);
       server2.listen(0, "127.0.0.1", () => {
         const { port } = server2.address();
-        resolve({ localPort: port, close: () => server2.close() });
+        resolve2({ localPort: port, close: () => server2.close() });
       });
     });
   }
@@ -20516,7 +20516,7 @@ async function scanHostKey(opts) {
   }
 }
 function scanOnce(host, port, timeoutMs, keyTypes) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     let seen;
     let localAddress;
     let done = false;
@@ -20528,7 +20528,7 @@ function scanOnce(host, port, timeoutMs, keyTypes) {
       clearTimeout(timer);
       client2.end();
       sock.destroy();
-      if (seen) resolve({ fingerprint: hostKeyFingerprint(seen), keyType: keyTypeOf(seen), ...localAddress ? { localAddress } : {} });
+      if (seen) resolve2({ fingerprint: hostKeyFingerprint(seen), keyType: keyTypeOf(seen), ...localAddress ? { localAddress } : {} });
       else reject(err ?? new Error(`${host}:${port} closed the connection before showing a host key`));
     };
     const timer = setTimeout(() => finish(new Error(`no SSH answer from ${host}:${port} within ${timeoutMs / 1e3}s`)), timeoutMs);
@@ -20554,6 +20554,25 @@ function keyTypeOf(blob) {
   if (blob.length < 4) return "unknown";
   const len = blob.readUInt32BE(0);
   return len > 0 && len < 64 && blob.length >= 4 + len ? blob.subarray(4, 4 + len).toString("latin1") : "unknown";
+}
+function git(cwd, args, env = {}, input) {
+  return new Promise((res, rej) => {
+    const child = execFile(
+      "git",
+      args,
+      {
+        cwd,
+        env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
+        maxBuffer: 64 * 1024 * 1024,
+        windowsHide: true
+      },
+      (err, stdout, stderr) => {
+        if (err) rej(new Error(`git ${args[0]} failed: ${(stderr || err.message).trim()}`));
+        else res(stdout.trim());
+      }
+    );
+    if (input !== void 0) child.stdin?.end(input);
+  });
 }
 function errText(err) {
   return err instanceof Error ? err.message : String(err);
@@ -20644,6 +20663,12 @@ function instanceLayout(root, instance) {
     chatsDir: posix.join(dir, "chats"),
     sessionsDir: posix.join(dir, "sessions")
   };
+}
+function repoPath(root, instance, repoKey) {
+  return posix.join(instanceLayout(root, instance).reposDir, `${assertId("repoKey", repoKey)}.git`);
+}
+function chatWorktreePath(root, instance, chatId, repo) {
+  return posix.join(instanceLayout(root, instance).chatsDir, assertId("chat", chatId), assertId("repo", repo));
 }
 const NODE_RUNTIME = {
   version: "24.22.2",
@@ -21431,11 +21456,11 @@ class HostLink {
 }
 function withAbort(p, signal) {
   if (!signal) return p;
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     if (signal.aborted) return reject(new Error("cancelled"));
     const onAbort = () => reject(new Error("cancelled"));
     signal.addEventListener("abort", onAbort, { once: true });
-    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    p.then(resolve2, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
 }
 function statusFrom(probe, lastSeenAt) {
@@ -21669,8 +21694,8 @@ function portOf(v) {
 }
 function localIPv4() {
   const out = [];
-  for (const list of Object.values(networkInterfaces())) {
-    for (const a of list ?? []) {
+  for (const list2 of Object.values(networkInterfaces())) {
+    for (const a of list2 ?? []) {
       if (a.family !== "IPv4" || a.internal || a.address.startsWith("169.254.")) continue;
       out.push(a.address);
     }
@@ -21745,7 +21770,7 @@ class HostShell extends EventEmitter {
   /** Start a session; resolves once the shell runs on the machine. */
   static async start(opener, opts, signal) {
     const sh = new HostShell(opener, opts);
-    const started = new Promise((resolve, reject) => sh.starting = { resolve, reject });
+    const started = new Promise((resolve2, reject) => sh.starting = { resolve: resolve2, reject });
     const onAbort = () => sh.abortStart();
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
@@ -22093,6 +22118,675 @@ function json(payload, ok) {
   if (!m || typeof m !== "object" || !ok(m)) throw new Error("unexpected message shape");
   return m;
 }
+const ZERO = "0".repeat(40);
+const SNAPSHOT_MESSAGE = "dispatch: working-tree snapshot";
+const SNAPSHOT_ENV = {
+  GIT_AUTHOR_NAME: "Dispatch",
+  GIT_AUTHOR_EMAIL: "dispatch@localhost",
+  GIT_COMMITTER_NAME: "Dispatch",
+  GIT_COMMITTER_EMAIL: "dispatch@localhost",
+  GIT_AUTHOR_DATE: "1700000000 +0000",
+  GIT_COMMITTER_DATE: "1700000000 +0000"
+};
+function isAbsent(e) {
+  return e.sha === ZERO;
+}
+function sameEntry(a, b) {
+  return a.sha === b.sha && (a.mode === b.mode || isAbsent(a) && isAbsent(b));
+}
+function parseRawDiff(z) {
+  const parts = z.split("\0");
+  const out = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const head = parts[i].replace(/^\n+/, "");
+    const m = head.match(/^:(\d{6}) (\d{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) [A-Z]\d*$/);
+    if (!m) break;
+    out.push({ path: parts[i + 1], from: { mode: m[1], sha: m[3] }, to: { mode: m[2], sha: m[4] } });
+  }
+  return out;
+}
+async function indexPath(root) {
+  const p = await git(root, ["rev-parse", "--git-path", "index"]);
+  return isAbsolute(p) ? p : join(root, p);
+}
+async function withTempIndex(fn) {
+  const dir = await mkdtemp(join(tmpdir(), "rh-idx-"));
+  try {
+    return await fn({ GIT_INDEX_FILE: join(dir, "index") });
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {
+    });
+  }
+}
+function commitFor(root, tree) {
+  return git(root, ["commit-tree", tree, "-m", SNAPSHOT_MESSAGE], SNAPSHOT_ENV);
+}
+async function snapshotWorktree(root, opts) {
+  return withTempIndex(async (env) => {
+    await copyFile(await indexPath(root), env.GIT_INDEX_FILE).catch(() => {
+    });
+    const others = (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
+    const tooBig = [];
+    for (let i = 0; i < others.length; i += 64) {
+      const sizes = await Promise.all(
+        others.slice(i, i + 64).map(async (p) => {
+          const s = await stat(join(root, p)).catch(() => void 0);
+          return s?.isFile() && s.size > opts.capBytes ? { path: p, size: s.size } : void 0;
+        })
+      );
+      for (const s of sizes) if (s) tooBig.push(s);
+    }
+    const left = [...tooBig.map((b) => b.path), ...opts.exclude ?? []];
+    const spec = [".", ...left.map((p) => `:(exclude,literal)${p}`)].join("\0") + "\0";
+    await git(root, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], env, spec);
+    const overlay = Object.entries(opts.overlay ?? {});
+    if (overlay.length) {
+      const want = new Map(overlay);
+      const listed = (await git(root, ["ls-files", "-s", "-z"], env)).split("\0").filter(Boolean);
+      const fix = [];
+      for (const line of listed) {
+        const m = line.match(/^(\d{6}) ([0-9a-f]{40}) \d\t([\s\S]*)$/);
+        if (!m) continue;
+        const mode = want.get(m[3]);
+        if (mode && mode !== m[1]) fix.push(`${mode} ${m[2]}	${m[3]}`);
+      }
+      if (fix.length) await git(root, ["update-index", "-z", "--index-info"], env, fix.join("\0") + "\0");
+    }
+    const tree = await git(root, ["write-tree"], env);
+    return { tree, commit: await commitFor(root, tree), tooBig };
+  });
+}
+async function diffTrees(root, a, b) {
+  if (a === b) return [];
+  return parseRawDiff(await git(root, ["diff-tree", "-r", "-z", "--no-renames", a, b]));
+}
+async function objectsFor(root, commit, tree, since) {
+  const shas = /* @__PURE__ */ new Set([commit, tree]);
+  if (since) {
+    const changes = parseRawDiff(await git(root, ["diff-tree", "-r", "-t", "-z", "--no-renames", since, tree]));
+    for (const c of changes) if (!isAbsent(c.to) && c.to.mode !== "160000") shas.add(c.to.sha);
+  } else {
+    for (const line of (await git(root, ["ls-tree", "-r", "-t", "-z", tree])).split("\0")) {
+      const m = line.match(/^\d{6} (blob|tree) ([0-9a-f]{40})\t/);
+      if (m) shas.add(m[2]);
+    }
+  }
+  return [...shas];
+}
+async function objectSizes(root, shas) {
+  const out = /* @__PURE__ */ new Map();
+  if (!shas.length) return out;
+  const lines = (await git(root, ["cat-file", "--batch-check=%(objectname) %(objectsize)"], {}, shas.join("\n") + "\n")).split("\n");
+  for (const l of lines) {
+    const m = l.match(/^([0-9a-f]{40}) (\d+)$/);
+    if (m) out.set(m[1], Number(m[2]));
+  }
+  return out;
+}
+async function hasObject(root, sha) {
+  return (await objectSizes(root, [sha])).has(sha);
+}
+function batches(shas, sizes, maxBytes) {
+  const out = [];
+  let cur = [];
+  let bytes = 0;
+  for (const s of shas) {
+    const n = sizes.get(s) ?? 0;
+    if (cur.length && (bytes + n > maxBytes || cur.length >= 2e4)) {
+      out.push(cur);
+      cur = [];
+      bytes = 0;
+    }
+    cur.push(s);
+    bytes += n;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+function packInto(root, shas, sink) {
+  return runGit(root, ["pack-objects", "--stdout", "-q"], { input: shas.join("\n") + "\n", stdout: sink });
+}
+function receivePack(root, source) {
+  return runGit(root, ["index-pack", "--stdin"], { stdin: source });
+}
+function runGit(root, args, io) {
+  return new Promise((res, rej) => {
+    const child = spawn("git", args, { cwd: root, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+    let err = "";
+    child.stderr.on("data", (c) => err = (err + c.toString()).slice(-4e3));
+    if (io.stdout) child.stdout.pipe(io.stdout, { end: true });
+    else child.stdout.resume();
+    child.on("error", rej);
+    child.on("close", (code) => code === 0 ? res() : rej(new Error(`git ${args[0]}: ${err.trim() || `exit ${code}`}`)));
+    child.stdin.on("error", () => {
+    });
+    if (io.stdin) io.stdin.pipe(child.stdin);
+    else child.stdin.end(io.input ?? "");
+  });
+}
+async function composeTree(root, base, changes) {
+  if (!changes.length) return { tree: base, commit: await commitFor(root, base) };
+  return withTempIndex(async (env) => {
+    await git(root, ["read-tree", base], env);
+    const lines = changes.map((c) => isAbsent(c.to) ? `0 ${ZERO}	${c.path}` : `${c.to.mode} ${c.to.sha}	${c.path}`);
+    await git(root, ["update-index", "-z", "--index-info"], env, lines.join("\0") + "\0");
+    const tree = await git(root, ["write-tree", "--missing-ok"], env);
+    return { tree, commit: await commitFor(root, tree) };
+  });
+}
+function inside(root, p) {
+  const abs = resolve(root, p);
+  const r = resolve(root);
+  if (abs === r || !abs.startsWith(r + sep)) throw new Error(`refusing a path outside the worktree: ${p}`);
+  return abs;
+}
+async function writeWorktree(root, writes, deletes) {
+  for (const p of deletes) await rm(inside(root, p), { force: true });
+  if (!writes.length) return;
+  for (const w of writes) inside(root, w.path);
+  await withTempIndex(async (env) => {
+    await git(root, ["update-index", "-z", "--index-info"], env, writes.map((w) => `${w.mode} ${w.sha}	${w.path}`).join("\0") + "\0");
+    await git(root, ["checkout-index", "-f", "-z", "--stdin"], env, writes.map((w) => w.path).join("\0") + "\0");
+  });
+}
+async function writeCopy(root, sha, path, to) {
+  const target = inside(root, to);
+  const bytes = await new Promise((res, rej) => {
+    const child = spawn("git", ["cat-file", "--filters", `--path=${path}`, sha], { cwd: root, windowsHide: true });
+    const chunks = [];
+    let err = "";
+    child.stdout.on("data", (c) => chunks.push(c));
+    child.stderr.on("data", (c) => err += c.toString());
+    child.on("error", rej);
+    child.on("close", (code) => code === 0 ? res(Buffer.concat(chunks)) : rej(new Error(`git cat-file: ${err.trim()}`)));
+  });
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, bytes);
+}
+async function repoIds(root) {
+  const common = resolve(root, await git(root, ["rev-parse", "--git-common-dir"]));
+  const name = safeId(basename(common) === ".git" ? basename(dirname(common)) : basename(common).replace(/\.git$/, ""));
+  const key = createHash("sha256").update(common.replace(/\\/g, "/").toLowerCase()).digest("hex").slice(0, 12);
+  const bool = async (k) => await git(root, ["config", "--bool", k]).catch(() => "") !== "false";
+  return { repoKey: `${name.slice(0, 40)}-${key}`, repoName: repoName(root), modes: await bool("core.filemode") && await bool("core.symlinks") };
+}
+function repoName(root) {
+  return safeId(basename(resolve(root))).slice(0, 64);
+}
+function safeId(s) {
+  return s.replace(/[^A-Za-z0-9_-]/g, "_").replace(/^_+$/, "") || "repo";
+}
+function remotePaths(root, instance, chatId, repoName2, repoKey) {
+  const work = chatWorktreePath(root, instance, chatId, repoName2);
+  const repo = repoPath(root, instance, repoKey);
+  return { work, repo, alternates: posix.relative(posix.join(work, ".git", "objects"), posix.join(repo, "objects")) };
+}
+const PRELUDE = [
+  "export GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1",
+  "export GIT_AUTHOR_NAME=Dispatch GIT_AUTHOR_EMAIL=dispatch@localhost GIT_COMMITTER_NAME=Dispatch GIT_COMMITTER_EMAIL=dispatch@localhost"
+].join("\n");
+async function checkoutStatus(remote, p, baseTree) {
+  const script = [
+    PRELUDE,
+    `W=${sq(p.work)}; B=${sq(baseTree ?? "")}`,
+    `cd "$W" 2>/dev/null && [ -d .git ] || { echo missing; exit 0; }`,
+    `I=.git/dispatch-status.$$`,
+    `cp .git/index "$I" 2>/dev/null || rm -f "$I"`,
+    `if ! GIT_INDEX_FILE=$I git add -A >/dev/null; then rm -f "$I"; exit 3; fi`,
+    `T=$(GIT_INDEX_FILE=$I git write-tree) || { rm -f "$I"; exit 3; }`,
+    `rm -f "$I"`,
+    `echo "tree $T"`,
+    `echo "head $(git rev-parse -q --verify HEAD || true)"`,
+    `echo "base $(git rev-parse -q --verify refs/dispatch/base || true) $(git rev-parse -q --verify 'refs/dispatch/base^{tree}' 2>/dev/null || true)"`,
+    `if [ -n "$B" ] && [ "$T" != "$B" ]; then`,
+    `  git cat-file -e "$B^{tree}" 2>/dev/null || { echo nobase; exit 0; }`,
+    `  echo sizes`,
+    `  git diff-tree -r --no-renames "$B" "$T" | awk '$2 != "160000" && $4 != "0000000000000000000000000000000000000000" {print $4}' | sort -u | git cat-file --batch-check='%(objectname) %(objectsize)'`,
+    `  echo diff`,
+    `  git diff-tree -r -z --no-renames "$B" "$T"`,
+    `fi`
+  ].join("\n");
+  const r = await remote.run(script, { timeoutMs: 5 * 6e4 });
+  if (r.code !== 0) throw new Error(`reading the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+  const out = r.stdout;
+  if (/^missing\s*$/.test(out)) return { state: "missing" };
+  const tree = out.match(/^tree ([0-9a-f]{40})$/m)?.[1];
+  if (!tree) throw new Error(`reading the checkout failed: unexpected answer ${JSON.stringify(out.slice(0, 120))}`);
+  const head = out.match(/^head ([0-9a-f]{40})$/m)?.[1];
+  const b = out.match(/^base ([0-9a-f]{40}) ([0-9a-f]{40})$/m);
+  const known = { state: "ok", tree, ...head ? { head } : {}, ...b ? { base: { commit: b[1], tree: b[2] } } : {} };
+  const sizes = /* @__PURE__ */ new Map();
+  if (/^nobase$/m.test(out)) return { ...known, sizes };
+  const at = out.indexOf("\ndiff\n");
+  if (at < 0) return { ...known, changes: [], sizes };
+  for (const m of out.slice(0, at).matchAll(/^([0-9a-f]{40}) (\d+)$/gm)) sizes.set(m[1], Number(m[2]));
+  return { ...known, changes: parseRawDiff(out.slice(at + "\ndiff\n".length)), sizes };
+}
+async function initCheckout(remote, p) {
+  const script = [
+    PRELUDE,
+    "set -e",
+    `R=${sq(p.repo)}; W=${sq(p.work)}; A=${sq(p.alternates)}`,
+    `if [ ! -d "$R/objects" ]; then mkdir -p "$R"; git init -q --bare "$R"; git --git-dir="$R" config gc.auto 0; fi`,
+    `mkdir -p "$W"; cd "$W"`,
+    `if [ ! -d .git ]; then git init -q .; git config core.autocrlf false; git config gc.auto 0; fi`,
+    `mkdir -p .git/objects/info`,
+    `printf '%s\\n' "$A" > .git/objects/info/alternates`
+  ].join("\n");
+  const r = await remote.run(script, { timeoutMs: 6e4 });
+  if (r.code !== 0) throw new Error(`setting up the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+async function missingObjects(remote, p, shas) {
+  if (!shas.length) return [];
+  const script = [`cd ${sq(p.work)} || exit 1`, `git cat-file --batch-check | awk '$2 == "missing" {print $1}'`].join("\n");
+  const r = await remote.run(script, { input: shas.join("\n") + "\n", timeoutMs: 5 * 6e4 });
+  if (r.code !== 0) throw new Error(`asking the machine what it has failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+  return r.stdout.split("\n").filter((l) => /^[0-9a-f]{40}$/.test(l));
+}
+async function receiveObjects(remote, p, fill, signal) {
+  const r = await remote.stream(`git --git-dir=${sq(p.repo)} index-pack --stdin >/dev/null`, { input: fill }, signal);
+  if (r.code !== 0) throw new Error(`the machine could not take the files: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+async function sendCommit(remote, p, commit, sink, signal) {
+  const r = await remote.stream(`cd ${sq(p.work)} && echo ${sq(commit)} | git pack-objects --revs --stdout -q`, { output: sink }, signal);
+  if (r.code !== 0) throw new Error(`fetching the last synced snapshot failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+async function sendObjects(remote, p, shas, sink, signal) {
+  const list2 = shas.join("\n") + "\n";
+  const r = await remote.stream(
+    `cd ${sq(p.work)} && git pack-objects --stdout -q`,
+    {
+      input: async (s) => {
+        await new Promise((res, rej) => s.end(list2, (err) => err ? rej(err) : res()));
+      },
+      output: sink
+    },
+    signal
+  );
+  if (r.code !== 0) throw new Error(`fetching the machine's changes failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+async function checkoutCommit(remote, p, chatId, commit) {
+  const script = [
+    PRELUDE,
+    `R=${sq(p.repo)}; C=${sq(commit)}; cd ${sq(p.work)} || exit 1`,
+    `git --git-dir="$R" update-ref ${sq(`refs/dispatch/chats/${chatId}`)} "$C" || exit 1`,
+    `if git rev-parse -q --verify HEAD >/dev/null; then`,
+    `  git update-index -q --refresh >/dev/null 2>&1`,
+    `  git read-tree -m -u HEAD "$C" || exit 4`,
+    `  git update-ref --no-deref HEAD "$C" || exit 1`,
+    `else`,
+    `  git checkout -q --force --detach "$C" || exit 1`,
+    `fi`,
+    `git update-ref refs/dispatch/base "$C"`
+  ].join("\n");
+  const r = await remote.run(script, { timeoutMs: 10 * 6e4 });
+  if (r.code === 4) {
+    const file = r.stderr.match(/Entry '([^']+)'/)?.[1];
+    throw new Error(
+      `${file ? `\`${file}\`` : "a file"} changed on the machine while your files were being sent, so nothing was overwritten. Run the command again: the change comes back first.`
+    );
+  }
+  if (r.code !== 0) throw new Error(`checking your files out on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+async function setBase(remote, p, chatId, commit) {
+  const script = [
+    PRELUDE,
+    `R=${sq(p.repo)}; C=${sq(commit)}; cd ${sq(p.work)} || exit 1`,
+    `git --git-dir="$R" update-ref ${sq(`refs/dispatch/chats/${chatId}`)} "$C" || exit 1`,
+    `if git rev-parse -q --verify HEAD >/dev/null; then git read-tree -m HEAD "$C" || git read-tree "$C" || exit 1; else git read-tree "$C" || exit 1; fi`,
+    `git update-ref --no-deref HEAD "$C" || exit 1`,
+    `git update-ref refs/dispatch/base "$C"`,
+    `git update-index -q --refresh >/dev/null 2>&1 || true`
+  ].join("\n");
+  const r = await remote.run(script, { timeoutMs: 10 * 6e4 });
+  if (r.code !== 0) throw new Error(`recording the sync on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+const DEFAULT_CAP_BYTES = 50 * 1024 * 1024;
+const BATCH_BYTES = 32 * 1024 * 1024;
+const LIST_MAX = 15;
+class ChatSync {
+  constructor(d) {
+    this.d = d;
+    this.rec = empty(d.root);
+    this.cap = d.capBytes ?? DEFAULT_CAP_BYTES;
+  }
+  rec;
+  loaded = false;
+  ids;
+  paths;
+  chain = Promise.resolve();
+  holder;
+  cap;
+  /** The local worktree this keeps in step. */
+  get root() {
+    return this.d.root;
+  }
+  async beforeRun(info) {
+    return this.serial(async () => {
+      const h = this.holder;
+      if (h && h.terminal !== info.terminal && h.runId !== info.runId) {
+        return {
+          refuse: `Not run: terminal "${h.terminal}" is still running \`${short(h.command)}\` in this chat's checkout on ${this.d.label}, and syncing your files now would change them under it. Wait for it to finish (or stop it), or run this in "${h.terminal}".`
+        };
+      }
+      const notices = [];
+      try {
+        await this.prepare();
+        await this.pullBack(notices, void 0, info.signal);
+        await this.resolved(notices);
+        if (this.rec.conflicts.length) return { refuse: `Not run: ${this.conflictText()}`, notices };
+        await this.push(notices, info.signal);
+      } catch (err) {
+        return {
+          refuse: `Not run: your files could not be synced to ${this.d.label} (${errText(err)}). The command would have run against stale files.`,
+          notices
+        };
+      }
+      if (!info.background) this.holder = { runId: info.runId, terminal: info.terminal, command: info.command };
+      return notices.length ? { notices } : {};
+    });
+  }
+  async afterRun(info) {
+    if (this.holder?.runId === info.runId) this.holder = void 0;
+    return this.serial(async () => {
+      const notices = [];
+      try {
+        await this.prepare();
+        if (!this.rec.base) return {};
+        await this.pullBack(notices, info.command, info.signal);
+      } catch (err) {
+        notices.push(
+          `[${this.d.label}] Could not check for changes the command made there (${errText(err)}). They are brought back before the next command.`
+        );
+      }
+      if (this.rec.conflicts.length) notices.push(`The next command won't run until this is settled: ${this.conflictText()}`);
+      return notices.length ? { notices } : {};
+    });
+  }
+  /** Run `fn` after every earlier sync of this chat. */
+  serial(fn) {
+    const run = this.chain.then(fn);
+    this.chain = run.catch(() => {
+    });
+    return run;
+  }
+  async prepare() {
+    if (!this.loaded) {
+      const saved = await this.d.kv?.get(this.key()).catch(() => void 0);
+      if (saved && saved.v === 1 && saved.root === this.d.root) this.rec = { ...empty(this.d.root), ...saved };
+      this.loaded = true;
+    }
+    this.ids ??= await repoIds(this.d.root);
+    const root = await this.d.hostRoot();
+    this.paths = remotePaths(root, this.d.instanceId, this.d.chatId, this.ids.repoName, this.ids.repoKey);
+    return this.paths;
+  }
+  /**
+   * Bring back what the machine changed since the base. `by` names the
+   * command, for the notice (absent before a command: something running in
+   * the background made the change).
+   */
+  async pullBack(notices, by, signal) {
+    const p = this.paths;
+    let base = this.rec.base;
+    let st = await checkoutStatus(this.d.remote, p, base?.tree);
+    if (st.state === "missing") {
+      if (!base) return;
+      this.rec.base = void 0;
+      this.rec.conflicts = [];
+      notices.push(`[${this.d.label}] This chat's checkout there was gone; it is set up again from your files.`);
+      await this.save();
+      return;
+    }
+    if (!base) {
+      if (!st.base) return;
+      base = this.rec.base = st.base;
+      st = await checkoutStatus(this.d.remote, p, base.tree);
+      if (st.state === "missing") return;
+    }
+    if (st.tree === base.tree) return;
+    if (!st.changes) {
+      await this.sendObjects(await objectsFor(this.d.root, base.commit, base.tree), signal);
+      st = await checkoutStatus(this.d.remote, p, base.tree);
+      if (st.state === "missing" || !st.changes) throw new Error("the machine's checkout has lost track of the last sync");
+    }
+    const host = st.changes.filter((c) => this.rec.skippedHost[c.path] !== c.to.sha);
+    if (!host.length) return;
+    await this.ensureLocal(base.commit, signal);
+    const snap = await snapshotWorktree(this.d.root, this.snapOpts());
+    const local = new Map((await diffTrees(this.d.root, base.tree, snap.tree)).map((c) => [c.path, c.to]));
+    const accept = [];
+    const writes = [];
+    const deletes = [];
+    const copies = [];
+    const said = { back: [], kept: [], big: [], sub: [] };
+    for (const c of host) {
+      const mine = local.get(c.path) ?? c.from;
+      if (c.to.mode === "160000" || c.from.mode === "160000") {
+        said.sub.push(c.path);
+        continue;
+      }
+      if (sameEntry(mine, c.to)) {
+        accept.push(c);
+        continue;
+      }
+      if (sameEntry(mine, c.from)) {
+        if (isAbsent(c.from) && (st.sizes.get(c.to.sha) ?? 0) > this.cap) {
+          this.rec.skippedHost[c.path] = c.to.sha;
+          said.big.push(`${c.path} (${mb(st.sizes.get(c.to.sha) ?? 0)})`);
+          continue;
+        }
+        accept.push(c);
+        if (isAbsent(c.to)) deletes.push(c.path);
+        else if (c.to.sha !== mine.sha || this.ids.modes) writes.push({ path: c.path, ...c.to });
+        this.noteMode(c);
+        said.back.push(`${tag(c)} ${c.path}`);
+        continue;
+      }
+      if (isAbsent(c.to)) {
+        accept.push(c);
+        said.kept.push(c.path);
+        continue;
+      }
+      if (mine.sha === c.to.sha || c.from.sha === c.to.sha) {
+        accept.push(c);
+        this.noteMode(c);
+        continue;
+      }
+      accept.push(c);
+      const copy = `${c.path}.from-${this.d.slug}`;
+      copies.push({ path: c.path, sha: c.to.sha, copy });
+      this.rec.conflicts = this.rec.conflicts.filter((x) => x.path !== c.path);
+      this.rec.conflicts.push({ path: c.path, copy, ...by ? { by } : {} });
+    }
+    const need = [.../* @__PURE__ */ new Set([...writes.map((w) => w.sha), ...copies.map((c) => c.sha)])];
+    if (need.length) await this.fetch(need, signal);
+    await writeWorktree(this.d.root, writes, deletes);
+    for (const c of copies) await writeCopy(this.d.root, c.sha, c.path, c.copy);
+    for (const pth of deletes) delete this.rec.overlay[pth];
+    const next = await composeTree(this.d.root, base.tree, accept);
+    if (next.tree !== base.tree) {
+      await this.sendObjects(await objectsFor(this.d.root, next.commit, next.tree, base.tree), signal);
+      await setBase(this.d.remote, p, this.d.chatId, next.commit);
+      this.rec.base = next;
+    }
+    await this.save();
+    const from = by ? ` by \`${short(by)}\`` : " (by something still running there)";
+    if (said.back.length) notices.push(`[${this.d.label}] Brought back the changes made there${from}: ${list(said.back)}`);
+    if (said.kept.length) notices.push(`[${this.d.label}] Deleted there${from} but changed here, so your version was kept and goes back: ${list(said.kept)}`);
+    if (said.big.length) notices.push(`[${this.d.label}] New files made there are too big to bring back (over ${mb(this.cap)}), and stay only there: ${list(said.big)}`);
+    if (said.sub.length) notices.push(`[${this.d.label}] Submodules aren't synced; changes there to ${list(said.sub)} stay there.`);
+    if (st.head && st.head !== base.commit && st.head !== this.rec.base?.commit) {
+      notices.push(
+        `[${this.d.label}] Something there moved the checkout's HEAD (a commit or checkout there). Its files came back as changes; commit on this computer — the machine's checkout follows yours.`
+      );
+    }
+  }
+  /** Conflicts whose copy is gone are settled: what the local file says now wins. */
+  async resolved(notices) {
+    if (!this.rec.conflicts.length) return;
+    const left = [];
+    const done = [];
+    for (const c of this.rec.conflicts) {
+      if (await exists(inside(this.d.root, c.copy))) left.push(c);
+      else done.push(c.path);
+    }
+    if (!done.length) return;
+    this.rec.conflicts = left;
+    await this.save();
+    notices.push(`[${this.d.label}] Conflict settled, your version goes there: ${list(done)}`);
+  }
+  conflictText() {
+    const items = this.rec.conflicts.map((c) => `\`${c.path}\` (theirs: \`${c.copy}\`${c.by ? `, changed by \`${short(c.by)}\`` : ""})`);
+    return `a conflict with ${this.d.label}. These files were changed both there and here since the last sync: ${list(items)}. The machine's version of each is saved beside yours. Merge what you want into your file, then delete the copy (to keep the machine's version, move the copy over your file). Once every copy is gone, your files go there and commands run again.`;
+  }
+  async push(notices, signal) {
+    const p = this.paths;
+    const snap = await snapshotWorktree(this.d.root, this.snapOpts());
+    const big = snap.tooBig.filter((b) => this.rec.skippedLocal[b.path] !== b.size);
+    this.rec.skippedLocal = Object.fromEntries(snap.tooBig.map((b) => [b.path, b.size]));
+    if (big.length) {
+      notices.push(
+        `[${this.d.label}] Not sent, over ${mb(this.cap)} and untracked: ${list(big.map((b) => `${b.path} (${mb(b.size)})`))}. Commands there won't see them.`
+      );
+    }
+    const base = this.rec.base;
+    if (base && snap.tree === base.tree) {
+      if (big.length) await this.save();
+      return;
+    }
+    const first = !base;
+    const started = Date.now();
+    if (first) await initCheckout(this.d.remote, p);
+    const since = base && await hasObject(this.d.root, base.tree) ? base.tree : void 0;
+    const sent = await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, since), signal);
+    if (signal.aborted) throw new Error("cancelled");
+    await checkoutCommit(this.d.remote, p, this.d.chatId, snap.commit);
+    this.rec.base = { commit: snap.commit, tree: snap.tree };
+    await this.save();
+    if (first) {
+      notices.push(
+        `[${this.d.label}] Set up this chat's files there (${p.work}): ${sent.objects} objects, ${mb(sent.bytes)}, in ${((Date.now() - started) / 1e3).toFixed(1)} s.`
+      );
+    }
+  }
+  /** Send the machine whichever of `shas` it lacks, in batches it keeps. */
+  async sendObjects(shas, signal) {
+    const p = this.paths;
+    const missing = await missingObjects(this.d.remote, p, shas);
+    if (!missing.length) return { objects: 0, bytes: 0 };
+    const sizes = await objectSizes(this.d.root, missing);
+    let bytes = 0;
+    for (const batch of batches(missing, sizes, this.d.batchBytes ?? BATCH_BYTES)) {
+      if (signal.aborted) throw new Error("cancelled");
+      await receiveObjects(this.d.remote, p, (sink) => packInto(this.d.root, batch, sink), signal);
+      for (const s of batch) bytes += sizes.get(s) ?? 0;
+    }
+    return { objects: missing.length, bytes };
+  }
+  /** Fetch blobs the machine made into the local repository. */
+  async fetch(shas, signal) {
+    const pipe = new PassThrough();
+    const taking = receivePack(this.d.root, pipe);
+    taking.catch(() => {
+    });
+    await sendObjects(this.d.remote, this.paths, shas, pipe, signal);
+    await taking;
+  }
+  /** The base's objects, here. They are normally (each base began here); a long-unused chat's may have been gc'd. */
+  async ensureLocal(commit, signal) {
+    if (await hasObject(this.d.root, commit)) return;
+    const pipe = new PassThrough();
+    const taking = receivePack(this.d.root, pipe);
+    taking.catch(() => {
+    });
+    await sendCommit(this.d.remote, this.paths, commit, pipe, signal);
+    await taking;
+  }
+  noteMode(c) {
+    if (this.ids.modes || isAbsent(c.to)) return;
+    if (c.to.mode !== (isAbsent(c.from) ? "100644" : c.from.mode)) this.rec.overlay[c.path] = c.to.mode;
+  }
+  snapOpts() {
+    return { capBytes: this.cap, exclude: this.rec.conflicts.map((c) => c.copy), overlay: this.rec.overlay };
+  }
+  key() {
+    return `sync:${this.d.chatId}`;
+  }
+  async save() {
+    try {
+      await this.d.kv?.set(this.key(), this.rec);
+    } catch (err) {
+      this.d.log.warn(`remote-host ${this.d.slug}: could not save chat ${this.d.chatId}'s sync state: ${errText(err)}`);
+    }
+  }
+}
+function empty(root) {
+  return { v: 1, root, overlay: {}, conflicts: [], skippedHost: {}, skippedLocal: {} };
+}
+function tag(c) {
+  if (isAbsent(c.from)) return "A";
+  if (isAbsent(c.to)) return "D";
+  return c.from.sha === c.to.sha ? "mode" : "M";
+}
+function list(items) {
+  const shown = items.slice(0, LIST_MAX).join(", ");
+  return items.length > LIST_MAX ? `${shown}, and ${items.length - LIST_MAX} more` : shown;
+}
+function short(cmd) {
+  const one = cmd.replace(/\s+/g, " ").trim();
+  return one.length > 80 ? `${one.slice(0, 77)}...` : one;
+}
+function mb(n) {
+  return n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(n >= 100 * 1024 ** 2 ? 0 : 1)} MB` : `${Math.ceil(n / 1024)} KB`;
+}
+async function exists(p) {
+  return access(p).then(
+    () => true,
+    () => false
+  );
+}
+function linkRemote(link) {
+  return {
+    run(script, opts = {}) {
+      const input = opts.input;
+      return link.exec(shCommand(script), {
+        ...opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {},
+        ...input !== void 0 ? {
+          stdin: async (ch) => {
+            await new Promise((res, rej) => ch.end(input, (err) => err ? rej(err) : res()));
+          }
+        } : {}
+      });
+    },
+    async stream(script, io, signal) {
+      const ch = await link.openSession(shCommand(script), signal);
+      return new Promise((resolve2) => {
+        let stderr = "";
+        let code = null;
+        const onAbort = () => ch.close();
+        signal?.addEventListener("abort", onAbort, { once: true });
+        ch.stderr.on("data", (d) => stderr = (stderr + d.toString("utf8")).slice(-4e3));
+        ch.on("exit", (c) => code = typeof c === "number" ? c : null);
+        ch.on("error", () => {
+        });
+        ch.on("close", () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve2({ code, stderr });
+        });
+        if (io.output) ch.pipe(io.output, { end: true });
+        else ch.resume();
+        if (io.input) {
+          io.input(ch).catch((err) => {
+            stderr += `
+${err instanceof Error ? err.message : String(err)}`;
+            ch.close();
+          });
+        } else ch.end();
+      });
+    }
+  };
+}
 class HostBackend {
   constructor(id, deps) {
     this.id = id;
@@ -22103,13 +22797,20 @@ class HostBackend {
   fallback = "refuse";
   /** The first connect to a machine may push Node's ~50 MB runtime before the shell starts. */
   spawnTimeoutMs = 5 * 6e4;
+  /** A chat's first sync sends its whole worktree; it resumes if cut short, but give it room. */
+  runHookTimeoutMs = 30 * 6e4;
   label;
   /** The live shell per chat + terminal name, so `beforeRun` can mark its run in the journal. */
   shells = /* @__PURE__ */ new Map();
+  /** Each chat's checkout on the machine, by chat. */
+  syncs = /* @__PURE__ */ new Map();
+  remote;
   async spawn(info) {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
-    const cwd = chatDir(linked.paths, this.deps.instanceId, chatId);
+    const root = info.worktreePath ?? info.repoPath;
+    const cwd = root ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, info.cwd)) : chatDir(linked.paths, this.deps.instanceId, chatId);
+    if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
     const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 3e4 });
     if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
     const sid = newSid();
@@ -22144,8 +22845,32 @@ class HostBackend {
     for (const sh of shells) sh.kill();
     if (shells.length) await new Promise((r) => setTimeout(r, waitMs).unref?.());
   }
-  beforeRun(info) {
-    this.shells.get(shellKey(info.chatId, info.terminal))?.runBegin(info.runId, info.background);
+  /** Sync the chat's files there (fail closed), then mark the run in the session's journal. */
+  async beforeRun(info) {
+    const sync = this.syncs.get(info.chatId);
+    const r = sync ? await sync.beforeRun(info) : {};
+    if (!r.refuse) this.shells.get(shellKey(info.chatId, info.terminal))?.runBegin(info.runId, info.background);
+    return r;
+  }
+  /** Bring back what the command changed there. */
+  async afterRun(info) {
+    return await this.syncs.get(info.chatId)?.afterRun(info) ?? {};
+  }
+  chatSync(chatId, root) {
+    this.remote ??= linkRemote(this.deps.link);
+    const host = this.deps.host();
+    return new ChatSync({
+      chatId,
+      root,
+      label: host.label,
+      slug: host.slug,
+      instanceId: this.deps.instanceId,
+      hostRoot: async () => (await this.deps.link.ready()).paths.root,
+      remote: this.remote,
+      log: this.deps.log,
+      ...this.deps.kv ? { kv: this.deps.kv } : {},
+      ...this.deps.sync
+    });
   }
   agentNote(info) {
     const host = this.deps.host();
@@ -22155,14 +22880,20 @@ class HostBackend {
     return [
       `- This terminal runs on ${host.label}${describe(probe)}, over SSH as \`${host.user}\`, under dispatch-host. A dropped connection pauses the command and picks it up again; it is not restarted.`,
       `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, with PATH and locale from the login shell. On it: ${tools(probe)}.`,
-      `- Your files are NOT synced to this machine yet. The shell starts in an empty directory of this chat's own, ${where}. Clone or copy what you need there, and copy results back.`,
-      `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer.`,
+      `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB aren't sent.`,
+      `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command. Outside a git repository nothing is synced.`,
+      `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you started (Ctrl-C the terminal, \`kill %1\`).`
     ].join("\n");
   }
 }
 function chatDir(paths, instanceId, chatId) {
   return posix.join(instanceLayout(paths.root, instanceId).chatsDir, assertId("chat", chatId));
+}
+function within(root, cwd) {
+  const rel = relative(root, cwd);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return "";
+  return rel.split(/[\\/]+/).join("/");
 }
 function sessionCommand(paths, s) {
   return agentCommand(paths, [
@@ -22204,9 +22935,9 @@ function tools(probe) {
     const ver = token(v?.replace(/^\D*(?=\d)/, ""));
     return v ? `${name}${ver ? ` ${ver}` : ""}` : `no ${name}`;
   };
-  const list = [has("git", t.git), has("node", t.node), has("pnpm", t.pnpm)];
-  if (probe.platform === "darwin") list.push(has("Xcode", t.xcodebuild));
-  return list.join(", ");
+  const list2 = [has("git", t.git), has("node", t.node), has("pnpm", t.pnpm)];
+  if (probe.platform === "darwin") list2.push(has("Xcode", t.xcodebuild));
+  return list2.join(", ");
 }
 class HostRegistry {
   constructor(deps) {
@@ -22271,6 +23002,7 @@ class HostRegistry {
       link: entry.link,
       instanceId: this.deps.instanceId,
       log: ctx.log,
+      ...ctx.kv ? { kv: ctx.kv } : {},
       ...this.deps.shell ? { shell: this.deps.shell } : {}
     });
     try {
@@ -22348,10 +23080,10 @@ function defineRoutes(deps) {
         next.label = label;
       }
       if (b.addresses !== void 0) {
-        const list = Array.isArray(b.addresses) ? [...new Set(b.addresses.map((a) => String(a).trim()).filter(Boolean))] : [];
-        if (!list.length) throw new UserError("addresses must list at least one name or address");
-        for (const a of list) if (!validAddress(a)) throw new UserError(`not a host name or address: ${a}`);
-        next.addresses = list;
+        const list2 = Array.isArray(b.addresses) ? [...new Set(b.addresses.map((a) => String(a).trim()).filter(Boolean))] : [];
+        if (!list2.length) throw new UserError("addresses must list at least one name or address");
+        for (const a of list2) if (!validAddress(a)) throw new UserError(`not a host name or address: ${a}`);
+        next.addresses = list2;
       }
       await deps.saveHosts(deps.hosts().map((x) => x.slug === host.slug ? next : x));
       registry.sync(deps.hosts());

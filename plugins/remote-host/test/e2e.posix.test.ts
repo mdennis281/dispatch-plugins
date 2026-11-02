@@ -6,8 +6,10 @@
  *
  * Skipped on Windows; CI runs it on Linux and macOS.
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { TerminalBackendHandle, TerminalExitReason } from "@dispatch/plugin-sdk";
 import { createTestContext, type TestContext } from "@dispatch/plugin-sdk/testing";
@@ -177,6 +179,39 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     }
     // The "machine" is this one, so the background job can be looked for.
     await until(() => !alive(pid), 10_000, `the background sleep (pid ${pid}) to end`);
+  });
+
+  it("syncs the chat's worktree there, starts in the same place, and brings a command's changes back", { timeout: 90_000 }, async () => {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "rh-e2e-repo-")));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+    try {
+      git("init", "-q");
+      git("config", "user.name", "t");
+      git("config", "user.email", "t@t");
+      mkdirSync(join(repo, "src"));
+      writeFileSync(join(repo, "a.txt"), "one\n");
+      writeFileSync(join(repo, "src", "b.ts"), "export const b = 1;\n");
+      git("add", "-A");
+      git("commit", "-qm", "init");
+      writeFileSync(join(repo, "uncommitted.txt"), "not committed yet\n");
+
+      const h = await t.terminals.spawn(ID, { chatId: "chat-sync", name: "main", cwd: join(repo, "src"), worktreePath: repo });
+      const w = watch(h);
+      expect(h.cwd).toBe(`${home}/.dispatch-host/${INSTANCE}/chats/chat-sync/${basename(repo)}/src`);
+      const b = await t.terminals.beforeRun(ID, { chatId: "chat-sync", terminal: "main", command: "edit things", runId: "sync-1" });
+      expect(b.ran).toBe(true);
+      expect(b.notices.join("\n")).toMatch(/Set up this chat's files there/);
+      h.stdin.write("cat ../uncommitted.txt; echo changed > ../a.txt; echo made-there > gen.txt; echo step-done\n");
+      await until(() => w.out.includes("step-done"), 20_000, "step-done");
+      expect(w.out).toContain("not committed yet");
+      const a = await t.terminals.afterRun(ID, { chatId: "chat-sync", terminal: "main", command: "edit things", runId: "sync-1" });
+      expect(a.notices.join("\n")).toMatch(/Brought back the changes made there by `edit things`/);
+      expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("changed\n");
+      expect(readFileSync(join(repo, "src", "gen.txt"), "utf8")).toBe("made-there\n");
+      h.kill();
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 
   it("runs more shells than one connection has sessions for, and still answers", { timeout: 90_000 }, async () => {

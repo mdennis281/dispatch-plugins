@@ -2,7 +2,7 @@
   "name": "@dispatch-plugins/remote-host",
   "private": true,
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Run Dispatch chat terminals on your own machines over SSH, under dispatch-host.",
   "scripts": {
     "build": "vite build -c vite.server.config.mjs",

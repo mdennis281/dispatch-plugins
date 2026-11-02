@@ -228,7 +228,7 @@ export class HostLink {
    * at once, the rest wait their turn: a burst (a dozen spawns each making
    * its directory, kills after a drop) must not hit sshd's `MaxSessions`.
    */
-  async exec(command: string, opts: { timeoutMs?: number } = {}): Promise<ExecResult> {
+  async exec(command: string, opts: { timeoutMs?: number; stdin?: (ch: ClientChannel) => Promise<void> } = {}): Promise<ExecResult> {
     await this.takeExecSlot();
     try {
       const { conn } = await this.ready();
