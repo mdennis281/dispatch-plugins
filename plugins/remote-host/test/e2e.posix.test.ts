@@ -208,6 +208,22 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       expect(a.notices.join("\n")).toMatch(/Brought back the changes made there by `edit things`/);
       expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("changed\n");
       expect(readFileSync(join(repo, "src", "gen.txt"), "utf8")).toBe("made-there\n");
+
+      // A command core stopped waiting for holds the checkout, even against
+      // its own terminal, until the shell there says it ended.
+      expect((await t.terminals.beforeRun(ID, { chatId: "chat-sync", terminal: "main", command: "slow", runId: "sync-2" })).ran).toBe(true);
+      h.stdin.write("sleep 5; echo 'CMTERMSENTINEL_e2e|0|True|'\"$PWD\"\n");
+      await t.terminals.afterRun(ID, { chatId: "chat-sync", terminal: "main", command: "slow", runId: "sync-2", outcome: "timed-out" });
+      const held = await t.terminals.beforeRun(ID, { chatId: "chat-sync", terminal: "main", command: "next", runId: "sync-3" });
+      expect(held.ran).toBe(false);
+      expect(held.refusal).toMatch(/`slow` timed out and may still be running/);
+      await until(() => w.out.includes("CMTERMSENTINEL_e2e"), 20_000, "the slow command's end");
+      let next = held;
+      for (let i = 0; i < 50 && !next.ran; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        next = await t.terminals.beforeRun(ID, { chatId: "chat-sync", terminal: "main", command: "next", runId: `sync-4-${i}` });
+      }
+      expect(next.ran).toBe(true);
       h.kill();
     } finally {
       rmSync(repo, { recursive: true, force: true });

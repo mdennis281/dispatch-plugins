@@ -111,6 +111,29 @@ async function withTempIndex<T>(fn: (env: { GIT_INDEX_FILE: string }) => Promise
   }
 }
 
+/**
+ * In a temp index, take assume-unchanged and skip-worktree off each entry
+ * whose file is on disk (of `only`, when given). With them `add` trusts the
+ * entry, so a local edit to a file kept out of commits that way would read
+ * as unchanged, and be overwritten. A skip-worktree entry with no file (a
+ * sparse checkout) keeps its bit, so it doesn't read as deleted.
+ */
+async function unkeep(root: string, env: { GIT_INDEX_FILE: string }, only?: ReadonlySet<string>): Promise<void> {
+  const assumed: string[] = [];
+  const skipped: string[] = [];
+  for (const item of (await git(root, ["ls-files", "-v", "-z"], env)).split("\0")) {
+    // `<tag> <path>`: lower case is assume-unchanged, S is skip-worktree.
+    const tag = item[0];
+    if (!tag || item[1] !== " " || (tag === tag.toUpperCase() && tag !== "S")) continue;
+    const p = item.slice(2);
+    if ((only && !only.has(p)) || (await onDisk(root, p)) !== "file") continue;
+    if (tag !== tag.toUpperCase()) assumed.push(p);
+    if (tag.toUpperCase() === "S") skipped.push(p);
+  }
+  if (assumed.length) await git(root, ["update-index", "--no-assume-unchanged", "-z", "--stdin"], env, assumed.join("\0") + "\0");
+  if (skipped.length) await git(root, ["update-index", "--no-skip-worktree", "-z", "--stdin"], env, skipped.join("\0") + "\0");
+}
+
 /** The commit a tree's snapshot is: the same tree always gives the same sha. */
 export function commitFor(root: string, tree: string): Promise<string> {
   return git(root, ["commit-tree", tree, "-m", SNAPSHOT_MESSAGE], SNAPSHOT_ENV);
@@ -120,6 +143,7 @@ export async function snapshotWorktree(root: string, opts: SnapshotOptions): Pro
   return withTempIndex(async (env) => {
     // mtime and all: git's racy check needs it (`copyIndex`). No index yet: `add -A` builds one.
     await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
+    await unkeep(root, env);
     // What `add -A` would pick up new. Anything over the cap stays out, and is
     // never even hashed.
     const others = (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
@@ -221,6 +245,7 @@ export async function snapshotBlobs(root: string, paths: readonly string[]): Pro
   if (!files.length) return out;
   return withTempIndex(async (env) => {
     await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
+    await unkeep(root, env, new Set(files));
     // --replace: a file where the index has a directory (or the reverse).
     const add = (ps: readonly string[]) => git(root, ["update-index", "--add", "--replace", "-z", "--stdin"], env, ps.join("\0") + "\0");
     const want = new Set(files);

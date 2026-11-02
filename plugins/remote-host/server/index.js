@@ -22166,12 +22166,27 @@ async function withTempIndex(fn) {
     });
   }
 }
+async function unkeep(root, env, only) {
+  const assumed = [];
+  const skipped = [];
+  for (const item of (await git(root, ["ls-files", "-v", "-z"], env)).split("\0")) {
+    const tag2 = item[0];
+    if (!tag2 || item[1] !== " " || tag2 === tag2.toUpperCase() && tag2 !== "S") continue;
+    const p = item.slice(2);
+    if (only && !only.has(p) || await onDisk(root, p) !== "file") continue;
+    if (tag2 !== tag2.toUpperCase()) assumed.push(p);
+    if (tag2.toUpperCase() === "S") skipped.push(p);
+  }
+  if (assumed.length) await git(root, ["update-index", "--no-assume-unchanged", "-z", "--stdin"], env, assumed.join("\0") + "\0");
+  if (skipped.length) await git(root, ["update-index", "--no-skip-worktree", "-z", "--stdin"], env, skipped.join("\0") + "\0");
+}
 function commitFor(root, tree) {
   return git(root, ["commit-tree", tree, "-m", SNAPSHOT_MESSAGE], SNAPSHOT_ENV);
 }
 async function snapshotWorktree(root, opts) {
   return withTempIndex(async (env) => {
     await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
+    await unkeep(root, env);
     const others = (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
     const tooBig = [];
     for (let i = 0; i < others.length; i += 64) {
@@ -22250,6 +22265,7 @@ async function snapshotBlobs(root, paths) {
   if (!files.length) return out;
   return withTempIndex(async (env) => {
     await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
+    await unkeep(root, env, new Set(files));
     const add = (ps) => git(root, ["update-index", "--add", "--replace", "-z", "--stdin"], env, ps.join("\0") + "\0");
     const want = new Set(files);
     await add(files).catch(async () => {
@@ -22545,12 +22561,15 @@ async function sendObjects(remote, p, shas, sink, signal) {
   );
   if (r.code !== 0) throw new Error(`fetching the machine's changes failed: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
-async function checkoutCommit(remote, p, chatId, commit) {
+async function checkoutCommit(remote, p, chatId, commit, expectHead = false) {
   const script = [
     PRELUDE,
     `R=${sq(p.repo)}; C=${sq(commit)}; cd ${sq(p.work)} || exit 1`,
-    `git --git-dir="$R" update-ref ${sq(`refs/dispatch/chats/${chatId}`)} "$C" || exit 1`,
     `if git rev-parse -q --verify HEAD >/dev/null; then H=1; git update-index -q --refresh >/dev/null 2>&1; else H=; fi`,
+    // A checkout that has synced before and lost its HEAD isn't checked out
+    // over: the next sync rebuilds it on the base first.
+    ...expectHead ? [`[ -n "$H" ] || exit 7`] : [],
+    `git --git-dir="$R" update-ref ${sq(`refs/dispatch/chats/${chatId}`)} "$C" || exit 1`,
     // A path the snapshot adds that is already there, untracked (ignored
     // there, too big to bring back, made since, or there before a first
     // checkout): git would overwrite an ignored one without a word. Name them
@@ -22578,6 +22597,7 @@ async function checkoutCommit(remote, p, chatId, commit) {
   const r = await remote.run(script, { timeoutMs: 10 * 6e4 });
   if (r.code === 5) throw new ClashError(r.stdout.split("\0").filter((s) => s.startsWith("clash ")).map((s) => s.slice("clash ".length)));
   if (r.code === 4) throw new StaleError(r.stderr.match(/Entry '([^']+)'/)?.[1]);
+  if (r.code === 7) throw new Error("the machine's checkout has lost its last sync (no HEAD); it is rebuilt before the next command");
   if (r.code !== 0) throw new Error(`checking your files out on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
 const CLASHES = [
@@ -22753,11 +22773,11 @@ class ChatSync {
       await this.save();
       return;
     }
-    if (st.state === "nogit") {
+    if (st.state === "nogit" || base && !st.head) {
       await initCheckout(this.d.remote, p);
       await this.sendObjects(await objectsFor(root, base.commit, base.tree), signal);
       await setBase(this.d.remote, p, this.d.chatId, base.commit);
-      notices.push(`[${this.d.label}] The checkout's .git there was gone (a command removed it?); it was rebuilt, and the files there kept.`);
+      notices.push(`[${this.d.label}] The checkout's .git there was gone or broken (a command removed it?); it was rebuilt, and the files there kept.`);
       st = await checkoutStatus(this.d.remote, p, base.tree);
       if (st.state !== "ok") throw new Error("the machine's checkout could not be rebuilt");
     }
@@ -22780,21 +22800,37 @@ class ChatSync {
     const was = await treeMap(root, base.tree);
     const off = host.find((c) => !sameEntry(was.get(c.path) ?? ABSENT, c.from));
     if (off) throw new Error(`the machine's changes don't start from the last sync (${off.path})`);
+    const sub = (c) => c.to.mode === "160000" || c.from.mode === "160000";
+    const big = (c) => isAbsent(c.from) && (st.sizes.get(c.to.sha) ?? 0) > this.cap;
+    const again = (c) => this.rec.skippedHost[c.path] === c.to.sha;
+    await this.fetchMissing(host.filter((c) => !isAbsent(c.to) && !sub(c) && !big(c) && !again(c)).map((c) => c.to.sha), signal);
     const snap = await snapshotWorktree(root, this.snapOpts());
     const local = new Map((await diffTrees(root, base.tree, snap.tree)).map((c) => [c.path, c.to]));
     const accept = [];
-    const candidates = [];
     const copies = [];
     const aside = [];
     const said = { back: [], kept: [], sub: [] };
+    const writes = [];
+    const deletes = [];
+    const back = /* @__PURE__ */ new Map();
+    const modes = [];
+    const inTheWay = [];
     const conflict = async (c) => {
       const copy = `${c.path}.from-${this.d.slug}`;
       const bad = await pathProblem(root, copy);
       if (bad) aside.push({ c, why: `changed here too, and the machine's version can't be saved beside it: ${bad}` });
       else copies.push({ c, copy });
     };
+    const take = (c, disk) => {
+      accept.push(c);
+      back.set(c.path, c);
+      said.back.push(`${tag(c)} ${c.path}`);
+      if (isAbsent(c.to)) {
+        if (disk === "file") deletes.push(c.path);
+      } else if (c.to.sha !== c.from.sha || this.ids.modes) writes.push({ path: c.path, ...c.to });
+    };
     for (const c of host) {
-      if (c.to.mode === "160000" || c.from.mode === "160000") {
+      if (sub(c)) {
         said.sub.push(c.path);
         continue;
       }
@@ -22803,57 +22839,23 @@ class ChatSync {
         aside.push({ c, why: bad });
         continue;
       }
-      const mine = local.get(c.path);
-      if (mine === void 0) {
-        if (isAbsent(c.from) && (st.sizes.get(c.to.sha) ?? 0) > this.cap) {
-          aside.push({ c, why: `too big to bring back, ${mb(st.sizes.get(c.to.sha) ?? 0)}` });
-        } else candidates.push(c);
-        continue;
-      }
-      if (sameEntry(mine, c.to)) {
+      const mine = local.get(c.path) ?? c.from;
+      const disk = await onDisk(root, c.path);
+      if (disk === "file" && isAbsent(mine)) {
+        aside.push({ c, why: "here it is a file that isn't synced (ignored, or too big to send)" });
+      } else if (sameEntry(mine, c.from)) {
+        if (disk === "dir" && !isAbsent(c.to)) inTheWay.push(c);
+        else if (!isAbsent(c.from) && disk === "none") aside.push({ c, why: "it isn't checked out here (a sparse checkout?)" });
+        else if (big(c)) aside.push({ c, why: `too big to bring back, ${mb(st.sizes.get(c.to.sha) ?? 0)}` });
+        else take(c, disk);
+      } else if (sameEntry(mine, c.to)) {
         accept.push(c);
       } else if (isAbsent(c.to)) {
         accept.push(c);
         said.kept.push(c.path);
       } else if (mine.sha === c.to.sha || c.from.sha === c.to.sha) {
         accept.push(c);
-        await this.takeMode(c);
-      } else {
-        await conflict(c);
-      }
-    }
-    const again = (c) => this.rec.skippedHost[c.path] === c.to.sha;
-    await this.fetchMissing(
-      [...candidates.filter((c) => !isAbsent(c.to) && !again(c)), ...copies.map((x) => x.c)].map((c) => c.to.sha),
-      signal
-    );
-    const last = await snapshotWorktree(root, this.snapOpts());
-    const now = new Map((await diffTrees(root, base.tree, last.tree)).map((c) => [c.path, c.to]));
-    const writes = [];
-    const deletes = [];
-    const take = (c, disk) => {
-      accept.push(c);
-      said.back.push(`${tag(c)} ${c.path}`);
-      if (isAbsent(c.to)) {
-        if (disk === "file") deletes.push(c.path);
-      } else if (c.to.sha !== c.from.sha || this.ids.modes) writes.push({ path: c.path, ...c.to });
-      this.noteMode(c);
-    };
-    const inTheWay = [];
-    for (const c of candidates) {
-      const here = now.get(c.path) ?? c.from;
-      const disk = await onDisk(root, c.path);
-      if (disk === "dir" && !isAbsent(c.to)) {
-        inTheWay.push(c);
-      } else if (disk === "file" && isAbsent(here)) {
-        aside.push({ c, why: "here it is a file that isn't synced (ignored, or too big to send)" });
-      } else if (sameEntry(here, c.from)) {
-        take(c, disk);
-      } else if (sameBlob(here, c.to)) {
-        accept.push(c);
-      } else if (isAbsent(c.to)) {
-        accept.push(c);
-        said.kept.push(c.path);
+        modes.push(c);
       } else {
         await conflict(c);
       }
@@ -22866,11 +22868,10 @@ class ChatSync {
     await this.fetchMissing([...writes.map((w) => w.sha), ...copies.map((x) => x.c.to.sha)], signal);
     const failed = await writeWorktree(root, writes, deletes);
     const lost = new Set(failed.map((f) => f.path));
-    for (const f of failed) {
-      const c = candidates.find((x) => x.path === f.path);
-      aside.push({ c, why: `couldn't be written here: ${f.why.split("\n")[0]}` });
-    }
+    for (const f of failed) aside.push({ c: back.get(f.path), why: `couldn't be written here: ${f.why.split("\n")[0]}` });
     said.back = said.back.filter((s) => !lost.has(s.slice(s.indexOf(" ") + 1)));
+    for (const c of back.values()) if (!lost.has(c.path)) this.noteMode(c);
+    for (const c of modes) await this.takeMode(c);
     const written = writes.filter((w) => !lost.has(w.path));
     await this.pin(written.map((w) => ({ path: w.path, host: w.sha })));
     for (const pth of deletes) {
@@ -22946,7 +22947,7 @@ class ChatSync {
   }
   async push(notices, signal) {
     const p = this.paths;
-    const snap = await snapshotWorktree(this.d.root, this.snapOpts());
+    let snap = await snapshotWorktree(this.d.root, this.snapOpts());
     for (const path of Object.keys(this.rec.pins)) if (!snap.pinned.includes(path)) delete this.rec.pins[path];
     const big = snap.tooBig.filter((b) => this.rec.skippedLocal[b.path] !== b.size);
     this.rec.skippedLocal = Object.fromEntries(snap.tooBig.map((b) => [b.path, b.size]));
@@ -22968,12 +22969,14 @@ class ChatSync {
     if (signal.aborted) throw new Error("cancelled");
     for (let attempt = 0; ; attempt++) {
       try {
-        await checkoutCommit(this.d.remote, p, this.d.chatId, snap.commit);
+        await checkoutCommit(this.d.remote, p, this.d.chatId, snap.commit, !first || attempt > 0);
         break;
       } catch (err) {
         if (err instanceof ClashError && attempt === 0) {
-          if (await this.adoptClashes(err.paths, snap.tree, signal)) continue;
-          return;
+          if (!await this.adoptClashes(err.paths, snap.tree, signal)) return;
+          snap = await snapshotWorktree(this.d.root, this.snapOpts());
+          await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, this.rec.base.tree), signal);
+          continue;
         }
         if (err instanceof StaleError && err.file && this.rec.skippedHost[err.file] !== void 0) {
           throw new Error(
@@ -23047,6 +23050,7 @@ class ChatSync {
       await this.sendObjects(await objectsFor(this.d.root, next.commit, next.tree, baseTree), signal);
       await setBase(this.d.remote, p, this.d.chatId, next.commit);
       this.rec.base = next;
+      for (const c of adopt) this.noteMode(c);
       await this.save();
     }
     if (blocked.length) {
@@ -23134,9 +23138,6 @@ class ChatSync {
 }
 function empty(root) {
   return { v: 1, root, overlay: {}, pins: {}, conflicts: [], skippedHost: {}, skippedLocal: {} };
-}
-function sameBlob(a, b) {
-  return isAbsent(a) ? isAbsent(b) : a.sha === b.sha;
 }
 function tag(c) {
   if (isAbsent(c.from)) return "A";

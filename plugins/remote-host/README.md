@@ -51,7 +51,7 @@ A chat working in a git repository gets its own checkout on the machine, `~/.dis
 
 **Before each command:**
 1. Bring back anything that changed on the machine since then (a dev server's codegen, say). If that fails, the agent is told and step 3 still goes ahead: it never overwrites a change there.
-2. Snapshot the local worktree as `git status` sees it: committed, staged, unstaged, and untracked-but-not-ignored. The snapshot is a commit in a temp index; your index, HEAD and branches are never touched.
+2. Snapshot the local worktree as `git status` sees it: committed, staged, unstaged, and untracked-but-not-ignored. A file marked assume-unchanged or skip-worktree goes as it is on disk. The snapshot is a commit in a temp index; your index, HEAD and branches are never touched.
 3. Send the machine only the objects it lacks, then check the snapshot out there.
 
 **After it:** bring back what the command changed there: edits, new files, deletions, an exec bit.

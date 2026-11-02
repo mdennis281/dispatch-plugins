@@ -266,13 +266,14 @@ export class ChatSync {
       await this.save();
       return;
     }
-    if (st.state === "nogit") {
-      // A command removed the checkout's .git, but its files are there: rebuild
-      // it on the base, so what changed there is still seen as a change.
+    if (st.state === "nogit" || (base && !st.head)) {
+      // A command removed the checkout's .git (or its HEAD; or rebuilding it
+      // was cut short), but its files are there: rebuild it on the base, so
+      // what changed there is still seen as a change.
       await initCheckout(this.d.remote, p);
       await this.sendObjects(await objectsFor(root, base!.commit, base!.tree), signal);
       await setBase(this.d.remote, p, this.d.chatId, base!.commit);
-      notices.push(`[${this.d.label}] The checkout's .git there was gone (a command removed it?); it was rebuilt, and the files there kept.`);
+      notices.push(`[${this.d.label}] The checkout's .git there was gone or broken (a command removed it?); it was rebuilt, and the files there kept.`);
       st = await checkoutStatus(this.d.remote, p, base!.tree);
       if (st.state !== "ok") throw new Error("the machine's checkout could not be rebuilt");
     }
@@ -304,16 +305,32 @@ export class ChatSync {
     const off = host.find((c) => !sameEntry(was.get(c.path) ?? ABSENT, c.from));
     if (off) throw new Error(`the machine's changes don't start from the last sync (${off.path})`);
 
-    // Where the local side stands, against the same base.
+    const sub = (c: Change) => c.to.mode === "160000" || c.from.mode === "160000";
+    const big = (c: Change) => isAbsent(c.from) && (st.sizes.get(c.to.sha) ?? 0) > this.cap;
+    const again = (c: Change) => this.rec.skippedHost[c.path] === c.to.sha;
+    // Fetch first, so the look at the worktree below is as late as it can be:
+    // not a submodule's commit, a big new file, a blob set aside last time
+    // for the same path, nor one that is here already.
+    await this.fetchMissing(host.filter((c) => !isAbsent(c.to) && !sub(c) && !big(c) && !again(c)).map((c) => c.to.sha), signal);
+
+    // The look, just before anything is written or deleted: the worktree
+    // snapshotted exactly as a push would see it, and what is on disk where
+    // that sees nothing (a file git ignores here, or one too big to send). An
+    // edit made while the machine's changes were on their way is seen.
     const snap = await snapshotWorktree(root, this.snapOpts());
     const local = new Map((await diffTrees(root, base.tree, snap.tree)).map((c) => [c.path, c.to]));
 
     const accept: Change[] = [];
-    /** The snapshot says unchanged here: verified against the file itself just before writing. */
-    const candidates: Change[] = [];
     const copies: Array<{ c: Change; copy: string }> = [];
     const aside: Array<{ c: Change; why: string }> = [];
     const said = { back: [] as string[], kept: [] as string[], sub: [] as string[] };
+    const writes: Array<{ path: string } & Entry> = [];
+    const deletes: string[] = [];
+    /** Brought back, by path; a mode this filesystem can't hold is noted once the write went through. */
+    const back = new Map<string, Change>();
+    /** Only the mode is theirs: taken after the writes. */
+    const modes: Change[] = [];
+    const inTheWay: Change[] = [];
 
     const conflict = async (c: Change) => {
       const copy = `${c.path}.from-${this.d.slug}`;
@@ -321,27 +338,37 @@ export class ChatSync {
       if (bad) aside.push({ c, why: `changed here too, and the machine's version can't be saved beside it: ${bad}` });
       else copies.push({ c, copy });
     };
+    const take = (c: Change, disk: string) => {
+      accept.push(c);
+      back.set(c.path, c);
+      said.back.push(`${tag(c)} ${c.path}`);
+      if (isAbsent(c.to)) {
+        if (disk === "file") deletes.push(c.path);
+      } else if (c.to.sha !== c.from.sha || this.ids!.modes) writes.push({ path: c.path, ...c.to });
+    };
 
     for (const c of host) {
-      if (c.to.mode === "160000" || c.from.mode === "160000") {
+      if (sub(c)) {
         said.sub.push(c.path);
         continue;
       }
       const bad = await pathProblem(root, c.path);
-      // A directory in the way may be one the same changes empty: the last look decides.
+      // A directory in the way may be one the same changes empty: decided below.
       if (bad && bad !== DIR_HERE) {
         aside.push({ c, why: bad });
         continue;
       }
-      const mine = local.get(c.path);
-      if (mine === undefined) {
-        if (isAbsent(c.from) && (st.sizes.get(c.to.sha) ?? 0) > this.cap) {
-          aside.push({ c, why: `too big to bring back, ${mb(st.sizes.get(c.to.sha) ?? 0)}` });
-        } else candidates.push(c);
-        continue;
-      }
-      // Both sides changed it.
-      if (sameEntry(mine, c.to)) {
+      const mine = local.get(c.path) ?? c.from;
+      const disk = await onDisk(root, c.path);
+      if (disk === "file" && isAbsent(mine)) {
+        aside.push({ c, why: "here it is a file that isn't synced (ignored, or too big to send)" });
+      } else if (sameEntry(mine, c.from)) {
+        // Unchanged here: theirs comes back.
+        if (disk === "dir" && !isAbsent(c.to)) inTheWay.push(c);
+        else if (!isAbsent(c.from) && disk === "none") aside.push({ c, why: "it isn't checked out here (a sparse checkout?)" });
+        else if (big(c)) aside.push({ c, why: `too big to bring back, ${mb(st.sizes.get(c.to.sha) ?? 0)}` });
+        else take(c, disk);
+      } else if (sameEntry(mine, c.to)) {
         accept.push(c);
       } else if (isAbsent(c.to)) {
         // Deleted there, edited here: keep the edit; it goes back next time.
@@ -350,51 +377,7 @@ export class ChatSync {
       } else if (mine.sha === c.to.sha || c.from.sha === c.to.sha) {
         // Only the mode is theirs (an exec bit set there): take it, keep the content here.
         accept.push(c);
-        await this.takeMode(c);
-      } else {
-        await conflict(c);
-      }
-    }
-
-    // Fetch what is likely to be written, before the last look: not a blob set
-    // aside last time for the same path, nor one that is here already.
-    const again = (c: Change) => this.rec.skippedHost[c.path] === c.to.sha;
-    await this.fetchMissing(
-      [...candidates.filter((c) => !isAbsent(c.to) && !again(c)), ...copies.map((x) => x.c)].map((c) => c.to.sha),
-      signal,
-    );
-
-    // The last look before anything is written or deleted: the worktree
-    // snapshotted again, exactly as a push would see it, and what is on disk
-    // where that sees nothing (a file git ignores here, or one too big to
-    // send). An edit made since the first look is never overwritten.
-    const last = await snapshotWorktree(root, this.snapOpts());
-    const now = new Map((await diffTrees(root, base.tree, last.tree)).map((c) => [c.path, c.to]));
-    const writes: Array<{ path: string } & Entry> = [];
-    const deletes: string[] = [];
-    const take = (c: Change, disk: string) => {
-      accept.push(c);
-      said.back.push(`${tag(c)} ${c.path}`);
-      if (isAbsent(c.to)) {
-        if (disk === "file") deletes.push(c.path);
-      } else if (c.to.sha !== c.from.sha || this.ids!.modes) writes.push({ path: c.path, ...c.to });
-      this.noteMode(c);
-    };
-    const inTheWay: Change[] = [];
-    for (const c of candidates) {
-      const here = now.get(c.path) ?? c.from;
-      const disk = await onDisk(root, c.path);
-      if (disk === "dir" && !isAbsent(c.to)) {
-        inTheWay.push(c);
-      } else if (disk === "file" && isAbsent(here)) {
-        aside.push({ c, why: "here it is a file that isn't synced (ignored, or too big to send)" });
-      } else if (sameEntry(here, c.from)) {
-        take(c, disk);
-      } else if (sameBlob(here, c.to)) {
-        accept.push(c);
-      } else if (isAbsent(c.to)) {
-        accept.push(c);
-        said.kept.push(c.path);
+        modes.push(c);
       } else {
         await conflict(c);
       }
@@ -411,11 +394,10 @@ export class ChatSync {
 
     const failed = await writeWorktree(root, writes, deletes);
     const lost = new Set(failed.map((f) => f.path));
-    for (const f of failed) {
-      const c = candidates.find((x) => x.path === f.path)!;
-      aside.push({ c, why: `couldn't be written here: ${f.why.split("\n")[0]}` });
-    }
+    for (const f of failed) aside.push({ c: back.get(f.path)!, why: `couldn't be written here: ${f.why.split("\n")[0]}` });
     said.back = said.back.filter((s) => !lost.has(s.slice(s.indexOf(" ") + 1)));
+    for (const c of back.values()) if (!lost.has(c.path)) this.noteMode(c);
+    for (const c of modes) await this.takeMode(c);
     const written = writes.filter((w) => !lost.has(w.path));
     // A blob that hashes differently once written here (CRLF content under
     // autocrlf): pin it, or the next push would rewrite the machine's file.
@@ -514,7 +496,7 @@ export class ChatSync {
 
   private async push(notices: string[], signal: AbortSignal): Promise<void> {
     const p = this.paths!;
-    const snap = await snapshotWorktree(this.d.root, this.snapOpts());
+    let snap = await snapshotWorktree(this.d.root, this.snapOpts());
     // A pin whose file changed since no longer applies.
     for (const path of Object.keys(this.rec.pins)) if (!snap.pinned.includes(path)) delete this.rec.pins[path];
     const big = snap.tooBig.filter((b) => this.rec.skippedLocal[b.path] !== b.size);
@@ -538,12 +520,16 @@ export class ChatSync {
     if (signal.aborted) throw new Error("cancelled");
     for (let attempt = 0; ; attempt++) {
       try {
-        await checkoutCommit(this.d.remote, p, this.d.chatId, snap.commit);
+        await checkoutCommit(this.d.remote, p, this.d.chatId, snap.commit, !first || attempt > 0);
         break;
       } catch (err) {
         if (err instanceof ClashError && attempt === 0) {
-          if (await this.adoptClashes(err.paths, snap.tree, signal)) continue;
-          return; // Conflicts now: the command is refused until they are settled.
+          // Conflicts now: the command is refused until they are settled.
+          if (!(await this.adoptClashes(err.paths, snap.tree, signal))) return;
+          // Each joined, and their modes with them: snapshot again, against the new base.
+          snap = await snapshotWorktree(this.d.root, this.snapOpts());
+          await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, this.rec.base!.tree), signal);
+          continue;
         }
         if (err instanceof StaleError && err.file && this.rec.skippedHost[err.file] !== undefined) {
           throw new Error(
@@ -621,6 +607,8 @@ export class ChatSync {
       await this.sendObjects(await objectsFor(this.d.root, next.commit, next.tree, baseTree), signal);
       await setBase(this.d.remote, p, this.d.chatId, next.commit);
       this.rec.base = next;
+      // Their mode joins too: one this filesystem can't hold is remembered.
+      for (const c of adopt) this.noteMode(c);
       await this.save();
     }
     if (blocked.length) {

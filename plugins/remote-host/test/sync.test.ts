@@ -559,6 +559,68 @@ describe.skipIf(!SH)("never losing a file", () => {
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("one\ntwo\n");
   });
 
+  it("never overwrites a local edit to a file marked assume-unchanged or skip-worktree", async () => {
+    const t = setup();
+    writeFileSync(join(t.local, "cfg.json"), "{}\n");
+    writeFileSync(join(t.local, "sw.json"), "{}\n");
+    g(t.local, "add", "cfg.json", "sw.json");
+    g(t.local, "commit", "-qm", "config");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    g(t.local, "update-index", "--assume-unchanged", "cfg.json");
+    g(t.local, "update-index", "--skip-worktree", "sw.json");
+    writeFileSync(join(t.local, "cfg.json"), '{"mine":1}\n');
+    writeFileSync(join(t.local, "sw.json"), '{"mine":2}\n');
+    writeFileSync(`${t.work}/cfg.json`, "machine\n");
+    writeFileSync(`${t.work}/sw.json`, "machine\n");
+    expect(text(await s.afterRun(after(r1)))).toMatch(/won't run until this is settled/);
+    expect(read(join(t.local, "cfg.json"))).toBe('{"mine":1}\n');
+    expect(read(join(t.local, "sw.json"))).toBe('{"mine":2}\n');
+    expect(read(join(t.local, "cfg.json.from-test-mac"))).toBe("machine\n");
+    expect(read(join(t.local, "sw.json.from-test-mac"))).toBe("machine\n");
+    // The real index keeps its bits.
+    expect(g(t.local, "ls-files", "-v", "cfg.json", "sw.json")).toBe("h cfg.json\nS sw.json");
+  });
+
+  it("rebuilds a checkout that lost its HEAD before checking anything out over it", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    writeFileSync(`${t.work}/.git/HEAD`, "ref: refs/heads/nowhere\n");
+    writeFileSync(join(t.local, "a.txt"), "mine\n");
+    // Not even when the look there fails: it would take every file there for one outside the sync.
+    t.remote.before = (script) => {
+      if (script.includes("dispatch-status")) throw new Error("status broke");
+    };
+    const b1 = await s.beforeRun(run());
+    t.remote.before = undefined;
+    expect(b1.refuse).toMatch(/lost its last sync \(no HEAD\)/);
+    expect(existsSync(join(t.local, "a.txt.from-test-mac"))).toBe(false);
+    const b2 = await s.beforeRun(run());
+    expect(b2.refuse).toBeUndefined();
+    expect(text(b2)).toMatch(/\.git there was gone or broken .* rebuilt/);
+    expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("mine\n");
+  });
+
+  it.skipIf(win)("keeps the machine's exec bit on a file that joins the sync, on a checkout that can't hold one", async () => {
+    const t = setup();
+    g(t.local, "config", "core.filemode", "false");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    writeFileSync(`${t.work}/.git/info/exclude`, "*.sh\n");
+    writeFileSync(`${t.work}/run.sh`, "echo hi\n");
+    chmodSync(`${t.work}/run.sh`, 0o755);
+    writeFileSync(join(t.local, "run.sh"), "echo hi\n");
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+    expect(statSync(`${t.work}/run.sh`).mode & 0o111).not.toBe(0);
+    expect(await s.beforeRun(run())).toEqual({});
+  });
+
   it("sends a file made there back unchanged, CRLF and all", async () => {
     const t = setup();
     const s = t.mk();

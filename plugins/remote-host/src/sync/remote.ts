@@ -182,12 +182,15 @@ export async function sendObjects(remote: RemoteSide, p: RemotePaths, shas: read
  * last look: the command then doesn't run, and the next sync brings that
  * change back first.
  */
-export async function checkoutCommit(remote: RemoteSide, p: RemotePaths, chatId: string, commit: string): Promise<void> {
+export async function checkoutCommit(remote: RemoteSide, p: RemotePaths, chatId: string, commit: string, expectHead = false): Promise<void> {
   const script = [
     PRELUDE,
     `R=${sq(p.repo)}; C=${sq(commit)}; cd ${sq(p.work)} || exit 1`,
-    `git --git-dir="$R" update-ref ${sq(`refs/dispatch/chats/${chatId}`)} "$C" || exit 1`,
     `if git rev-parse -q --verify HEAD >/dev/null; then H=1; git update-index -q --refresh >/dev/null 2>&1; else H=; fi`,
+    // A checkout that has synced before and lost its HEAD isn't checked out
+    // over: the next sync rebuilds it on the base first.
+    ...(expectHead ? [`[ -n "$H" ] || exit 7`] : []),
+    `git --git-dir="$R" update-ref ${sq(`refs/dispatch/chats/${chatId}`)} "$C" || exit 1`,
     // A path the snapshot adds that is already there, untracked (ignored
     // there, too big to bring back, made since, or there before a first
     // checkout): git would overwrite an ignored one without a word. Name them
@@ -215,6 +218,7 @@ export async function checkoutCommit(remote: RemoteSide, p: RemotePaths, chatId:
   const r = await remote.run(script, { timeoutMs: 10 * 60_000 });
   if (r.code === 5) throw new ClashError(r.stdout.split("\0").filter((s) => s.startsWith("clash ")).map((s) => s.slice("clash ".length)));
   if (r.code === 4) throw new StaleError(r.stderr.match(/Entry '([^']+)'/)?.[1]);
+  if (r.code === 7) throw new Error("the machine's checkout has lost its last sync (no HEAD); it is rebuilt before the next command");
   if (r.code !== 0) throw new Error(`checking your files out on the machine failed: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
 
