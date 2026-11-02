@@ -21,10 +21,10 @@
  * connection (`MaxSessions`), and every shell holds its channel open for its
  * whole life, so shells go on extra connections, at most
  * {@link SESSIONS_PER_CONNECTION} each. The control connection keeps its own
- * room for `hello`, `mkdir` and `kill`.
+ * room for `hello`, `mkdir` and `kill`, which take turns, a few at a time.
  */
 import type { PluginContext, PluginLog, TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
-import { SshConnection, errText, pinnedHostKey, type SshTarget } from "@dispatch-plugins/remote-core";
+import { SshConnection, errText, pinnedHostKey, type ExecResult, type SshTarget } from "@dispatch-plugins/remote-core";
 import type { ProbeResult } from "@dispatch-plugins/host-agent";
 import type { ClientChannel } from "ssh2";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
@@ -74,6 +74,9 @@ export const DEFAULT_TIMING: LinkTiming = {
 /** sshd's `MaxSessions` defaults to 10; leave room. */
 export const SESSIONS_PER_CONNECTION = 8;
 
+/** Commands at once on the control connection, under the same limit. */
+export const CONTROL_EXECS = 6;
+
 /** A keepalive every 5 s, three missed: a dead link (Wi-Fi gone, the Mac asleep) is noticed in about 15 s. */
 const KEEPALIVE = { intervalMs: 5_000, countMax: 3 };
 
@@ -114,6 +117,8 @@ export class HostLink {
   private gen = 0;
   private pool: PoolEntry[] = [];
   private adding?: Promise<PoolEntry>;
+  private execs = 0;
+  private execWaiting: Array<() => void> = [];
   private timer?: NodeJS.Timeout;
   private failures = 0;
   private nextAttemptAt = 0;
@@ -218,12 +223,33 @@ export class HostLink {
     }
   }
 
+  /**
+   * Run a command on the control connection. At most {@link CONTROL_EXECS} run
+   * at once, the rest wait their turn: a burst (a dozen spawns each making
+   * its directory, kills after a drop) must not hit sshd's `MaxSessions`.
+   */
+  async exec(command: string, opts: { timeoutMs?: number } = {}): Promise<ExecResult> {
+    await this.takeExecSlot();
+    try {
+      const { conn } = await this.ready();
+      return await conn.exec(command, opts);
+    } finally {
+      this.execs--;
+      this.execWaiting.shift()?.();
+    }
+  }
+
   /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
   async agent<T>(args: readonly string[], timeoutMs = 30_000): Promise<T> {
-    const { conn, paths } = await this.ready();
-    const r = await conn.exec(agentCommand(paths, args), { timeoutMs });
+    const { paths } = await this.ready();
+    const r = await this.exec(agentCommand(paths, args), { timeoutMs });
     if (r.code !== 0) throw new Error(`dispatch-host ${args[0]} exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
     return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "null") as T;
+  }
+
+  private async takeExecSlot(): Promise<void> {
+    while (this.execs >= CONTROL_EXECS) await new Promise<void>((r) => this.execWaiting.push(r));
+    this.execs++;
   }
 
   /**

@@ -51,7 +51,7 @@ export class HostBackend implements TerminalBackend {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
     const cwd = chatDir(linked.paths, this.deps.instanceId, chatId);
-    const mk = await linked.conn.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 30_000 });
+    const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 30_000 });
     if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
 
     const sid = newSid();

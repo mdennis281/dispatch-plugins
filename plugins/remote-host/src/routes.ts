@@ -111,12 +111,12 @@ export function defineRoutes(deps: RoutesDeps): (r: PluginRouter<PluginRequest, 
       const key = await ctx.secrets?.get(name);
       if (e && key) {
         try {
-          const linked = await e.link.ready(AbortSignal.timeout(20_000));
+          await e.link.ready(AbortSignal.timeout(20_000));
           const killed = await e.link
             .agent<{ killed?: string[] }>(["kill", "--instance", deps.instanceId, "--all"], 30_000)
             .catch(() => ({ killed: [] }));
           sessions = killed?.killed?.length ?? 0;
-          const res = await linked.conn.exec(shCommand(removeKeyScript(keyBlobOf(publicKeyOf(key)))), { timeoutMs: 30_000 });
+          const res = await e.link.exec(shCommand(removeKeyScript(keyBlobOf(publicKeyOf(key)))), { timeoutMs: 30_000 });
           keyLine = res.code === 0 ? (res.stdout.includes("removed") ? "removed" : "absent") : "unreachable";
         } catch (err) {
           ctx.log.warn(`remote-host ${host.slug}: removing its key on the machine failed: ${errText(err)}`);

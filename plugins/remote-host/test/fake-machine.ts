@@ -163,10 +163,22 @@ export class FakeConn extends EventEmitter implements LinkConnection {
     return this.connectOnce();
   }
 
-  exec(command: string, opts: { stdin?: (ch: ClientChannel) => Promise<void>; timeoutMs?: number } = {}): Promise<ExecResult> {
-    if (!this.isOpen) return Promise.reject(new Error("closed"));
-    if (this.live() >= this.m.maxSessions) return Promise.reject(new Error("(SSH) Channel open failure: open failed"));
-    return this.m.run(command, opts);
+  /** Execs running now, and the most there ever were at once. */
+  running = 0;
+  peak = 0;
+
+  async exec(command: string, opts: { stdin?: (ch: ClientChannel) => Promise<void>; timeoutMs?: number } = {}): Promise<ExecResult> {
+    if (!this.isOpen) throw new Error("closed");
+    if (this.live() + this.running >= this.m.maxSessions) throw new Error("(SSH) Channel open failure: open failed");
+    this.running++;
+    this.peak = Math.max(this.peak, this.running);
+    try {
+      // A command takes a moment, so a burst of them overlaps as it would.
+      await new Promise((r) => setTimeout(r, 1));
+      return await this.m.run(command, opts);
+    } finally {
+      this.running--;
+    }
   }
 
   /** Like sshd: at most `maxSessions` at once on one connection. */

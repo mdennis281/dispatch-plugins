@@ -21035,6 +21035,7 @@ const DEFAULT_TIMING = {
   idleSessionConnectionMs: 6e4
 };
 const SESSIONS_PER_CONNECTION = 8;
+const CONTROL_EXECS = 6;
 const KEEPALIVE = { intervalMs: 5e3, countMax: 3 };
 const LOW_DISK_BYTES = 5 * 1024 ** 3;
 class HostLink {
@@ -21050,6 +21051,8 @@ class HostLink {
   gen = 0;
   pool = [];
   adding;
+  execs = 0;
+  execWaiting = [];
   timer;
   failures = 0;
   nextAttemptAt = 0;
@@ -21137,12 +21140,31 @@ class HostLink {
       return ch;
     }
   }
+  /**
+   * Run a command on the control connection. At most {@link CONTROL_EXECS} run
+   * at once, the rest wait their turn: a burst (a dozen spawns each making
+   * its directory, kills after a drop) must not hit sshd's `MaxSessions`.
+   */
+  async exec(command, opts = {}) {
+    await this.takeExecSlot();
+    try {
+      const { conn } = await this.ready();
+      return await conn.exec(command, opts);
+    } finally {
+      this.execs--;
+      this.execWaiting.shift()?.();
+    }
+  }
   /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
   async agent(args, timeoutMs = 3e4) {
-    const { conn, paths } = await this.ready();
-    const r = await conn.exec(agentCommand(paths, args), { timeoutMs });
+    const { paths } = await this.ready();
+    const r = await this.exec(agentCommand(paths, args), { timeoutMs });
     if (r.code !== 0) throw new Error(`dispatch-host ${args[0]} exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
     return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "null");
+  }
+  async takeExecSlot() {
+    while (this.execs >= CONTROL_EXECS) await new Promise((r) => this.execWaiting.push(r));
+    this.execs++;
   }
   /**
    * For a human pressing "Check": probe a live link without disturbing its
@@ -22088,7 +22110,7 @@ class HostBackend {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
     const cwd = chatDir(linked.paths, this.deps.instanceId, chatId);
-    const mk = await linked.conn.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 3e4 });
+    const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 3e4 });
     if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
     const sid = newSid();
     const instance = this.deps.instanceId;
@@ -22351,10 +22373,10 @@ function defineRoutes(deps) {
       const key = await ctx.secrets?.get(name);
       if (e && key) {
         try {
-          const linked = await e.link.ready(AbortSignal.timeout(2e4));
+          await e.link.ready(AbortSignal.timeout(2e4));
           const killed = await e.link.agent(["kill", "--instance", deps.instanceId, "--all"], 3e4).catch(() => ({ killed: [] }));
           sessions = killed?.killed?.length ?? 0;
-          const res = await linked.conn.exec(shCommand(removeKeyScript(keyBlobOf(publicKeyOf(key)))), { timeoutMs: 3e4 });
+          const res = await e.link.exec(shCommand(removeKeyScript(keyBlobOf(publicKeyOf(key)))), { timeoutMs: 3e4 });
           keyLine = res.code === 0 ? res.stdout.includes("removed") ? "removed" : "absent" : "unreachable";
         } catch (err) {
           ctx.log.warn(`remote-host ${host.slug}: removing its key on the machine failed: ${errText(err)}`);

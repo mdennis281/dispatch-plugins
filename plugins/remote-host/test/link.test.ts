@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
 import type { HostConfig } from "../src/hosts.js";
-import { HostLink, SESSIONS_PER_CONNECTION, describeConnectError, statusFrom, type LinkTiming } from "../src/link.js";
+import { CONTROL_EXECS, HostLink, SESSIONS_PER_CONNECTION, describeConnectError, statusFrom, type LinkTiming } from "../src/link.js";
 import { AGENT, FakeMachine, PROBE, fakeRuntime, type AddressBehaviour, type FakeConn } from "./fake-machine.js";
 
 const HOST: HostConfig = {
@@ -224,6 +224,17 @@ describe("shells", () => {
     for (const c of m.open()) for (const ch of c.channels) ch.close();
     await until(() => l.sessionConnections === 0);
     expect(m.open()).toHaveLength(1);
+  });
+
+  it("have their directories made a few at a time, so a burst of spawns never hits sshd's limit", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const { l } = link(m);
+    await l.ready();
+    const control = m.open()[0]!;
+    const made = await Promise.all(Array.from({ length: 20 }, (_, i) => l.exec(`mkdir -p /chats/${i}`)));
+    expect(made.every((r) => r.code === 0)).toBe(true);
+    expect(control.peak).toBeGreaterThan(1);
+    expect(control.peak).toBeLessThanOrEqual(CONTROL_EXECS);
   });
 
   it("are refused, not left waiting, while the machine is offline", async () => {
