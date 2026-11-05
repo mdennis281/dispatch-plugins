@@ -29,6 +29,8 @@ import { batches, parseRawDiff, pathProblem } from "../src/sync/local.js";
 import { SH, localRemote } from "./local-remote.js";
 
 const win = process.platform === "win32";
+const XCODE = "/Applications/Xcode.app/Contents/Developer";
+const CLT = "/Library/Developer/CommandLineTools";
 // Every "machine" script forks sh and git; on Windows (MSYS) that is slow.
 vi.setConfig({ testTimeout: 120_000 });
 const dirs: string[] = [];
@@ -152,19 +154,31 @@ describe.skipIf(!SH)("pushing", () => {
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("changed\n");
   });
 
-  it.skipIf(win)("runs git there without DEVELOPER_DIR, so an Xcode one in its environment can't block the sync", async () => {
-    // /usr/bin/git on a Mac with the Command Line Tools chosen: Xcode's git, its license not accepted, only when DEVELOPER_DIR says so.
+  /**
+   * The "machine" with a `/usr/bin/git` stand-in first on its PATH that fails
+   * (exit 69, Xcode's license) when `blocked` says so of its DEVELOPER_DIR,
+   * and DEVELOPER_DIR `env` in its environment.
+   */
+  function withStub(blocked: string, env: string | undefined) {
     const t = setup();
     const bin = join(t.local, "..", "stubbin");
     mkdirSync(bin);
     writeFileSync(
       join(bin, "git"),
-      '#!/bin/sh\nif [ -n "${DEVELOPER_DIR:-}" ]; then echo "You have not agreed to the Xcode license agreements." >&2; exit 69; fi\nPATH=${PATH#*:} exec git "$@"\n',
+      `#!/bin/sh\nif ${blocked}; then echo "You have not agreed to the Xcode license agreements." >&2; exit 69; fi\n` +
+        `unset DEVELOPER_DIR\nPATH=\${PATH#*:} exec git "$@"\n`,
       { mode: 0o755 },
     );
-    t.remote.env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer" };
+    const machineEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
+    if (env === undefined) delete machineEnv.DEVELOPER_DIR;
+    else machineEnv.DEVELOPER_DIR = env;
+    t.remote.env = machineEnv;
+    return t;
+  }
+
+  /** Every script: set up, check, send, check out; then a change there comes back, and one here goes. */
+  async function syncsBothWays(t: ReturnType<typeof setup>) {
     const s = t.mk();
-    // Every script: set up, check, send, check out; then a change there comes back.
     const r1 = run();
     expect((await s.beforeRun(r1)).refuse).toBeUndefined();
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("one\ntwo\n");
@@ -174,7 +188,18 @@ describe.skipIf(!SH)("pushing", () => {
     writeFileSync(join(t.local, "a.txt"), "edited here\n");
     expect((await s.beforeRun(run())).refuse).toBeUndefined();
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("edited here\n");
+  }
+
+  it.skipIf(win)("never runs git there with a DEVELOPER_DIR pointing at Xcode, which an Xcode update blocks", async () => {
+    await syncsBothWays(withStub(`[ "\${DEVELOPER_DIR:-}" = "${XCODE}" ]`, XCODE));
   });
+
+  it.skipIf(win || !existsSync(`${CLT}/usr/bin/git`))(
+    "runs git there from the Command Line Tools when xcode-select chose a blocked Xcode (cvx-mac), with no sudo",
+    async () => {
+      await syncsBothWays(withStub(`[ "\${DEVELOPER_DIR:-}" != "${CLT}" ]`, undefined));
+    },
+  );
 
   it("leaves big untracked files behind, and says so once", async () => {
     const t = setup();

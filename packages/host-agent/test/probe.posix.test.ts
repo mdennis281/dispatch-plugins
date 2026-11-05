@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { gitEnv } from "../src/git-env.js";
+import { CLT_DEVELOPER_DIR, gitEnv } from "../src/git-env.js";
 import { checkGit, which } from "../src/probe.js";
 
 const posix = process.platform !== "win32";
@@ -27,8 +27,14 @@ function bin(body: string): string {
 
 /** `/usr/bin/git` on a Mac whose developer directory is Xcode, its license not accepted. */
 const LICENSE = 'echo "You have not agreed to the Xcode license agreements. Please run \'sudo xcodebuild -license\'." >&2\nexit 69';
-/** The same stub with the Command Line Tools chosen, unless DEVELOPER_DIR says Xcode: the real git, found past this directory. */
-const STUB = `if [ -n "\${DEVELOPER_DIR:-}" ]; then ${LICENSE.replace("\n", "; ")}; fi\nPATH=\${PATH#*:} exec git "$@"`;
+/**
+ * cvx-mac's `/usr/bin/git`, xcode-select on Xcode (license not accepted) and
+ * the Command Line Tools installed: git runs only with their DEVELOPER_DIR
+ * (then the runner's own git, found past this directory, with the runner's
+ * own developer directory).
+ */
+const STUB = `if [ "\${DEVELOPER_DIR:-}" != "${CLT_DEVELOPER_DIR}" ]; then ${LICENSE.replace("\n", "; ")}; fi\nunset DEVELOPER_DIR\nPATH=\${PATH#*:} exec git "$@"`;
+const XCODE = "/Applications/Xcode.app/Contents/Developer";
 
 describe.skipIf(!posix)("checkGit", () => {
   it("names the git it found and that the license blocks it (exit 69), not 'not found'", async () => {
@@ -43,13 +49,16 @@ describe.skipIf(!posix)("checkGit", () => {
     });
   });
 
-  it("runs git without DEVELOPER_DIR, so an Xcode one in the environment can't block it", async () => {
+  it("runs git from the Command Line Tools when they're installed, whatever xcode-select or the environment says, and names it", async () => {
     const b = bin(STUB);
-    const env = { ...process.env, PATH: `${b}:${process.env.PATH}`, DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer" };
-    expect((await checkGit(env)).exitCode).toBe(69);
-    const r = await checkGit(gitEnv(env));
-    expect(r).toMatchObject({ path: join(b, "git"), exitCode: 0, version: expect.stringMatching(/^git version \d/) });
+    const env = { ...process.env, PATH: `${b}:${process.env.PATH}`, DEVELOPER_DIR: XCODE };
+    const mac = { developerDir: XCODE };
+    // With them: their DEVELOPER_DIR, no sudo, no license.
+    const r = await checkGit(gitEnv(env, true), mac);
+    expect(r).toMatchObject({ path: join(b, "git"), developerDir: CLT_DEVELOPER_DIR, exitCode: 0, version: expect.stringMatching(/^git version \d/) });
     expect(r.error).toBeUndefined();
+    // Without them: xcode-select's (Xcode's here), blocked, and said so.
+    expect(await checkGit(gitEnv(env, false), mac)).toMatchObject({ developerDir: XCODE, exitCode: 69, version: null });
   });
 
   it("says there is none when no git is on the PATH", async () => {
@@ -72,9 +81,10 @@ describe.skipIf(!posix)("checkGit", () => {
 });
 
 describe("gitEnv", () => {
-  it("drops DEVELOPER_DIR and sets the C locale, leaving the rest and the original alone", () => {
-    const base = { PATH: "/usr/bin", DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer", HOME: "/Users/dispatch" };
-    expect(gitEnv(base)).toEqual({ PATH: "/usr/bin", HOME: "/Users/dispatch", LC_ALL: "C" });
-    expect(base.DEVELOPER_DIR).toBe("/Applications/Xcode.app/Contents/Developer");
+  it("sets the Command Line Tools' DEVELOPER_DIR when they're installed, drops any other, and sets the C locale", () => {
+    const base = { PATH: "/usr/bin", DEVELOPER_DIR: XCODE, HOME: "/Users/dispatch" };
+    expect(gitEnv(base, true)).toEqual({ PATH: "/usr/bin", HOME: "/Users/dispatch", DEVELOPER_DIR: CLT_DEVELOPER_DIR, LC_ALL: "C" });
+    expect(gitEnv(base, false)).toEqual({ PATH: "/usr/bin", HOME: "/Users/dispatch", LC_ALL: "C" });
+    expect(base.DEVELOPER_DIR).toBe(XCODE);
   });
 });

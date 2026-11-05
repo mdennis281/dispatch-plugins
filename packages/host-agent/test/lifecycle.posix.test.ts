@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, posix as P, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CLT_DEVELOPER_DIR, XCODE_DEVELOPER_DIR, hasCommandLineTools } from "../src/git-env.js";
 import { chatWorktreePath, instanceLayout, repoPath, sessionPaths, type SessionRecord } from "../src/layout.js";
 import { collectGarbage, forgetChat, forgetInstance, listChats, listInstances, trashDir, type KillSession } from "../src/lifecycle.js";
 import { touchContact, writeRecord } from "../src/records.js";
@@ -155,27 +156,45 @@ describe.skipIf(!posix)("forget", () => {
     expect(refs(a.repo)).toEqual([]);
   });
 
-  it("runs its git without DEVELOPER_DIR, so one pointing at Xcode can't put it behind Xcode's license", async () => {
-    const a = syncedChat("chat-a");
-    // /usr/bin/git on a Mac with the Command Line Tools chosen: Xcode's git (license not accepted) only when DEVELOPER_DIR says so.
+  /**
+   * Forget chat-a with a `/usr/bin/git` stand-in first on PATH that fails
+   * (exit 69, Xcode's license) when `blocked` says so of its DEVELOPER_DIR,
+   * and DEVELOPER_DIR set to `env` in the agent's own environment.
+   */
+  async function forgetWithStub(blocked: string, env: string | undefined) {
     const bin = join(root, "..", "stubbin");
-    mkdirSync(bin);
+    mkdirSync(bin, { recursive: true });
     writeFileSync(
       join(bin, "git"),
-      '#!/bin/sh\nif [ -n "${DEVELOPER_DIR:-}" ]; then echo "You have not agreed to the Xcode license agreements." >&2; exit 69; fi\nPATH=${PATH#*:} exec git "$@"\n',
+      `#!/bin/sh\nif ${blocked}; then echo "You have not agreed to the Xcode license agreements." >&2; exit 69; fi\n` +
+        `unset DEVELOPER_DIR\nPATH=\${PATH#*:} exec git "$@"\n`,
       { mode: 0o755 },
     );
     const saved = { PATH: process.env.PATH, DEVELOPER_DIR: process.env.DEVELOPER_DIR };
     process.env.PATH = `${bin}:${saved.PATH ?? ""}`;
-    process.env.DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer";
-    let r: Awaited<ReturnType<typeof forgetChat>>;
+    if (env === undefined) delete process.env.DEVELOPER_DIR;
+    else process.env.DEVELOPER_DIR = env;
     try {
-      r = await forgetChat({ root, instance: I, chat: "chat-a", kill });
+      return await forgetChat({ root, instance: I, chat: "chat-a", kill });
     } finally {
       process.env.PATH = saved.PATH;
       if (saved.DEVELOPER_DIR === undefined) delete process.env.DEVELOPER_DIR;
       else process.env.DEVELOPER_DIR = saved.DEVELOPER_DIR;
     }
+  }
+
+  it("never runs its git with a DEVELOPER_DIR pointing at Xcode, which an Xcode update blocks", async () => {
+    const a = syncedChat("chat-a");
+    const r = await forgetWithStub(`[ "\${DEVELOPER_DIR:-}" = "${XCODE_DEVELOPER_DIR}" ]`, XCODE_DEVELOPER_DIR);
+    expect(r.errors).toBeUndefined();
+    expect(r.refs).toBe(1);
+    expect(refs(a.repo)).toEqual([]);
+  });
+
+  it.skipIf(!hasCommandLineTools())("runs its git from the Command Line Tools on a Mac whose xcode-select chose a blocked Xcode (cvx-mac)", async () => {
+    const a = syncedChat("chat-a");
+    // git runs only with their DEVELOPER_DIR: what xcode-select chose is Xcode, its license not accepted.
+    const r = await forgetWithStub(`[ "\${DEVELOPER_DIR:-}" != "${CLT_DEVELOPER_DIR}" ]`, undefined);
     expect(r.errors).toBeUndefined();
     expect(r.refs).toBe(1);
     expect(refs(a.repo)).toEqual([]);

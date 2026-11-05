@@ -15,6 +15,7 @@ import { performance } from "node:perf_hooks";
 import { appendRun, StreamLog } from "./journal.js";
 import { sessionPaths, type SessionRecord } from "./layout.js";
 import { captureLoginEnv, loginShell, shellEnv } from "./env.js";
+import { hasCommandLineTools } from "./git-env.js";
 import { FrameDecoder, F, decodeJson, type AttachMsg, type ExitMsg } from "./protocol.js";
 import { escapees, hostKillIo, killTree, listProcs, sameProcess, sessionMembers, signalTree } from "./procs.js";
 import { lastContact, readRecord, touchContact, writeRecord } from "./records.js";
@@ -124,7 +125,7 @@ async function serve(
       return undefined;
     },
   );
-  const env = shellEnv({ agentEnv: process.env, ...(login ? { login } : {}), extra: a.extraEnv });
+  const env = shellEnv({ agentEnv: process.env, ...(login ? { login } : {}), extra: a.extraEnv, clt: hasCommandLineTools() });
 
   const shell = spawn(bashPath(), ["--noprofile", "--norc"], { cwd: a.cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
   if (!shell.pid) {

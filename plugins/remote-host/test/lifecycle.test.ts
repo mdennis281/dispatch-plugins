@@ -199,12 +199,25 @@ describe("uninstall", () => {
 });
 
 describe("the agent's note", () => {
-  it("on a Mac, says to run Xcode's tools with DEVELOPER_DIR on the command, and to leave xcode-select alone", async () => {
+  it("on a Mac with the Command Line Tools, says git is theirs and to override DEVELOPER_DIR with Xcode's per command", async () => {
+    const { m, r, connected } = setup();
+    m.probe = {
+      ...PROBE,
+      syncGit: { path: "/usr/bin/git", developerDir: "/Library/Developer/CommandLineTools", exitCode: 0, version: "git version 2.39.2 (Apple Git-143)" },
+    };
+    await connected();
+    const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
+    expect(note).toContain("The shell has `DEVELOPER_DIR=/Library/Developer/CommandLineTools`");
+    expect(note).toContain("override it on that command: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild …`");
+    expect(note).toMatch(/Don't export Xcode's in the shell/);
+  });
+
+  it("on a Mac without them, only says how to run Xcode's tools", async () => {
     const { r, connected } = setup();
     await connected();
     const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
-    expect(note).toContain("`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild …`");
-    expect(note).toMatch(/Don't export it or change `xcode-select`/);
+    expect(note).toContain("set its developer directory on that command: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild …`");
+    expect(note).not.toContain("CommandLineTools");
   });
 
   it("says nothing of Xcode on Linux", async () => {

@@ -454,10 +454,10 @@ describe("statusFrom", () => {
   it("names the git sync found and why it won't run, not 'git not found'", () => {
     const XCODE = "/Applications/Xcode.app/Contents/Developer";
     const at = (syncGit: NonNullable<ProbeResult["syncGit"]>) => statusFrom({ ...PROBE, tools: { ...PROBE.tools, git: null }, syncGit }, 5).detail;
-    // cvx-mac once Xcode updated itself.
+    // A Mac with Xcode chosen, its license not accepted, and no Command Line Tools to run git from instead.
     expect(at({ path: "/usr/bin/git", developerDir: XCODE, exitCode: 69, version: null, error: "You have not agreed to the Xcode license agreements." })).toBe(
-      `git (/usr/bin/git from ${XCODE}) is blocked: Xcode's license isn't accepted (exit 69). ` +
-        "Point it at the Command Line Tools: sudo xcode-select -s /Library/Developer/CommandLineTools",
+      `git (/usr/bin/git from ${XCODE}) is blocked: Xcode's license isn't accepted (exit 69). Install the Command Line Tools ` +
+        "(xcode-select --install), whose git Dispatch then uses, or accept the license (sudo xcodebuild -license accept)",
     );
     expect(at({ path: "/usr/bin/git", developerDir: null, exitCode: null, version: null, error: "no developer tools; install the Command Line Tools (xcode-select --install)" })).toBe(
       "git (/usr/bin/git) wasn't run: no developer tools; install the Command Line Tools (xcode-select --install)",

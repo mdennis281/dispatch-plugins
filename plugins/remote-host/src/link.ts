@@ -692,9 +692,10 @@ function gitIssue(probe: ProbeResult): string | undefined {
   if (!g.path) return "git not found";
   const which = `git (${g.path}${g.developerDir ? ` from ${g.developerDir}` : ""})`;
   if (g.exitCode === 69) {
+    // Only without the Command Line Tools: with them, git runs from theirs.
     return (
-      `${which} is blocked: Xcode's license isn't accepted (exit 69). Point it at the Command Line Tools: ` +
-      `sudo xcode-select -s /Library/Developer/CommandLineTools`
+      `${which} is blocked: Xcode's license isn't accepted (exit 69). Install the Command Line Tools ` +
+      `(xcode-select --install), whose git Dispatch then uses, or accept the license (sudo xcodebuild -license accept)`
     );
   }
   if (g.exitCode === null) return `${which} wasn't run: ${g.error ?? "unknown"}`;
