@@ -86,10 +86,17 @@ export async function checkoutStatus(remote: RemoteSide, p: RemotePaths, baseTre
     `GIT_INDEX_FILE=$I git add -A --ignore-errors >/dev/null 2>&1; rc=$?`,
     `if [ "$rc" -gt 1 ]; then rm -f "$I"; echo "git add -A failed (exit $rc)" >&2; exit 3; fi`,
     `T=$(GIT_INDEX_FILE=$I git write-tree) || { rm -f "$I"; exit 3; }`,
-    `rm -f "$I"`,
     `echo "tree $T"`,
-    `echo "head $(git rev-parse -q --verify HEAD || true)"`,
-    `echo "base $(git rev-parse -q --verify refs/dispatch/base || true) $(git rev-parse -q --verify 'refs/dispatch/base^{tree}' 2>/dev/null || true)"`,
+    // HEAD, the base and its tree in one git process: this runs before and
+    // after every command. A name that isn't there, or names an object the
+    // checkout can't read, comes back "<name> missing", which matches no
+    // sha below: a HEAD like that counts as none, and the checkout is
+    // rebuilt on the base (a checkout over it would fail).
+    `printf '%s\\n' HEAD refs/dispatch/base 'refs/dispatch/base^{tree}' | git cat-file --batch-check='%(objectname)' > "$I" 2>/dev/null`,
+    `{ read -r h; read -r b; read -r bt; } < "$I"`,
+    `rm -f "$I"`,
+    `echo "head $h"`,
+    `echo "base $b $bt"`,
     `if [ -n "$B" ] && [ "$T" != "$B" ]; then`,
     `  git cat-file -e "$B^{tree}" 2>/dev/null || { echo nobase; exit 0; }`,
     `  echo sizes`,

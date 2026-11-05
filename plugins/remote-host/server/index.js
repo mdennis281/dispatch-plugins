@@ -22446,9 +22446,25 @@ function parseRawDiff(z) {
   }
   return out;
 }
+const indexPaths = /* @__PURE__ */ new Map();
 async function indexPath(root) {
+  const gitfile = await readFile(join(root, ".git"), "utf8").catch(() => "");
+  const known = indexPaths.get(root);
+  if (known && known.gitfile === gitfile) return known.path;
   const p = await git(root, ["rev-parse", "--git-path", "index"]);
-  return isAbsolute(p) ? p : join(root, p);
+  const path = isAbsolute(p) ? p : join(root, p);
+  indexPaths.set(root, { gitfile, path });
+  return path;
+}
+async function listIndex(root, env, others) {
+  const args = ["ls-files", "-v", "-z", "--cached", ...others ? ["--others", "--exclude-standard"] : []];
+  const out = { tagged: [], others: [] };
+  for (const item of (await git(root, args, env)).split("\0")) {
+    if (!item) continue;
+    if (item.startsWith("? ")) out.others.push(item.slice(2));
+    else out.tagged.push(item);
+  }
+  return out;
 }
 async function withTempIndex(fn) {
   const dir = await mkdtemp(join(tmpdir(), "rh-idx-"));
@@ -22459,10 +22475,10 @@ async function withTempIndex(fn) {
     });
   }
 }
-async function unkeep(root, env, only) {
+async function unkeep(root, env, tagged, only) {
   const assumed = [];
   const skipped = [];
-  for (const item of (await git(root, ["ls-files", "-v", "-z"], env)).split("\0")) {
+  for (const item of tagged) {
     const tag2 = item[0];
     if (!tag2 || item[1] !== " " || tag2 === tag2.toUpperCase() && tag2 !== "S") continue;
     const p = item.slice(2);
@@ -22479,8 +22495,8 @@ function commitFor(root, tree) {
 async function snapshotWorktree(root, opts) {
   return withTempIndex(async (env) => {
     await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
-    await unkeep(root, env);
-    const others = (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
+    const { tagged, others } = await listIndex(root, env, true);
+    await unkeep(root, env, tagged);
     const tooBig = [];
     for (let i = 0; i < others.length; i += 64) {
       const sizes = await Promise.all(
@@ -22516,7 +22532,8 @@ async function snapshotWorktree(root, opts) {
       if (fix.length) await git(root, ["update-index", "-z", "--index-info"], env, fix.join("\0") + "\0");
     }
     const tree = await git(root, ["write-tree"], env);
-    return { tree, commit: await commitFor(root, tree), tooBig, pinned };
+    const commit = tree === opts.base?.tree ? opts.base.commit : await commitFor(root, tree);
+    return { tree, commit, tooBig, pinned };
   });
 }
 async function pathProblem(root, p, win = process.platform === "win32") {
@@ -22561,7 +22578,7 @@ async function snapshotBlobs(root, paths) {
   if (!files.length) return out;
   return withTempIndex(async (env) => {
     await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
-    await unkeep(root, env, new Set(files));
+    await unkeep(root, env, (await listIndex(root, env, false)).tagged, new Set(files));
     const add = (ps) => git(root, ["update-index", "--add", "--replace", "-z", "--stdin"], env, ps.join("\0") + "\0");
     const want = new Set(files);
     await add(files).catch(async () => {
@@ -22596,9 +22613,9 @@ async function diffTrees(root, a, b) {
 }
 async function objectsFor(root, commit, tree, since) {
   const shas = /* @__PURE__ */ new Set([commit, tree]);
-  if (since) {
-    const changes = parseRawDiff(await git(root, ["diff-tree", "-r", "-t", "-z", "--no-renames", since, tree]));
-    for (const c of changes) if (!isAbsent(c.to) && c.to.mode !== "160000") shas.add(c.to.sha);
+  const diff = since ? await git(root, ["diff-tree", "-r", "-t", "-z", "--no-renames", since, tree]).catch(() => void 0) : void 0;
+  if (diff !== void 0) {
+    for (const c of parseRawDiff(diff)) if (!isAbsent(c.to) && c.to.mode !== "160000") shas.add(c.to.sha);
   } else {
     for (const line of (await git(root, ["ls-tree", "-r", "-t", "-z", tree])).split("\0")) {
       const m = line.match(/^\d{6} (blob|tree) ([0-9a-f]{40})\t/);
@@ -22785,10 +22802,17 @@ async function checkoutStatus(remote, p, baseTree) {
     `GIT_INDEX_FILE=$I git add -A --ignore-errors >/dev/null 2>&1; rc=$?`,
     `if [ "$rc" -gt 1 ]; then rm -f "$I"; echo "git add -A failed (exit $rc)" >&2; exit 3; fi`,
     `T=$(GIT_INDEX_FILE=$I git write-tree) || { rm -f "$I"; exit 3; }`,
-    `rm -f "$I"`,
     `echo "tree $T"`,
-    `echo "head $(git rev-parse -q --verify HEAD || true)"`,
-    `echo "base $(git rev-parse -q --verify refs/dispatch/base || true) $(git rev-parse -q --verify 'refs/dispatch/base^{tree}' 2>/dev/null || true)"`,
+    // HEAD, the base and its tree in one git process: this runs before and
+    // after every command. A name that isn't there, or names an object the
+    // checkout can't read, comes back "<name> missing", which matches no
+    // sha below: a HEAD like that counts as none, and the checkout is
+    // rebuilt on the base (a checkout over it would fail).
+    `printf '%s\\n' HEAD refs/dispatch/base 'refs/dispatch/base^{tree}' | git cat-file --batch-check='%(objectname)' > "$I" 2>/dev/null`,
+    `{ read -r h; read -r b; read -r bt; } < "$I"`,
+    `rm -f "$I"`,
+    `echo "head $h"`,
+    `echo "base $b $bt"`,
     `if [ -n "$B" ] && [ "$T" != "$B" ]; then`,
     `  git cat-file -e "$B^{tree}" 2>/dev/null || { echo nobase; exit 0; }`,
     `  echo sizes`,
@@ -23260,8 +23284,7 @@ class ChatSync {
     const first = !base;
     const started = Date.now();
     if (first) await initCheckout(this.d.remote, p);
-    const since = base && await hasObject(this.d.root, base.tree) ? base.tree : void 0;
-    const sent = await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, since), signal);
+    const sent = await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, base?.tree), signal);
     if (signal.aborted) throw new Error("cancelled");
     for (let attempt = 0; ; attempt++) {
       try {
@@ -23419,7 +23442,13 @@ class ChatSync {
     if (c.to.mode !== (isAbsent(c.from) ? "100644" : c.from.mode)) this.rec.overlay[c.path] = c.to.mode;
   }
   snapOpts() {
-    return { capBytes: this.cap, exclude: this.rec.conflicts.map((c) => c.copy), overlay: this.rec.overlay, pins: this.rec.pins };
+    return {
+      capBytes: this.cap,
+      exclude: this.rec.conflicts.map((c) => c.copy),
+      overlay: this.rec.overlay,
+      pins: this.rec.pins,
+      ...this.rec.base ? { base: this.rec.base } : {}
+    };
   }
   key() {
     return `sync:${this.d.chatId}`;

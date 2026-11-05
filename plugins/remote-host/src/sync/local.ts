@@ -73,6 +73,12 @@ export interface SnapshotOptions {
   /** Modes the local filesystem can't hold (an exec bit, a symlink on Windows), by path. */
   overlay?: Readonly<Record<string, string>>;
   pins?: Readonly<Record<string, Pin>>;
+  /**
+   * The last snapshot synced. A tree that is its tree is its commit (a
+   * snapshot's commit depends on its tree alone), so the commit isn't made
+   * again: the usual case, before a command when nothing changed.
+   */
+  base?: { tree: string; commit: string };
 }
 
 export function isAbsent(e: Entry): boolean {
@@ -96,10 +102,38 @@ export function parseRawDiff(z: string): Change[] {
   return out;
 }
 
-/** Where git keeps this worktree's index, as an absolute path. */
+const indexPaths = new Map<string, { gitfile: string; path: string }>();
+
+/**
+ * Where git keeps this worktree's index, as an absolute path. Asked of git
+ * once per worktree: every git process costs 50-250 ms on Windows, and this
+ * runs before every command. The answer is kept while the worktree's `.git`
+ * says the same (a directory, or a file naming its git dir): a worktree made
+ * again at the same path can name another.
+ */
 async function indexPath(root: string): Promise<string> {
+  const gitfile = await readFile(join(root, ".git"), "utf8").catch(() => "");
+  const known = indexPaths.get(root);
+  if (known && known.gitfile === gitfile) return known.path;
   const p = await git(root, ["rev-parse", "--git-path", "index"]);
-  return isAbsolute(p) ? p : join(root, p);
+  const path = isAbsolute(p) ? p : join(root, p);
+  indexPaths.set(root, { gitfile, path });
+  return path;
+}
+
+/**
+ * The index's entries, each `<tag> <path>` as `ls-files -v` gives them, and
+ * the untracked files `add -A` would pick up: one git process for both.
+ */
+async function listIndex(root: string, env: { GIT_INDEX_FILE: string }, others: boolean): Promise<{ tagged: string[]; others: string[] }> {
+  const args = ["ls-files", "-v", "-z", "--cached", ...(others ? ["--others", "--exclude-standard"] : [])];
+  const out = { tagged: [] as string[], others: [] as string[] };
+  for (const item of (await git(root, args, env)).split("\0")) {
+    if (!item) continue;
+    if (item.startsWith("? ")) out.others.push(item.slice(2));
+    else out.tagged.push(item);
+  }
+  return out;
 }
 
 async function withTempIndex<T>(fn: (env: { GIT_INDEX_FILE: string }) => Promise<T>): Promise<T> {
@@ -118,10 +152,10 @@ async function withTempIndex<T>(fn: (env: { GIT_INDEX_FILE: string }) => Promise
  * would read as unchanged, and be overwritten. A skip-worktree entry with no
  * file (a sparse checkout) keeps its bit, so it doesn't read as deleted.
  */
-async function unkeep(root: string, env: { GIT_INDEX_FILE: string }, only?: ReadonlySet<string>): Promise<void> {
+async function unkeep(root: string, env: { GIT_INDEX_FILE: string }, tagged: readonly string[], only?: ReadonlySet<string>): Promise<void> {
   const assumed: string[] = [];
   const skipped: string[] = [];
-  for (const item of (await git(root, ["ls-files", "-v", "-z"], env)).split("\0")) {
+  for (const item of tagged) {
     // `<tag> <path>`: lower case is assume-unchanged, S is skip-worktree.
     const tag = item[0];
     if (!tag || item[1] !== " " || (tag === tag.toUpperCase() && tag !== "S")) continue;
@@ -143,10 +177,10 @@ export async function snapshotWorktree(root: string, opts: SnapshotOptions): Pro
   return withTempIndex(async (env) => {
     // mtime and all: git's racy check needs it (`copyIndex`). No index yet: `add -A` builds one.
     await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
-    await unkeep(root, env);
-    // What `add -A` would pick up new. Anything over the cap stays out, and is
-    // never even hashed.
-    const others = (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
+    // `others`: what `add -A` would pick up new. Anything over the cap stays
+    // out, and is never even hashed.
+    const { tagged, others } = await listIndex(root, env, true);
+    await unkeep(root, env, tagged);
     const tooBig: Snapshot["tooBig"] = [];
     for (let i = 0; i < others.length; i += 64) {
       const sizes = await Promise.all(
@@ -185,7 +219,8 @@ export async function snapshotWorktree(root: string, opts: SnapshotOptions): Pro
       if (fix.length) await git(root, ["update-index", "-z", "--index-info"], env, fix.join("\0") + "\0");
     }
     const tree = await git(root, ["write-tree"], env);
-    return { tree, commit: await commitFor(root, tree), tooBig, pinned };
+    const commit = tree === opts.base?.tree ? opts.base.commit : await commitFor(root, tree);
+    return { tree, commit, tooBig, pinned };
   });
 }
 
@@ -250,7 +285,7 @@ export async function snapshotBlobs(root: string, paths: readonly string[]): Pro
   if (!files.length) return out;
   return withTempIndex(async (env) => {
     await copyIndex(await indexPath(root), env.GIT_INDEX_FILE);
-    await unkeep(root, env, new Set(files));
+    await unkeep(root, env, (await listIndex(root, env, false)).tagged, new Set(files));
     // --replace: a file where the index has a directory (or the reverse).
     const add = (ps: readonly string[]) => git(root, ["update-index", "--add", "--replace", "-z", "--stdin"], env, ps.join("\0") + "\0");
     const want = new Set(files);
@@ -298,12 +333,14 @@ export async function diffTrees(root: string, a: string, b: string): Promise<Cha
  * The objects a machine needs to check `commit` out, given it already holds
  * tree `since` (when known): the commit, its root tree, and every tree and
  * blob that is new. Submodule commits are another repository's, so not these.
+ * A `since` this repository no longer has (a gc took an old snapshot's
+ * tree) lists everything: the machine is asked which it lacks anyway.
  */
 export async function objectsFor(root: string, commit: string, tree: string, since?: string): Promise<string[]> {
   const shas = new Set<string>([commit, tree]);
-  if (since) {
-    const changes = parseRawDiff(await git(root, ["diff-tree", "-r", "-t", "-z", "--no-renames", since, tree]));
-    for (const c of changes) if (!isAbsent(c.to) && c.to.mode !== "160000") shas.add(c.to.sha);
+  const diff = since ? await git(root, ["diff-tree", "-r", "-t", "-z", "--no-renames", since, tree]).catch(() => undefined) : undefined;
+  if (diff !== undefined) {
+    for (const c of parseRawDiff(diff)) if (!isAbsent(c.to) && c.to.mode !== "160000") shas.add(c.to.sha);
   } else {
     for (const line of (await git(root, ["ls-tree", "-r", "-t", "-z", tree])).split("\0")) {
       const m = line.match(/^\d{6} (blob|tree) ([0-9a-f]{40})\t/);
