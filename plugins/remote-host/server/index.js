@@ -21088,6 +21088,8 @@ const DEFAULT_TIMING = {
   sweepEveryMs: 10 * 6e4,
   gcEveryMs: 24 * 36e5,
   backoffMs: [2e3, 5e3, 15e3, 3e4, 6e4],
+  recentContactMs: 2e4,
+  nudgeMs: 5e3,
   idleSessionConnectionMs: 6e4
 };
 const SESSIONS_PER_CONNECTION = 8;
@@ -21113,6 +21115,8 @@ class HostLink {
   failures = 0;
   nextAttemptAt = 0;
   lastHelloAt = 0;
+  /** When a verified connection last closed: it was in touch until then. */
+  downAt = 0;
   lastProbeAt = 0;
   lastSweepAt = 0;
   busy = false;
@@ -21165,10 +21169,35 @@ class HostLink {
     void this.attempt().catch(() => {
     });
   }
-  /** A live, verified connection: the current one, or a new one. Rejects with why the machine can't be reached. */
+  /**
+   * A live, verified connection: the current one, or a new one. Rejects with
+   * why the machine can't be reached: AT ONCE while the link is offline and
+   * the machine hasn't answered for a while (see {@link refusal}).
+   */
   ready(signal) {
     if (this.linked?.conn.isOpen) return Promise.resolve(this.linked);
+    const refused = this.refusal();
+    if (refused) return Promise.reject(refused);
     return withAbort(this.attempt(), signal);
+  }
+  /**
+   * Why a caller shouldn't wait for a connect now. In the live run a command
+   * on a machine that had dropped off Wi-Fi waited 12 s for every address to
+   * fail before it was refused. So while the link reports offline and no
+   * connect is under way, a caller is refused at once with the last reason,
+   * unless the machine answered within {@link LinkTiming.recentContactMs}:
+   * then it was a blip, and a real attempt is worth the wait. A refusal brings
+   * the link's own next try closer, so a retry a few seconds later finds a
+   * machine that has come back.
+   */
+  refusal() {
+    if (this.current.state !== "offline") return void 0;
+    if (this.connecting && this.connecting.gen === this.gen) return void 0;
+    const now = this.now();
+    const lastContact = Math.max(this.lastHelloAt, this.downAt, this.memory.lastSeenAt ?? 0);
+    if (now - lastContact <= this.t.recentContactMs) return void 0;
+    this.nextAttemptAt = Math.min(this.nextAttemptAt, now + this.t.nudgeMs);
+    return new Error(`it is offline (${this.current.detail ?? "no answer"}); Dispatch keeps trying to reach it`);
   }
   /**
    * A channel running `command` for a shell, on a connection with room for it
@@ -21413,6 +21442,7 @@ class HostLink {
   closed(conn) {
     if (this.linked?.conn !== conn) return;
     this.linked = void 0;
+    this.downAt = this.now();
     if (this.disposed) return;
     this.report({ state: "offline", detail: CONNECTION_LOST, ...this.seen() });
     this.nextAttemptAt = this.now() + (this.t.backoffMs[0] ?? 2e3);
