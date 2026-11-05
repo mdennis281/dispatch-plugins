@@ -28,7 +28,7 @@ import { SshConnection, errText, pinnedHostKey, type ExecResult, type SshTarget 
 import type { GcResult, ProbeResult } from "@dispatch-plugins/host-agent";
 import type { ClientChannel } from "ssh2";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
-import { hostKeyAlgorithms, keySecretName, type HostConfig } from "./hosts.js";
+import { dialFamily, hostKeyAlgorithms, keySecretName, type HostConfig } from "./hosts.js";
 import { agentCommand, ensureAgent, type Exec, type HostPaths } from "./install.js";
 import { CONNECTING, CONNECTION_LOST, SETTINGS_CHANGED } from "./link-status.js";
 
@@ -341,6 +341,7 @@ export class HostLink {
 
   private target(address: string, key: string): SshTarget {
     const host = this.host;
+    const family = dialFamily(address, host.allowFrom);
     return {
       host: address,
       port: host.port,
@@ -349,6 +350,7 @@ export class HostLink {
       hostVerifier: pinnedHostKey(host.hostKey),
       algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) as never },
       keepalive: KEEPALIVE,
+      ...(family ? { family } : {}),
     };
   }
 

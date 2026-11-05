@@ -20280,6 +20280,7 @@ class SshConnection extends EventEmitter {
         keepaliveCountMax: this.target.keepalive?.countMax ?? 4,
         hostVerifier: toSsh2(this.target.hostVerifier ?? trustProvisioner()),
         ...this.target.algorithms ? { algorithms: this.target.algorithms } : {},
+        ...this.target.family === 4 ? { forceIPv4: true } : this.target.family === 6 ? { forceIPv6: true } : {},
         ...this.target.privateKey ? { privateKey: this.target.privateKey } : {},
         // macOS's sshd asks for a password through keyboard-interactive (PAM)
         // as often as through `password`.

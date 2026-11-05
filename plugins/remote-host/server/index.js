@@ -20289,6 +20289,7 @@ class SshConnection extends EventEmitter {
         keepaliveCountMax: this.target.keepalive?.countMax ?? 4,
         hostVerifier: toSsh2(this.target.hostVerifier ?? trustProvisioner()),
         ...this.target.algorithms ? { algorithms: this.target.algorithms } : {},
+        ...this.target.family === 4 ? { forceIPv4: true } : this.target.family === 6 ? { forceIPv6: true } : {},
         ...this.target.privateKey ? { privateKey: this.target.privateKey } : {},
         // macOS's sshd asks for a password through keyboard-interactive (PAM)
         // as often as through `password`.
@@ -20946,6 +20947,10 @@ function validFrom(a) {
   const bits = Number(m[2]);
   return v === 4 ? bits >= 8 && bits <= 32 : bits >= 32 && bits <= 128;
 }
+function dialFamily(address, allowFrom) {
+  if (isIP(address)) return void 0;
+  return allowFrom.length > 0 && allowFrom.every((a) => isIP(a.split("/")[0]) === 4) ? 4 : void 0;
+}
 const HOST_KEY_TYPES = ["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa"];
 function hostKeyAlgorithms(type) {
   return type === "ssh-rsa" ? ["rsa-sha2-512", "rsa-sha2-256"] : [type];
@@ -21290,6 +21295,7 @@ class HostLink {
   }
   target(address, key2) {
     const host = this.host;
+    const family = dialFamily(address, host.allowFrom);
     return {
       host: address,
       port: host.port,
@@ -21297,7 +21303,8 @@ class HostLink {
       privateKey: key2,
       hostVerifier: pinnedHostKey(host.hostKey),
       algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) },
-      keepalive: KEEPALIVE
+      keepalive: KEEPALIVE,
+      ...family ? { family } : {}
     };
   }
   make(target) {
@@ -21640,7 +21647,9 @@ class Pairing {
       port: r.port,
       username: r.user,
       hostVerifier: pinnedHostKey(r.hostKey),
-      algorithms: { serverHostKey: hostKeyAlgorithms(r.hostKeyType) }
+      algorithms: { serverHostKey: hostKeyAlgorithms(r.hostKeyType) },
+      // Proving the key works must dial as every later connection will.
+      ...dialFamily(r.address, r.allowFrom) ? { family: 4 } : {}
     };
     const password = typeof body2.password === "string" && body2.password ? body2.password : void 0;
     if (password) {
@@ -21729,7 +21738,8 @@ class Pairing {
       username: old.user,
       privateKey: previous,
       hostVerifier: pinnedHostKey(old.hostKey),
-      algorithms: { serverHostKey: hostKeyAlgorithms(old.hostKeyType) }
+      algorithms: { serverHostKey: hostKeyAlgorithms(old.hostKeyType) },
+      ...dialFamily(old.addresses[0], old.allowFrom) ? { family: 4 } : {}
     });
     try {
       await c.connect(CONNECT_MS);

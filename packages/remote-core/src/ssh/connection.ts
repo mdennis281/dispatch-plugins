@@ -34,6 +34,13 @@ export interface SshTarget extends SshAuth {
    * `intervalMs`, dropped after `countMax` unanswered. Default 15 s × 4.
    */
   keepalive?: { intervalMs: number; countMax: number };
+  /**
+   * Dial a host NAME on this address family only. Unset: whichever the
+   * resolver lists first, which for an mDNS name can be IPv6. Matters when
+   * the key's `from=` list names only addresses of the other family: sshd
+   * then refuses the key outright.
+   */
+  family?: 4 | 6;
 }
 
 export interface ExecResult {
@@ -91,6 +98,7 @@ export class SshConnection extends EventEmitter {
         keepaliveCountMax: this.target.keepalive?.countMax ?? 4,
         hostVerifier: toSsh2(this.target.hostVerifier ?? trustProvisioner()),
         ...(this.target.algorithms ? { algorithms: this.target.algorithms } : {}),
+        ...(this.target.family === 4 ? { forceIPv4: true } : this.target.family === 6 ? { forceIPv6: true } : {}),
         ...(this.target.privateKey ? { privateKey: this.target.privateKey } : {}),
         // macOS's sshd asks for a password through keyboard-interactive (PAM)
         // as often as through `password`.
