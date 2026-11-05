@@ -25,7 +25,7 @@
  */
 import type { PluginContext, PluginLog, TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
 import { SshConnection, errText, pinnedHostKey, type ExecResult, type SshTarget } from "@dispatch-plugins/remote-core";
-import type { ProbeResult } from "@dispatch-plugins/host-agent";
+import type { GcResult, ProbeResult } from "@dispatch-plugins/host-agent";
 import type { ClientChannel } from "ssh2";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
 import { hostKeyAlgorithms, keySecretName, type HostConfig } from "./hosts.js";
@@ -59,6 +59,8 @@ export interface LinkTiming {
   helloEveryMs: number;
   probeEveryMs: number;
   sweepEveryMs: number;
+  /** How often dispatch-host collects this instance's garbage there (trash, unused repositories, git's own). */
+  gcEveryMs: number;
   /** Waits between failed connects; the last repeats. */
   backoffMs: readonly number[];
   /** An extra connection with no shells on it is closed after this long. */
@@ -70,6 +72,7 @@ export const DEFAULT_TIMING: LinkTiming = {
   helloEveryMs: 30_000,
   probeEveryMs: 5 * 60_000,
   sweepEveryMs: 10 * 60_000,
+  gcEveryMs: 24 * 3_600_000,
   backoffMs: [2_000, 5_000, 15_000, 30_000, 60_000],
   idleSessionConnectionMs: 60_000,
 };
@@ -95,6 +98,8 @@ export interface HostLinkDeps {
   connect?: (target: SshTarget) => LinkConnection;
   timing?: Partial<LinkTiming>;
   now?: () => number;
+  /** Each time the link (re)connects and is verified: work that waited for the machine can go now. */
+  onConnected?: () => void;
 }
 
 /** What `kv` keeps per machine, per instance: shown while it is offline, and used to try the last good address first. */
@@ -102,6 +107,8 @@ export interface LinkMemory {
   lastAddress?: string;
   lastSeenAt?: number;
   probe?: ProbeResult;
+  /** When this instance last had dispatch-host collect its garbage there. */
+  lastGcAt?: number;
 }
 
 interface PoolEntry {
@@ -129,6 +136,7 @@ export class HostLink {
   private lastProbeAt = 0;
   private lastSweepAt = 0;
   private busy = false;
+  private gcRunning = false;
   private disposed = false;
   private memory: LinkMemory = {};
   private current: TerminalBackendStatusInput = { state: "degraded", detail: CONNECTING };
@@ -399,7 +407,8 @@ export class HostLink {
     conn.on("close", () => this.closed(conn));
     const at = this.now();
     this.lastHelloAt = at;
-    this.memory = { ...this.memory, lastAddress: address, lastSeenAt: at, ...(probe ? { probe } : {}) };
+    // A machine paired just now is collected a day from now, not at once.
+    this.memory = { ...this.memory, lastAddress: address, lastSeenAt: at, lastGcAt: this.memory.lastGcAt ?? at, ...(probe ? { probe } : {}) };
     if (probe) this.lastProbeAt = at;
     void this.saveMemory();
     this.report(this.memory.probe ? statusFrom(this.memory.probe, at) : { state: "online", lastSeenAt: at });
@@ -408,6 +417,11 @@ export class HostLink {
       `remote-host ${this.host.slug}: connected at ${address}` +
         (p ? ` (${[p.os.name, p.os.version].filter(Boolean).join(" ") || p.platform}, ${p.arch})` : ""),
     );
+    try {
+      this.deps.onConnected?.();
+    } catch (err) {
+      this.deps.log.warn(`remote-host ${this.host.slug}: ${errText(err)}`);
+    }
     return linked;
   }
 
@@ -533,9 +547,35 @@ export class HostLink {
           })
           .catch((err: unknown) => this.deps.log.warn(`remote-host ${this.host.slug}: sweep failed: ${errText(err)}`));
       }
+      if (!this.gcRunning && now - (this.memory.lastGcAt ?? now) >= this.t.gcEveryMs) this.collectGarbage();
     } finally {
       this.busy = false;
     }
+  }
+
+  /**
+   * Have dispatch-host collect this instance's garbage there. In the
+   * background: emptying a trash of checkouts can take minutes, and hellos
+   * must go on meanwhile. A failure waits for the next day too, rather than
+   * being retried at every tick.
+   */
+  private collectGarbage(): void {
+    this.gcRunning = true;
+    void this.agent<GcResult>(["gc", "--instance", this.deps.instanceId], 15 * 60_000)
+      .then((r) => {
+        const did = [
+          r.trash ? `${r.trash} deleted director${r.trash === 1 ? "y" : "ies"}` : "",
+          r.reposRemoved.length ? `${r.reposRemoved.length} unused repositor${r.reposRemoved.length === 1 ? "y" : "ies"}` : "",
+        ].filter(Boolean);
+        if (did.length) this.deps.log.info(`remote-host ${this.host.slug}: cleaned up ${did.join(" and ")}`);
+        for (const e of r.errors ?? []) this.deps.log.warn(`remote-host ${this.host.slug}: cleaning up: ${e}`);
+      })
+      .catch((err: unknown) => this.deps.log.warn(`remote-host ${this.host.slug}: cleaning up failed: ${errText(err)}`))
+      .finally(() => {
+        this.gcRunning = false;
+        this.memory.lastGcAt = this.now();
+        void this.saveMemory();
+      });
   }
 
   private report(status: TerminalBackendStatusInput): void {

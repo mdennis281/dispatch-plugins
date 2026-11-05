@@ -33,7 +33,13 @@ export default definePlugin({
       if (!ctx.settings.set) throw new Error("this Dispatch cannot store plugin settings (ctx.settings.set); update Dispatch");
       await ctx.settings.set({ hosts: next });
     };
-    const registry = new HostRegistry({ ctx, instanceId, agent: bundledAgent(), runtime: nodejsOrgRuntime() });
+    const registry = new HostRegistry({
+      ctx,
+      instanceId,
+      ...(ctx.instance?.previousId ? { previousInstanceId: ctx.instance.previousId } : {}),
+      agent: bundledAgent(),
+      runtime: nodejsOrgRuntime(),
+    });
     const pairing = new Pairing({
       hosts,
       saveHosts,
@@ -60,6 +66,27 @@ export default definePlugin({
     });
     ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, hosts, saveHosts }));
     live = { registry, pairing, off };
+  },
+
+  /**
+   * After every activation Dispatch lists the chats that exist; whatever a
+   * machine holds for any other chat was deleted while the plugin wasn't
+   * listening. Each machine does that in the background, now or when it is
+   * next reachable, so this returns at once.
+   */
+  reconcile(e) {
+    live?.registry.reconcile(new Set(e.chats.map((c) => c.id)));
+  },
+
+  /**
+   * Uninstall: nothing will reconcile this instance's work again, so every
+   * reachable machine ends its sessions and deletes its files now. Disable,
+   * stop and restart keep everything: a session left without Dispatch ends
+   * itself when its heartbeat stops.
+   */
+  async onShutdown(e) {
+    if (e.reason !== "uninstall" || !live) return;
+    await live.registry.forgetAll(Math.max(500, e.deadline - Date.now() - 250));
   },
 
   async deactivate() {

@@ -69,6 +69,28 @@ describe("hosts", () => {
     expect(warnings.join("\n")).toMatch(/listed twice/);
     expect(readHosts("junk", (m) => warnings.push(m))).toEqual([]);
   });
+
+  it("keeps which key line a machine was paired with, and nothing for one paired before it was recorded", () => {
+    const good = {
+      slug: "cvx-mac",
+      label: "CVX Mac",
+      user: "dispatch",
+      addresses: ["10.0.10.16"],
+      hostKey: `SHA256:${"a".repeat(43)}`,
+      hostKeyType: "ssh-ed25519",
+      keyFingerprint: `SHA256:${"b".repeat(43)}`,
+      allowFrom: ["10.0.4.1"],
+      pairedAt: "2026-11-01T00:00:00.000Z",
+    };
+    const [now, before, odd] = readHosts([
+      { ...good, keyLine: 2 },
+      { ...good, slug: "old" },
+      { ...good, slug: "odd", keyLine: "2" },
+    ]);
+    expect(now?.keyLine).toBe(2);
+    expect(before && "keyLine" in before).toBe(false);
+    expect(odd && "keyLine" in odd).toBe(false);
+  });
 });
 
 describe("what may go in from= and the pins", () => {

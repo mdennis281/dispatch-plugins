@@ -237,8 +237,11 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     expect(alive(bg)).toBe(true);
     await a.drop();
     await a.waitFor(() => !alive(pid) && !alive(bg), 8_000);
-    const rec = JSON.parse(readFileSync(sessionPaths(root, INSTANCE, id).record, "utf8")) as { state: string; exit: { reason: string } };
-    expect(rec).toMatchObject({ state: "exited", exit: { reason: "heartbeat" } });
+    // The owner records the exit after the tree is gone, so wait for that too
+    // (reading it the moment the processes die raced it on CI).
+    const read = () => JSON.parse(readFileSync(sessionPaths(root, INSTANCE, id).record, "utf8")) as { state: string; exit?: { reason: string } };
+    await a.waitFor(() => read().state === "exited", 5_000);
+    expect(read()).toMatchObject({ state: "exited", exit: { reason: "heartbeat" } });
   });
 
   it("reports a session that ended while nobody was attached with its real exit code", async () => {
@@ -330,5 +333,23 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     });
     expect(found).toBe(true);
     r.send(F.kill);
+  });
+
+  it("forget ends a deleted chat's live session, its background children and its directory, from the CLI", async () => {
+    const id = sid();
+    const dir = join(root, INSTANCE, "chats", "c1");
+    execFileSync("mkdir", ["-p", dir]);
+    const r = new Relay(id, [], dir);
+    const { pid } = await r.ready();
+    await r.run("sleep 300 & echo bg=$!");
+    const bg = Number((await r.waitText(/bg=(\d+)/))[1]);
+    expect((cli("chats") as Array<{ chat: string }>).map((c) => c.chat)).toContain("c1");
+    const out = cli("forget", "--chat", "c1") as { killed: string[]; removed: boolean };
+    expect(out.killed).toContain(id);
+    expect(out.removed).toBe(true);
+    await r.waitFor(() => !alive(pid) && !alive(bg));
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(sessionPaths(root, INSTANCE, id).dir)).toBe(false);
+    expect((cli("chats") as Array<{ chat: string }>).map((c) => c.chat)).not.toContain("c1");
   });
 });

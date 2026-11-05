@@ -8,7 +8,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { get } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -252,6 +252,35 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     expect(t.terminalPorts.filter((p) => p.chatId !== "chat-ports")).toEqual([]);
     h.kill();
     await until(() => !mine(), 10_000, "the forward withdrawn");
+  });
+
+  it("ends an idle chat's shells and what they started there, and keeps its directory", { timeout: 60_000 }, async () => {
+    const h = await t.terminals.spawn(ID, { chatId: "chat-idle", name: "main" });
+    const w = watch(h);
+    h.stdin.write("sleep 300 &\necho pid=$!\n");
+    await until(() => /pid=\d+/.test(w.out), 20_000, "the sleep's pid");
+    const pid = Number(w.out.match(/pid=(\d+)/)![1]);
+    await t.terminals.chatIdle("chat-idle");
+    await until(() => w.exit !== undefined, 10_000, "the shell to end");
+    await until(() => !alive(pid), 10_000, `the background sleep (pid ${pid}) to end`);
+    expect(existsSync(join(home, ".dispatch-host", INSTANCE, "chats", "chat-idle"))).toBe(true);
+  });
+
+  it("deletes a deleted chat's directory, sessions and record there", { timeout: 60_000 }, async () => {
+    const h = await t.terminals.spawn(ID, { chatId: "chat-del", name: "main" });
+    const w = watch(h);
+    h.stdin.write("echo made > here.txt; sleep 300 &\necho pid=$!\n");
+    await until(() => /pid=\d+/.test(w.out), 20_000, "the sleep's pid");
+    const pid = Number(w.out.match(/pid=(\d+)/)![1]);
+    const dir = join(home, ".dispatch-host", INSTANCE, "chats", "chat-del");
+    expect(existsSync(join(dir, "here.txt"))).toBe(true);
+    expect([...t.kv.keys()]).toContain("served:e2e:chat-del");
+    await t.terminals.chatDeleted("chat-del");
+    expect(existsSync(dir)).toBe(false);
+    await until(() => !alive(pid), 10_000, `the background sleep (pid ${pid}) to end`);
+    expect([...t.kv.keys()]).not.toContain("served:e2e:chat-del");
+    const rows = await registry.get("e2e")!.link.agent<Array<{ chat: string }>>(["list", "--instance", INSTANCE]);
+    expect(rows.filter((r) => r.chat === "chat-del")).toEqual([]);
   });
 
   it("runs more shells than one connection has sessions for, and still answers", { timeout: 90_000 }, async () => {

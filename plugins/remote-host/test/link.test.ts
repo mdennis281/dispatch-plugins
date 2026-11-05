@@ -176,6 +176,22 @@ describe("staying up", () => {
     expect(m.open()).toHaveLength(1);
   });
 
+  it("has dispatch-host collect garbage there once a day, the first a day after pairing, and remembers when", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const kv = new Map<string, unknown>();
+    const { l } = link(m, { kv, timing: { gcEveryMs: 150 } });
+    l.start();
+    await l.ready();
+    expect(m.commands.some((c) => c.includes("'gc'"))).toBe(false);
+    await until(() => m.commands.some((c) => c.includes("'gc'")));
+    const at = () => (kv.get(`host:${HOST.slug}`) as { lastGcAt?: number } | undefined)?.lastGcAt;
+    await until(() => typeof at() === "number");
+    // Not again at once: the next waits its day (here, 150 ms).
+    const n = m.commands.filter((c) => c.includes("'gc'")).length;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(m.commands.filter((c) => c.includes("'gc'")).length).toBe(n);
+  });
+
   it("drops a link whose hello goes unanswered", async () => {
     const m = machine({ "10.0.10.16": "ok" });
     const { l, statuses } = link(m);

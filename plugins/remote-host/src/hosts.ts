@@ -32,7 +32,14 @@ export interface HostConfig {
   /** The `from=` list on the machine's authorized_keys line. */
   allowFrom: string[];
   pairedAt: string;
+  /**
+   * Which form of the authorized_keys line it was paired with ({@link KEY_LINE}).
+   * Absent: before 0.4.0, whose line lets forwards reach 127.0.0.1 only, not ::1.
+   */
+  keyLine?: number;
 }
+
+export { KEY_LINE } from "./key-line.js";
 
 /** `remote-host/<slug>`. */
 export function backendId(slug: string): string {
@@ -84,6 +91,7 @@ export function readHosts(raw: unknown, warn: (msg: string) => void = () => {}):
       keyFingerprint: host.keyFingerprint,
       allowFrom: [...host.allowFrom],
       pairedAt: host.pairedAt,
+      ...(Number.isInteger(host.keyLine) && (host.keyLine as number) > 0 ? { keyLine: host.keyLine } : {}),
     });
   }
   return out;

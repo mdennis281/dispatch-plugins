@@ -3,4 +3,4 @@
  * path adds a content hash (see install.ts), so a rebuild under the same
  * version still installs beside the old one.
  */
-export const AGENT_VERSION = "0.1.0";
+export const AGENT_VERSION = "0.2.0";

@@ -42,6 +42,7 @@ import {
   validAddress,
   validFrom,
   validUser,
+  KEY_LINE,
   type HostConfig,
 } from "./hosts.js";
 import { describeConnectError, type LinkConnection } from "./link.js";
@@ -270,6 +271,7 @@ export class Pairing {
       keyFingerprint: hostKeyFingerprint(Buffer.from(keyBlobOf(p.publicKey), "base64")),
       allowFrom: r.allowFrom,
       pairedAt: new Date(this.now()).toISOString(),
+      keyLine: KEY_LINE,
     };
     const hosts = this.deps.hosts();
     const before = hosts.find((h) => h.slug === r.slug);
