@@ -114,7 +114,10 @@ If the machine can't be reached, the rest still happens, and a notice says which
 
 Each machine reports one of three states to Dispatch, re-checked every 30 s:
 - **online**;
-- **degraded**, with the reason: low disk, no git, an unreadable login environment;
+- **degraded**, with the reason: low disk, an unreadable login environment, or git that sync can't run. The reason
+  names that git and says why: none on the PATH, no developer tools, or (exit 69) Xcode's license not accepted,
+  with the fix. On a Mac, sync's git is the Command Line Tools'. It runs with `DEVELOPER_DIR` unset, so an Xcode
+  update can't block it ([macOS setup](../../docs/setup/macos-host.md), step 5);
 - **offline**, with the reason: no answer, refused, the key refused, a different host key.
 
 The pane shows it on each machine's row, and refreshes every 5 s while it is open. `GET /hosts` lists the machines with their status and their last probe (OS, architecture, tools, free disk, who is logged in at the screen). **Check now** (`POST /hosts/<name>/check`) reconnects at once.

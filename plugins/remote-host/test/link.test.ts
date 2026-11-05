@@ -4,6 +4,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
+import type { ProbeResult } from "@dispatch-plugins/host-agent";
 import type { HostConfig } from "../src/hosts.js";
 import { RECONNECTING_WORDS } from "../src/link-status.js";
 import { CONTROL_EXECS, HostLink, SESSIONS_PER_CONNECTION, describeConnectError, statusFrom, type LinkTiming } from "../src/link.js";
@@ -448,5 +449,24 @@ describe("statusFrom", () => {
     expect(statusFrom(PROBE, 5)).toEqual({ state: "online", lastSeenAt: 5 });
     expect(statusFrom({ ...PROBE, freeDiskBytes: 2 * 1024 ** 3 }, 5)).toEqual({ state: "degraded", detail: "low disk: 2.0 GB free", lastSeenAt: 5 });
     expect(statusFrom({ ...PROBE, tools: { ...PROBE.tools, git: null } }, 5).detail).toBe("git not found");
+  });
+
+  it("names the git sync found and why it won't run, not 'git not found'", () => {
+    const XCODE = "/Applications/Xcode.app/Contents/Developer";
+    const at = (syncGit: NonNullable<ProbeResult["syncGit"]>) => statusFrom({ ...PROBE, tools: { ...PROBE.tools, git: null }, syncGit }, 5).detail;
+    // cvx-mac once Xcode updated itself.
+    expect(at({ path: "/usr/bin/git", developerDir: XCODE, exitCode: 69, version: null, error: "You have not agreed to the Xcode license agreements." })).toBe(
+      `git (/usr/bin/git from ${XCODE}) is blocked: Xcode's license isn't accepted (exit 69). ` +
+        "Point it at the Command Line Tools: sudo xcode-select -s /Library/Developer/CommandLineTools",
+    );
+    expect(at({ path: "/usr/bin/git", developerDir: null, exitCode: null, version: null, error: "no developer tools; install the Command Line Tools (xcode-select --install)" })).toBe(
+      "git (/usr/bin/git) wasn't run: no developer tools; install the Command Line Tools (xcode-select --install)",
+    );
+    expect(at({ path: "/opt/homebrew/bin/git", exitCode: 127, version: null, error: "dyld: Library not loaded" })).toBe(
+      "git (/opt/homebrew/bin/git) won't run (exit 127: dyld: Library not loaded)",
+    );
+    expect(at({ path: null, exitCode: null, version: null })).toBe("git not found");
+    // Sync's git is what counts: a shell PATH without git is no reason to say so.
+    expect(at({ path: "/usr/bin/git", developerDir: "/Library/Developer/CommandLineTools", exitCode: 0, version: "git version 2.50.1 (Apple Git-155)" })).toBeUndefined();
   });
 });

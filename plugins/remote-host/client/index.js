@@ -236,10 +236,11 @@ function probeLine(v) {
   return [os, p.arch, disk, tools].filter(Boolean).join(" · ");
 }
 function missingTools(v) {
-  var _a;
+  var _a, _b;
   const t = (_a = v.probe) == null ? void 0 : _a.tools;
   if (!t) return [];
-  return ["git", "node", "pnpm"].filter((k) => !t[k]);
+  const sync = (_b = v.probe) == null ? void 0 : _b.syncGit;
+  return ["git", "node", "pnpm"].filter((k) => !t[k] && !(k === "git" && (sync == null ? void 0 : sync.path)));
 }
 function ago(at) {
   const s = Math.max(0, Math.round((Date.now() - at) / 1e3));

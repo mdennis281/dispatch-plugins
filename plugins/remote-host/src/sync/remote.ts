@@ -15,7 +15,7 @@
  */
 import { posix } from "node:path";
 import type { Writable } from "node:stream";
-import { chatWorktreePath, repoPath, sq } from "@dispatch-plugins/host-agent";
+import { GIT_SH_ENV, chatWorktreePath, repoPath, sq } from "@dispatch-plugins/host-agent";
 import type { ExecResult } from "@dispatch-plugins/remote-core";
 import { parseRawDiff, type Change } from "./local.js";
 
@@ -46,9 +46,14 @@ export function remotePaths(root: string, instance: string, chatId: string, repo
   return { work, repo, alternates: posix.relative(posix.join(work, ".git", "objects"), posix.join(repo, "objects")) };
 }
 
+/** Every script here starts with it: they all run git. */
 const PRELUDE = [
-  // C: git's messages are matched below, and file names are bytes.
-  "export LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1",
+  // No DEVELOPER_DIR: on a Mac it would choose the git `/usr/bin/git` runs,
+  // and Xcode's is blocked after every Xcode update until its license is
+  // accepted (dispatch-host's git-env.ts). C: git's messages are matched
+  // below, and file names are bytes.
+  GIT_SH_ENV,
+  "export GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1",
   "export GIT_AUTHOR_NAME=Dispatch GIT_AUTHOR_EMAIL=dispatch@localhost GIT_COMMITTER_NAME=Dispatch GIT_COMMITTER_EMAIL=dispatch@localhost",
 ].join("\n");
 
@@ -142,7 +147,7 @@ export async function initCheckout(remote: RemoteSide, p: RemotePaths): Promise<
 /** Which of `shas` the checkout can't see. */
 export async function missingObjects(remote: RemoteSide, p: RemotePaths, shas: readonly string[]): Promise<string[]> {
   if (!shas.length) return [];
-  const script = [`cd ${sq(p.work)} || exit 1`, `git cat-file --batch-check | awk '$2 == "missing" {print $1}'`].join("\n");
+  const script = [PRELUDE, `cd ${sq(p.work)} || exit 1`, `git cat-file --batch-check | awk '$2 == "missing" {print $1}'`].join("\n");
   const r = await remote.run(script, { input: shas.join("\n") + "\n", timeoutMs: 5 * 60_000 });
   if (r.code !== 0) throw new Error(`asking the machine what it has failed: ${r.stderr.trim() || `exit ${r.code}`}`);
   return r.stdout.split("\n").filter((l) => /^[0-9a-f]{40}$/.test(l));
@@ -155,13 +160,13 @@ export async function receiveObjects(
   fill: (sink: Writable) => Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
-  const r = await remote.stream(`git --git-dir=${sq(p.repo)} index-pack --stdin >/dev/null`, { input: fill }, signal);
+  const r = await remote.stream(`${PRELUDE}\ngit --git-dir=${sq(p.repo)} index-pack --stdin >/dev/null`, { input: fill }, signal);
   if (r.code !== 0) throw new Error(`the machine could not take the files: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
 
 /** A pack of everything `commit` holds (its tree, whole), from the checkout, into `sink`. */
 export async function sendCommit(remote: RemoteSide, p: RemotePaths, commit: string, sink: Writable, signal?: AbortSignal): Promise<void> {
-  const r = await remote.stream(`cd ${sq(p.work)} && echo ${sq(commit)} | git pack-objects --revs --stdout -q`, { output: sink }, signal);
+  const r = await remote.stream(`${PRELUDE}\ncd ${sq(p.work)} && echo ${sq(commit)} | git pack-objects --revs --stdout -q`, { output: sink }, signal);
   if (r.code !== 0) throw new Error(`fetching the last synced snapshot failed: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
 
@@ -169,7 +174,7 @@ export async function sendCommit(remote: RemoteSide, p: RemotePaths, commit: str
 export async function sendObjects(remote: RemoteSide, p: RemotePaths, shas: readonly string[], sink: Writable, signal?: AbortSignal): Promise<void> {
   const list = shas.join("\n") + "\n";
   const r = await remote.stream(
-    `cd ${sq(p.work)} && git pack-objects --stdout -q`,
+    `${PRELUDE}\ncd ${sq(p.work)} && git pack-objects --stdout -q`,
     {
       input: async (s) => {
         await new Promise<void>((res, rej) => s.end(list, (err?: Error | null) => (err ? rej(err) : res())));

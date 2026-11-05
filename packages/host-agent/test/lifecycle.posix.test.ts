@@ -155,6 +155,32 @@ describe.skipIf(!posix)("forget", () => {
     expect(refs(a.repo)).toEqual([]);
   });
 
+  it("runs its git without DEVELOPER_DIR, so one pointing at Xcode can't put it behind Xcode's license", async () => {
+    const a = syncedChat("chat-a");
+    // /usr/bin/git on a Mac with the Command Line Tools chosen: Xcode's git (license not accepted) only when DEVELOPER_DIR says so.
+    const bin = join(root, "..", "stubbin");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "git"),
+      '#!/bin/sh\nif [ -n "${DEVELOPER_DIR:-}" ]; then echo "You have not agreed to the Xcode license agreements." >&2; exit 69; fi\nPATH=${PATH#*:} exec git "$@"\n',
+      { mode: 0o755 },
+    );
+    const saved = { PATH: process.env.PATH, DEVELOPER_DIR: process.env.DEVELOPER_DIR };
+    process.env.PATH = `${bin}:${saved.PATH ?? ""}`;
+    process.env.DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer";
+    let r: Awaited<ReturnType<typeof forgetChat>>;
+    try {
+      r = await forgetChat({ root, instance: I, chat: "chat-a", kill });
+    } finally {
+      process.env.PATH = saved.PATH;
+      if (saved.DEVELOPER_DIR === undefined) delete process.env.DEVELOPER_DIR;
+      else process.env.DEVELOPER_DIR = saved.DEVELOPER_DIR;
+    }
+    expect(r.errors).toBeUndefined();
+    expect(r.refs).toBe(1);
+    expect(refs(a.repo)).toEqual([]);
+  });
+
   it("passes over a repository directory git never initialised, rather than failing every delete", async () => {
     // A sync that made repos/<key>.git and then found git broken leaves it empty.
     const a = syncedChat("chat-a");
