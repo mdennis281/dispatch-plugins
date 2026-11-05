@@ -203,9 +203,14 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     expect(done[1]).toBe("0");
     const all = a.text().slice(0, had) + b.text();
     expect(all.match(/line\d/g)).toEqual(["line1", "line2", "line3", "line4", "line5", "line6"]);
+    // RUN_END is a frame of its own, after the output that holds the
+    // sentinel: it can arrive a read later. Wait for it rather than look the
+    // moment the sentinel shows (that flaked on macOS). The journal's end is
+    // written before the frame is sent, so it is there once the frame is.
+    const end = await b.waitFor(() => b.of<{ runId: string; exitCode: number }>(F.runEnd).find((e) => e.runId === "r-drop"));
+    expect(end.exitCode).toBe(0);
     const runs = readFileSync(sessionPaths(root, INSTANCE, id).runs, "utf8");
     expect(runs).toMatch(/"t":"end","runId":"r-drop","exitCode":0/);
-    expect(b.of<{ runId: string }>(F.runEnd).map((e) => e.runId)).toContain("r-drop");
     b.send(F.kill);
   });
 
