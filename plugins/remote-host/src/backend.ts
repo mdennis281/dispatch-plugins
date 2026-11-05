@@ -27,7 +27,7 @@ import type {
   TerminalSpawnInfo,
 } from "@dispatch/plugin-sdk";
 import type { Attribution, ChatDir, ForgetResult } from "@dispatch-plugins/host-agent";
-import { assertId, chatWorktreePath, instanceLayout, sq, type ProbeResult } from "@dispatch-plugins/host-agent";
+import { XCODE_DEVELOPER_DIR, assertId, chatWorktreePath, instanceLayout, sq, type ProbeResult } from "@dispatch-plugins/host-agent";
 import { errText, git } from "@dispatch-plugins/remote-core";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
@@ -391,6 +391,14 @@ export class HostBackend implements TerminalBackend {
         `connection pauses the command and picks it up again; it is not restarted.`,
       `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, ` +
         `with PATH and locale from the login shell. On it: ${tools(probe)}.`,
+      ...(probe?.platform === "darwin"
+        ? [
+            `- Run Xcode's tools (xcodebuild, xcrun simctl, Xcode's clang) with Xcode's developer directory set on that ` +
+              `command: \`DEVELOPER_DIR=${XCODE_DEVELOPER_DIR} xcodebuild …\`. Don't export it or change \`xcode-select\`: ` +
+              `the machine's own developer directory is the Command Line Tools, whose git the sync uses, and an Xcode update ` +
+              `would block Xcode's git until its license is accepted.`,
+          ]
+        : []),
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked ` +
         `files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts ` +
         `at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, ` +

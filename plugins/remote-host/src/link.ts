@@ -675,9 +675,30 @@ export function statusFrom(probe: ProbeResult, lastSeenAt: number): TerminalBack
   if (typeof probe.freeDiskBytes === "number" && probe.freeDiskBytes < LOW_DISK_BYTES) {
     issues.push(`low disk: ${(probe.freeDiskBytes / 1024 ** 3).toFixed(1)} GB free`);
   }
-  if (!probe.tools?.git) issues.push("git not found");
+  const git = gitIssue(probe);
+  if (git) issues.push(git);
   if (probe.loginEnvError) issues.push("login shell environment unreadable");
   return issues.length ? { state: "degraded", detail: issues.join("; "), lastSeenAt } : { state: "online", lastSeenAt };
+}
+
+/**
+ * Why sync's git won't run there, naming the git found: "not found" only
+ * when there is none. An agent older than 0.2.2 reports only the shell's.
+ */
+function gitIssue(probe: ProbeResult): string | undefined {
+  const g = probe.syncGit;
+  if (!g) return probe.tools?.git ? undefined : "git not found";
+  if (g.version) return undefined;
+  if (!g.path) return "git not found";
+  const which = `git (${g.path}${g.developerDir ? ` from ${g.developerDir}` : ""})`;
+  if (g.exitCode === 69) {
+    return (
+      `${which} is blocked: Xcode's license isn't accepted (exit 69). Point it at the Command Line Tools: ` +
+      `sudo xcode-select -s /Library/Developer/CommandLineTools`
+    );
+  }
+  if (g.exitCode === null) return `${which} wasn't run: ${g.error ?? "unknown"}`;
+  return `${which} won't run (exit ${g.exitCode}${g.error ? `: ${g.error}` : ""})`;
 }
 
 /** One short reason per address, for the status line and the refusal. */

@@ -28,6 +28,7 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { gitEnv } from "./git-env.js";
 import { assertId, instanceLayout, type SessionRecord } from "./layout.js";
 import { listRecords, readRecord } from "./records.js";
 
@@ -367,7 +368,7 @@ function entries(dir: string): string[] {
 
 function git(args: string[], timeoutMs = 60_000): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolveRun) => {
-    execFile("git", args, { env: { ...process.env, LC_ALL: "C" }, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile("git", args, { env: gitEnv(), timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
       const code = err ? (typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : -1) : 0;
       resolveRun({ code, stdout: String(stdout), stderr: String(stderr) });
     });

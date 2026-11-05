@@ -310,7 +310,9 @@ function probeLine(v: HostView): string {
 function missingTools(v: HostView): string[] {
   const t = v.probe?.tools;
   if (!t) return [];
-  return (["git", "node", "pnpm"] as const).filter((k) => !t[k]);
+  // A git that is there but won't run (Xcode's license) isn't missing: the status says what is wrong with it.
+  const sync = v.probe?.syncGit;
+  return (["git", "node", "pnpm"] as const).filter((k) => !t[k] && !(k === "git" && sync?.path));
 }
 
 function ago(at: number): string {

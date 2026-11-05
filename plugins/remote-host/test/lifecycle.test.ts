@@ -198,6 +198,23 @@ describe("uninstall", () => {
   });
 });
 
+describe("the agent's note", () => {
+  it("on a Mac, says to run Xcode's tools with DEVELOPER_DIR on the command, and to leave xcode-select alone", async () => {
+    const { r, connected } = setup();
+    await connected();
+    const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
+    expect(note).toContain("`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild …`");
+    expect(note).toMatch(/Don't export it or change `xcode-select`/);
+  });
+
+  it("says nothing of Xcode on Linux", async () => {
+    const { m, r, connected } = setup();
+    m.probe = { ...PROBE, platform: "linux", os: { name: "Ubuntu", version: "24.04" } };
+    await connected();
+    expect(r.get("studio")!.backend.agentNote({ chatId: "chat-1" })).not.toContain("DEVELOPER_DIR");
+  });
+});
+
 describe("the previous instance id", () => {
   it("shows what this Dispatch left there under its old id, and nothing for any other instance", async () => {
     const { m, r, connected } = setup({ previous: "old-id" });
