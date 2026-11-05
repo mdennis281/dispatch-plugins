@@ -37,6 +37,7 @@ import {
   HOST_KEY_TYPES,
   SLUG_PATTERN,
   backendId,
+  dialFamily,
   hostKeyAlgorithms,
   keySecretName,
   validAddress,
@@ -210,6 +211,8 @@ export class Pairing {
       username: r.user,
       hostVerifier: pinnedHostKey(r.hostKey),
       algorithms: { serverHostKey: hostKeyAlgorithms(r.hostKeyType) as never },
+      // Proving the key works must dial as every later connection will.
+      ...(dialFamily(r.address, r.allowFrom) ? { family: 4 as const } : {}),
     };
     const password = typeof body.password === "string" && body.password ? body.password : undefined;
 
@@ -310,6 +313,7 @@ export class Pairing {
       privateKey: previous,
       hostVerifier: pinnedHostKey(old.hostKey),
       algorithms: { serverHostKey: hostKeyAlgorithms(old.hostKeyType) as never },
+      ...(dialFamily(old.addresses[0]!, old.allowFrom) ? { family: 4 as const } : {}),
     });
     try {
       await c.connect(CONNECT_MS);

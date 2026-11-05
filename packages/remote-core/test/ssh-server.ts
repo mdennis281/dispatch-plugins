@@ -40,6 +40,8 @@ export interface TestSshServerOptions {
   allowForwards?: boolean;
   /** Refuse a session past this many open at once on one connection, like sshd's `MaxSessions` (10). Default: no limit. */
   maxSessions?: number;
+  /** The address to listen on. Default 127.0.0.1; `::1` plays a machine reachable over IPv6 only. */
+  listenHost?: string;
 }
 
 export interface TestSshServer {
@@ -135,10 +137,11 @@ export async function startTestSshServer(opts: TestSshServerOptions = {}): Promi
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const listenHost = opts.listenHost ?? "127.0.0.1";
+  await new Promise<void>((resolve) => server.listen(0, listenHost, () => resolve()));
   const { port } = server.address() as AddressInfo;
   return {
-    host: "127.0.0.1",
+    host: listenHost,
     port,
     fingerprint: hostKeyFingerprint(parsed.getPublicSSH()),
     keyType: parsed.type,

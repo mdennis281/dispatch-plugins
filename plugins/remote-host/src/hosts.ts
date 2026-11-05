@@ -140,6 +140,19 @@ export function validFrom(a: string): boolean {
   return v === 4 ? bits >= 8 && bits <= 32 : bits >= 32 && bits <= 128;
 }
 
+/**
+ * The address family to dial `address` on, when it has to be pinned. A name
+ * (`cvx-mac.local`) can resolve to IPv6 first, and sshd refuses a key whose
+ * `from=` list holds only IPv4 addresses when the connection comes from this
+ * computer's IPv6 address: in the live run the machine came back from a Wi-Fi
+ * drop and was refused twice that way. So a name is dialled on IPv4 when that
+ * is all `from=` lets in. An address is dialled as written.
+ */
+export function dialFamily(address: string, allowFrom: readonly string[]): 4 | undefined {
+  if (isIP(address)) return undefined;
+  return allowFrom.length > 0 && allowFrom.every((a) => isIP(a.split("/")[0]!) === 4) ? 4 : undefined;
+}
+
 /** Host key types a machine may be pinned by. */
 export const HOST_KEY_TYPES = ["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa"] as const;
 

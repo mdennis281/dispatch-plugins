@@ -8,6 +8,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { utils } from "ssh2";
+import { lookup } from "node:dns/promises";
+import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { SshConnection, generateKeyPair, pinnedHostKey, publicKeyOf, scanHostKey } from "../src/index.js";
 import { startTestSshServer, type TestSshServer } from "./ssh-server.js";
@@ -16,6 +18,21 @@ import { startTestSshServer, type TestSshServer } from "./ssh-server.js";
 const sshKeygen = process.platform !== "win32" && spawnSync("ssh-keygen", ["-?"]).error === undefined;
 
 const servers: TestSshServer[] = [];
+
+/** Whether `localhost` names both loopbacks here and ::1 can be listened on: what the family test needs. */
+const localhostBothFamilies = await (async () => {
+  try {
+    const all = await lookup("localhost", { all: true });
+    if (!all.some((a) => a.family === 4) || !all.some((a) => a.family === 6)) return false;
+    return await new Promise<boolean>((r) => {
+      const s = createServer();
+      s.once("error", () => r(false));
+      s.listen(0, "::1", () => s.close(() => r(true)));
+    });
+  } catch {
+    return false;
+  }
+})();
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => s.close()));
 });
@@ -74,6 +91,30 @@ describe("a pinned connection", () => {
     await conn.connect(5_000);
     expect(s.attempts.some((a) => a.method === "keyboard-interactive" && a.password === "hunter2")).toBe(true);
     conn.close();
+  });
+
+  it.skipIf(!localhostBothFamilies)("dials a name on the family it is told to, and only that one", async () => {
+    // A machine reachable over IPv6 only, behind a name that also has an IPv4
+    // address: as `cvx-mac.local` was when it resolved to IPv6 and the key,
+    // whose from= list held only IPv4 addresses, was refused.
+    const s = await server({ password: "hunter2", listenHost: "::1" });
+    const dial = (family: 4 | 6) =>
+      new SshConnection({
+        host: "localhost",
+        port: s.port,
+        username: "dispatch",
+        password: "hunter2",
+        hostVerifier: pinnedHostKey(s.fingerprint),
+        algorithms: { serverHostKey: ["ssh-ed25519"] },
+        family,
+      });
+    const v6 = dial(6);
+    await v6.connect(5_000);
+    v6.close();
+    // Told IPv4, it never tries the IPv6 address, so nothing answers.
+    const v4 = dial(4);
+    await expect(v4.connect(1_500)).rejects.toThrow();
+    v4.close();
   });
 
   it("gives up at once on a wrong password instead of retrying it", async () => {

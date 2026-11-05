@@ -30,13 +30,13 @@ afterEach(() => {
 
 function link(
   machine: FakeMachine,
-  opts: { key?: string | undefined; kv?: Map<string, unknown>; runtime?: ReturnType<typeof fakeRuntime>; timing?: Partial<LinkTiming> } = {},
+  opts: { key?: string | undefined; kv?: Map<string, unknown>; runtime?: ReturnType<typeof fakeRuntime>; timing?: Partial<LinkTiming>; host?: HostConfig } = {},
 ) {
   const statuses: TerminalBackendStatusInput[] = [];
   const warns: string[] = [];
   const kvMap = opts.kv ?? new Map<string, unknown>();
   const runtime = opts.runtime ?? fakeRuntime();
-  const l = new HostLink(HOST, {
+  const l = new HostLink(opts.host ?? HOST, {
     instanceId: "11111111-2222-3333-4444-555555555555",
     privateKey: async () => ("key" in opts ? opts.key : "PRIVATE"),
     agent: AGENT,
@@ -83,6 +83,23 @@ describe("finding the machine", () => {
     // The Settings pane shows it as connecting, not as degraded.
     expect(RECONNECTING_WORDS[statuses[0]!.detail!]).toBe("Connecting");
     expect(statuses.at(-1)?.state).toBe("online");
+  });
+
+  it("dials a name on IPv4 when the key's from= list is IPv4 only, and an address as written", async () => {
+    // cvx-mac.local resolving to IPv6 got the key refused twice in the live run.
+    const m = machine({ "cvx-mac.lan": "refused", "10.0.10.16": "ok" });
+    const { l } = link(m);
+    l.start();
+    await l.ready();
+    const byHost = Object.fromEntries(m.targets.map((t) => [t.host, t.family]));
+    expect(byHost).toEqual({ "cvx-mac.lan": 4, "10.0.10.16": undefined });
+
+    // With an IPv6 address in from=, a name may be dialled on either.
+    const m6 = machine({ "cvx-mac.lan": "ok" });
+    const { l: l6 } = link(m6, { host: { ...HOST, allowFrom: ["10.0.4.1", "fd00::4"] } });
+    l6.start();
+    await l6.ready();
+    expect(m6.targets.map((t) => t.family)).toEqual([undefined]);
   });
 
   it("tries the address that worked last time first", async () => {

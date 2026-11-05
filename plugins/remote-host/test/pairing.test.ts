@@ -6,7 +6,8 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { startTestSshServer, type TestSshServer } from "@dispatch-plugins/remote-core/testing";
-import { hostKeyFingerprint, publicKeyOf } from "@dispatch-plugins/remote-core";
+import { SshConnection, hostKeyFingerprint, publicKeyOf, type SshTarget } from "@dispatch-plugins/remote-core";
+import type { LinkConnection } from "../src/link.js";
 import type { HostConfig } from "../src/hosts.js";
 import { Pairing, UserError } from "../src/pairing.js";
 
@@ -45,8 +46,9 @@ async function machine(opts: { password?: string } = {}) {
   return { s, keys };
 }
 
-function pairing(state: { hosts: HostConfig[]; secrets: Map<string, string> }) {
+function pairing(state: { hosts: HostConfig[]; secrets: Map<string, string> }, connect?: (t: SshTarget) => LinkConnection) {
   return new Pairing({
+    ...(connect ? { connect } : {}),
     hosts: () => state.hosts,
     saveHosts: async (h) => {
       state.hosts = h;
@@ -178,6 +180,20 @@ describe("finish", () => {
     keys.push(r.authorizedKeysLine.match(/ssh-ed25519 (\S+)/)![1]!); // the human ran it
     const done = await p.finish({ pairingId: r.pairingId });
     expect(done.host.slug).toBe("cvx-mac");
+  });
+
+  it("dials a machine given by name on IPv4, as the link will, since the key's from= list is IPv4", async () => {
+    const { s } = await machine({ password: "hunter2" });
+    const targets: SshTarget[] = [];
+    const p = pairing(fresh(), (t) => {
+      targets.push(t);
+      return new SshConnection(t) as unknown as LinkConnection;
+    });
+    const r = p.start({ slug: "cvx-mac", address: "localhost", port: s.port, user: "dispatch", hostKey: s.fingerprint });
+    const done = await p.finish({ pairingId: r.pairingId, password: "hunter2" });
+    expect(done.host.addresses).toEqual(["localhost"]);
+    expect(targets.length).toBeGreaterThan(0);
+    expect(targets.map((t) => t.family)).toEqual(targets.map(() => 4));
   });
 
   it("pairing again replaces the key and takes the old one off the machine", async () => {
