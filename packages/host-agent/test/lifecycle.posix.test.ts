@@ -129,6 +129,42 @@ describe.skipIf(!posix)("forget", () => {
     expect(await forgetChat({ root, instance: I, chat: "chat-a", kill })).toEqual({ killed: [], sessions: 0, refs: 0, removed: false });
   });
 
+  it("says what it couldn't do when git won't run, still removes the rest, and a retry finishes", async () => {
+    kill.calls = [];
+    const a = syncedChat("chat-a");
+    record("s-run", "chat-a", "running");
+    // git as it was on cvx-mac once Xcode updated itself: it prints why, and won't run.
+    const bin = join(root, "..", "badbin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "git"), '#!/bin/sh\necho "You have not agreed to the Xcode license agreements." >&2\nexit 69\n', { mode: 0o755 });
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path ?? ""}`;
+    let r: Awaited<ReturnType<typeof forgetChat>>;
+    try {
+      r = await forgetChat({ root, instance: I, chat: "chat-a", kill });
+    } finally {
+      process.env.PATH = path;
+    }
+    expect(r.errors).toEqual(["proj-abc.git: You have not agreed to the Xcode license agreements."]);
+    expect(r).toMatchObject({ killed: ["s-run"], sessions: 1, refs: 0, removed: true });
+    expect(refs(a.repo)).toEqual(["refs/dispatch/chats/chat-a"]);
+    expect(existsSync(join(instanceLayout(root, I).chatsDir, "chat-a"))).toBe(false);
+
+    // git works again: the retry finishes what was left, and nothing else.
+    expect(await forgetChat({ root, instance: I, chat: "chat-a", kill })).toEqual({ killed: [], sessions: 0, refs: 1, removed: false });
+    expect(refs(a.repo)).toEqual([]);
+  });
+
+  it("passes over a repository directory git never initialised, rather than failing every delete", async () => {
+    // A sync that made repos/<key>.git and then found git broken leaves it empty.
+    const a = syncedChat("chat-a");
+    mkdirSync(repoPath(root, I, "half-made"), { recursive: true });
+    const r = await forgetChat({ root, instance: I, chat: "chat-a", kill });
+    expect(r.errors).toBeUndefined();
+    expect(r.refs).toBe(1);
+    expect(refs(a.repo)).toEqual([]);
+  });
+
   it("refuses a chat id that could reach outside its directory", async () => {
     await expect(forgetChat({ root, instance: I, chat: "../inst-b", kill })).rejects.toThrow(/chat must match/);
   });

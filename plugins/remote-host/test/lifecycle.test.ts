@@ -93,6 +93,21 @@ describe("a deleted chat", () => {
   });
 });
 
+describe("a deleted chat, when git won't run there", () => {
+  it("is refused with dispatch-host's reason, keeping its records, so core retries until git works", async () => {
+    const { m, t, connected, forgot } = setup({ kv: { "served:studio:chat-1": { at: 1 }, "sync:chat-1": { v: 1 } } });
+    await connected();
+    m.forgetFails = "p.git: You have not agreed to the Xcode license agreements.";
+    await expect(t.terminals.chatDeleted("chat-1")).rejects.toThrow(/forget exited 1: .*Xcode license/);
+    expect(t.kv.has("served:studio:chat-1")).toBe(true);
+    expect(t.kv.has("sync:chat-1")).toBe(true);
+    m.forgetFails = undefined;
+    await t.terminals.chatDeleted("chat-1");
+    expect(forgot()).toEqual(["chat-1", "chat-1"]);
+    expect(t.kv.has("served:studio:chat-1")).toBe(false);
+  });
+});
+
 describe("an idle chat", () => {
   it("has its sessions there ended, its checkout kept", async () => {
     const { m, t, connected, forgot } = setup({ kv: { "served:studio:chat-1": { at: 1 } } });
@@ -123,6 +138,24 @@ describe("reconcile", () => {
     expect(forgot().sort()).toEqual(["gone-1", "gone-2"]);
     expect(t.kv.has("served:studio:gone-1")).toBe(false);
     expect(t.kv.has("served:studio:live")).toBe(true);
+  });
+
+  it("goes on past an orphan it can't forget, and tries that one again at the next connect", async () => {
+    const { m, t, r, connected, forgot } = setup({ kv: { "served:studio:bad": { at: 1 }, "served:studio:good": { at: 1 } } });
+    await connected();
+    const run = m.run.bind(m);
+    m.run = async (command, opts) =>
+      command.includes("'forget'") && command.includes("'bad'") ? { code: 1, stdout: "", stderr: "p.git: git won't run" } : run(command, opts);
+    r.reconcile(new Set(), Date.now());
+    await until(() => forgot().includes("good"), 5_000, "the good orphan");
+    expect(t.kv.has("served:studio:good")).toBe(false);
+    expect(t.kv.has("served:studio:bad")).toBe(true);
+    // git works again; the next connect finishes the pass.
+    m.run = run;
+    m.open()[0]!.close();
+    await connected();
+    await until(() => forgot().includes("bad"), 5_000, "the bad orphan, retried");
+    expect(t.kv.has("served:studio:bad")).toBe(false);
   });
 
   it("waits for a machine that is off, and cleans up once it is back", async () => {

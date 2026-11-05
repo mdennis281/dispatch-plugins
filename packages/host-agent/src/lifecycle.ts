@@ -27,7 +27,7 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { assertId, instanceLayout, type SessionRecord } from "./layout.js";
 import { listRecords, readRecord } from "./records.js";
 
@@ -74,6 +74,8 @@ export interface ForgetResult {
   refs: number;
   /** Whether the chat's (or the instance's) directory was there to remove. */
   removed: boolean;
+  /** What could not be undone, per repository: git failed there. Present means "try again later". */
+  errors?: string[];
 }
 
 /** The chat was deleted: everything this instance keeps for it here goes. Idempotent. */
@@ -92,16 +94,43 @@ export async function forgetChat(o: { root: string; instance: string; chat: stri
     rmSync(dir, { recursive: true, force: true });
     sessions++;
   }
+  // A git that won't run (an Xcode whose license isn't accepted, on cvx-mac)
+  // must not pass for "nothing to delete": the chat's refs would stay, and
+  // the objects under them, with nothing left to say so. Everything else
+  // still goes; the caller is told, and tries again (core retries a delete).
   let refs = 0;
+  const errors: string[] = [];
   for (const repo of repos(reposDir)) {
+    // Not a repository (a sync that made the directory, then found git
+    // broken, leaves it empty): no refs to forget. Asked of git, it would
+    // fail every chat's delete here until gc took the directory away.
+    if (!existsSync(join(repo, "HEAD")) || !existsSync(join(repo, "objects"))) continue;
     const names = [`refs/dispatch/chats/${chat}`, ...keepRefs(chat)];
-    const had = (await git(["--git-dir", repo, "for-each-ref", "--format=%(refname)", ...names])).stdout.trim();
+    const list = await git(["--git-dir", repo, "for-each-ref", "--format=%(refname)", ...names]);
+    if (list.code !== 0) {
+      errors.push(`${basename(repo)}: ${gitError(list)}`);
+      continue;
+    }
+    const had = list.stdout.trim();
     if (!had) continue;
-    for (const ref of had.split("\n")) await git(["--git-dir", repo, "update-ref", "-d", ref]);
-    refs++;
+    let dropped = true;
+    for (const ref of had.split("\n")) {
+      const d = await git(["--git-dir", repo, "update-ref", "-d", ref]);
+      if (d.code !== 0) {
+        errors.push(`${basename(repo)} ${ref}: ${gitError(d)}`);
+        dropped = false;
+      }
+    }
+    if (dropped) refs++;
   }
   const removed = discard(o.root, join(chatsDir, chat), `${o.instance}.chat-${chat}`);
-  return { killed, sessions, refs, removed };
+  return { killed, sessions, refs, removed, ...(errors.length ? { errors } : {}) };
+}
+
+/** git's own first line of complaint, or how it ended. */
+function gitError(r: { code: number; stderr: string }): string {
+  const line = r.stderr.split("\n").map((l) => l.trim()).find(Boolean);
+  return line ?? (r.code === -1 ? "git could not be run" : `git exited ${r.code}`);
 }
 
 /** The plugin was uninstalled: this instance's sessions end and its whole namespace goes. */

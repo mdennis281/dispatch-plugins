@@ -58,6 +58,8 @@ export class FakeMachine {
   /** What `dispatch-host chats` reports: this instance's chat directories there. */
   chatDirs: ChatDir[] = [];
   helloFails = false;
+  /** What `forget` fails with, as dispatch-host does when git won't run there. */
+  forgetFails?: string;
   /** sshd's MaxSessions. */
   maxSessions = 10;
   /** What a `tcp` channel reaches: a test points it at a server of its own. */
@@ -117,7 +119,13 @@ export class FakeMachine {
     if (command.includes("'kill'")) return ok(JSON.stringify({ killed: [] }) + "\n");
     if (command.includes("'ports'")) return ok(JSON.stringify(this.ports) + "\n");
     if (command.includes("'chats'")) return ok(JSON.stringify(this.chatDirs) + "\n");
-    if (command.includes("'forget'")) return ok(JSON.stringify({ killed: [], sessions: 0, refs: 0, removed: true }) + "\n");
+    if (command.includes("'forget'")) {
+      if (this.forgetFails) {
+        const out = JSON.stringify({ killed: [], sessions: 0, refs: 0, removed: true, errors: [this.forgetFails] }) + "\n";
+        return { code: 1, stdout: out, stderr: `dispatch-host: could not delete chat's refs: ${this.forgetFails}\n` };
+      }
+      return ok(JSON.stringify({ killed: [], sessions: 0, refs: 0, removed: true }) + "\n");
+    }
     if (command.includes("'gc'")) return ok(JSON.stringify({ trash: 0, reposRemoved: [], repos: 0, checkouts: 0, errors: [] }) + "\n");
     return ok("");
   }
