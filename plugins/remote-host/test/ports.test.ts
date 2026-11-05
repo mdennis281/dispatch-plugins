@@ -8,9 +8,15 @@ import { createServer as createHttp, get } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import type { TerminalPortForwardInput } from "@dispatch/plugin-sdk";
 import type { Attribution, Listener } from "@dispatch-plugins/host-agent";
-import { PortForwards, command, listen } from "../src/ports.js";
+import { PortForwards, command, freeOnV6Loopback, listen } from "../src/ports.js";
 
 const quiet = { info() {}, warn() {}, error() {} };
+/** Whether this computer has an IPv6 loopback to hold a port on. */
+const hasV6Loopback = await new Promise<boolean>((r) => {
+  const s = createServer();
+  s.once("error", () => r(false));
+  s.listen({ port: 0, host: "::1", ipv6Only: true }, () => s.close(() => r(true)));
+});
 const cleanup: Array<() => unknown> = [];
 afterEach(async () => {
   for (const c of cleanup.splice(0).reverse()) await c();
@@ -266,5 +272,21 @@ describe("listen", () => {
     const other = await listen(s2, want);
     expect(other).not.toBe(want);
     await Promise.all([new Promise((r) => s1.close(r)), new Promise((r) => s2.close(r))]);
+  });
+
+  it.skipIf(!hasV6Loopback)("counts a port another program holds on [::1] as taken, so localhost:<port> can't reach that program", async () => {
+    // As on the live run: another chat's Vite on [::1]:<port>, nothing on 127.0.0.1:<port>.
+    const want = await freePort();
+    const vite = createServer();
+    await new Promise<void>((r) => vite.listen({ port: want, host: "::1", ipv6Only: true }, () => r()));
+    expect(await freeOnV6Loopback(want)).toBe(false);
+
+    const s: Server = createServer();
+    const got = await listen(s, want);
+    expect(got).not.toBe(want);
+    expect(await freeOnV6Loopback(got)).toBe(true);
+    await Promise.all([new Promise((r) => s.close(r)), new Promise((r) => vite.close(r))]);
+    // Once the other program is gone, the port is free on both again.
+    expect(await freeOnV6Loopback(want)).toBe(true);
   });
 });

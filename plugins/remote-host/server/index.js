@@ -21909,6 +21909,7 @@ class PortForwards {
     for (const s of f.sockets) s.destroy();
   }
 }
+const EPHEMERAL_TRIES = 8;
 async function listen(server2, preferred) {
   const attempt = (port) => new Promise((resolve2, reject) => {
     const fail = (err) => {
@@ -21923,11 +21924,24 @@ async function listen(server2, preferred) {
     server2.once("listening", ok);
     server2.listen(port, "127.0.0.1");
   });
-  try {
-    return await attempt(preferred);
-  } catch {
-    return attempt(0);
+  if (await freeOnV6Loopback(preferred)) {
+    try {
+      return await attempt(preferred);
+    } catch {
+    }
   }
+  for (let i = 1; ; i++) {
+    const port = await attempt(0);
+    if (i >= EPHEMERAL_TRIES || await freeOnV6Loopback(port)) return port;
+    await new Promise((r) => server2.close(() => r()));
+  }
+}
+function freeOnV6Loopback(port) {
+  return new Promise((resolve2) => {
+    const probe = createServer();
+    probe.once("error", (err) => resolve2(err.code !== "EADDRINUSE" && err.code !== "EACCES"));
+    probe.listen({ port, host: "::1", ipv6Only: true, exclusive: true }, () => probe.close(() => resolve2(true)));
+  });
 }
 function key(chat, port) {
   return `${chat}\0${port}`;
