@@ -126,8 +126,11 @@ export class PortForwards {
     for (const [k, { chat, l }] of want) {
       if (this.forwards.has(k) || this.disposed) continue;
       try {
-        this.forwards.set(k, await this.open(chat, l));
+        const f = await this.open(chat, l);
+        this.forwards.set(k, f);
         this.failed.delete(k);
+        // Torn down, or the chat's last shell went, while it was opening.
+        if (this.disposed || !this.deps.chats().has(chat)) this.close(k);
       } catch (err) {
         if (!this.failed.has(k)) this.deps.log.warn(`remote-host ${this.deps.label()}: could not forward port ${l.port}: ${errText(err)}`);
         this.failed.add(k);
@@ -178,7 +181,16 @@ export class PortForwards {
     });
     const localPort = await listen(server, l.port);
     const label = command(l.command);
-    const withdraw = this.deps.publish({ chatId: chat, remotePort: l.port, url: urlOf(localPort), ...(label ? { label } : {}) });
+    let withdraw: () => void;
+    try {
+      // Throws once the backend is unregistered. The port must not stay bound
+      // then: the next poll would find it taken and bind yet another.
+      withdraw = this.deps.publish({ chatId: chat, remotePort: l.port, url: urlOf(localPort), ...(label ? { label } : {}) });
+    } catch (err) {
+      server.close();
+      for (const s of sockets) s.destroy();
+      throw err;
+    }
     this.deps.log.info(
       `remote-host ${this.deps.label()}: forwarding port ${l.port}${label ? ` (${label})` : ""} for chat ${chat} to ${urlOf(localPort)}`,
     );

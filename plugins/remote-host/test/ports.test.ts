@@ -33,6 +33,13 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+/** Nothing holds `port` here: binding it works. */
+async function expectFree(port: number): Promise<void> {
+  const s = createServer();
+  await new Promise<void>((res, rej) => s.once("error", rej).listen(port, "127.0.0.1", () => res()));
+  await new Promise((res) => s.close(res));
+}
+
 function fetchText(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     get(url, (res) => {
@@ -51,6 +58,8 @@ function rig(opts: { remote: Map<number, number> }) {
   const published: Array<TerminalPortForwardInput & { withdrawn?: boolean }> = [];
   let online = true;
   let lists = 0;
+  let failPublish = false;
+  let onPublish: (() => void) | undefined;
   const pf = new PortForwards({
     list: async () => {
       lists++;
@@ -66,6 +75,8 @@ function rig(opts: { remote: Map<number, number> }) {
       }),
     online: () => online,
     publish: (p) => {
+      if (failPublish) throw new Error('terminal backend "remote-host/studio" is not registered');
+      onPublish?.();
       const row: TerminalPortForwardInput & { withdrawn?: boolean } = { ...p };
       published.push(row);
       return () => {
@@ -85,6 +96,8 @@ function rig(opts: { remote: Map<number, number> }) {
     published,
     live: () => published.filter((p) => !p.withdrawn),
     setOnline: (v: boolean) => (online = v),
+    failPublish: (v: boolean) => (failPublish = v),
+    onPublish: (f: () => void) => (onPublish = f),
     lists: () => lists,
   };
 }
@@ -138,10 +151,7 @@ describe("port forwards", () => {
     r.report.sessions[0]!.ports = [listener(b)];
     await r.pf.tick();
     expect(r.live().map((p) => p.remotePort)).toEqual([b]);
-    // The local port is free again.
-    const probe = createServer();
-    await new Promise<void>((res, rej) => probe.once("error", rej).listen(a, "127.0.0.1", () => res()));
-    await new Promise((res) => probe.close(res));
+    await expectFree(a);
 
     r.pf.dropChat("chat-a");
     expect(r.live()).toEqual([]);
@@ -192,6 +202,33 @@ describe("port forwards", () => {
     r.report.sessions = [{ sid: "s2", chat: "chat-b", ports: [listener(p)] }];
     await r.pf.tick();
     expect(r.live()).toEqual([{ chatId: "chat-b", remotePort: p, url: `http://127.0.0.1:${p}`, label: "node" }]);
+  });
+
+  it("lets the port go when publishing fails (the backend was unregistered), and takes the same one next time", async () => {
+    const r = rig({ remote: new Map() });
+    r.chats.add("chat-a");
+    const p = await freePort();
+    r.report.sessions.push({ sid: "s1", chat: "chat-a", ports: [listener(p)] });
+    r.failPublish(true);
+    await r.pf.tick();
+    expect(r.pf.list()).toEqual([]);
+    await expectFree(p);
+    r.failPublish(false);
+    await r.pf.tick();
+    expect(r.live().map((x) => x.url)).toEqual([`http://127.0.0.1:${p}`]);
+  });
+
+  it("closes a forward that finished opening after it was torn down", async () => {
+    const r = rig({ remote: new Map() });
+    r.chats.add("chat-a");
+    const p = await freePort();
+    r.report.sessions.push({ sid: "s1", chat: "chat-a", ports: [listener(p)] });
+    // The backend is disposed (the machine removed) while this forward is being opened.
+    r.onPublish(() => r.pf.dispose());
+    await r.pf.tick();
+    expect(r.pf.list()).toEqual([]);
+    expect(r.live()).toEqual([]);
+    await expectFree(p);
   });
 
   it("closes a connection here at once when the machine refuses the dial", async () => {

@@ -21210,11 +21210,14 @@ class HostLink {
   /**
    * A TCP connection to `host:port` as the machine sees it, over the control
    * connection as it is NOW: a forward made before a reconnect keeps working
-   * after it. Rejects while the machine is offline.
+   * after it. Rejects AT ONCE while the machine is offline: it never starts a
+   * connect, so a browser retrying a forwarded port can't skip the backoff
+   * (the link's own timer reconnects).
    */
   async tcp(host, port) {
-    const { conn } = await this.ready();
-    return conn.tcp(host, port);
+    const l = this.linked;
+    if (!l?.conn.isOpen) throw new Error(`${this.host.label} is not connected`);
+    return l.conn.tcp(host, port);
   }
   /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
   async agent(args, timeoutMs = 3e4) {
@@ -21802,8 +21805,10 @@ class PortForwards {
     for (const [k, { chat, l }] of want) {
       if (this.forwards.has(k) || this.disposed) continue;
       try {
-        this.forwards.set(k, await this.open(chat, l));
+        const f = await this.open(chat, l);
+        this.forwards.set(k, f);
         this.failed.delete(k);
+        if (this.disposed || !this.deps.chats().has(chat)) this.close(k);
       } catch (err) {
         if (!this.failed.has(k)) this.deps.log.warn(`remote-host ${this.deps.label()}: could not forward port ${l.port}: ${errText(err)}`);
         this.failed.add(k);
@@ -21847,7 +21852,14 @@ class PortForwards {
     });
     const localPort = await listen(server2, l.port);
     const label = command(l.command);
-    const withdraw = this.deps.publish({ chatId: chat, remotePort: l.port, url: urlOf(localPort), ...label ? { label } : {} });
+    let withdraw;
+    try {
+      withdraw = this.deps.publish({ chatId: chat, remotePort: l.port, url: urlOf(localPort), ...label ? { label } : {} });
+    } catch (err) {
+      server2.close();
+      for (const s of sockets) s.destroy();
+      throw err;
+    }
     this.deps.log.info(
       `remote-host ${this.deps.label()}: forwarding port ${l.port}${label ? ` (${label})` : ""} for chat ${chat} to ${urlOf(localPort)}`
     );

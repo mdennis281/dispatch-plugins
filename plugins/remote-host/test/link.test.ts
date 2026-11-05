@@ -7,7 +7,8 @@ import type { TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
 import type { HostConfig } from "../src/hosts.js";
 import { RECONNECTING_WORDS } from "../src/link-status.js";
 import { CONTROL_EXECS, HostLink, SESSIONS_PER_CONNECTION, describeConnectError, statusFrom, type LinkTiming } from "../src/link.js";
-import { AGENT, FakeMachine, PROBE, fakeRuntime, type AddressBehaviour, type FakeConn } from "./fake-machine.js";
+import type { ClientChannel } from "ssh2";
+import { AGENT, FakeMachine, FakeSessionChannel, PROBE, fakeRuntime, type AddressBehaviour, type FakeConn } from "./fake-machine.js";
 
 const HOST: HostConfig = {
   slug: "cvx-mac",
@@ -245,6 +246,32 @@ describe("shells", () => {
     const m = machine({ "10.0.10.16": "refused" });
     const { l } = link(m);
     await expect(l.openSession("exec shell")).rejects.toThrow(/connection refused/);
+  });
+});
+
+describe("forwarded connections", () => {
+  it("dial the machine over the control connection as it is now", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    const dialled: string[] = [];
+    m.tcp = async (host, port) => {
+      dialled.push(`${host}:${port}`);
+      return new FakeSessionChannel("tcp") as unknown as ClientChannel;
+    };
+    const { l } = link(m);
+    await l.ready();
+    const before = m.conns.length;
+    await l.tcp("::1", 5173);
+    expect(dialled).toEqual(["::1:5173"]);
+    // On the control connection: no connection of its own.
+    expect(m.conns).toHaveLength(before);
+  });
+
+  it("are refused at once while the machine is offline, and never start a connect of their own", async () => {
+    const m = machine({ "10.0.10.16": "refused" });
+    const { l } = link(m);
+    // A browser retrying a forwarded port of a sleeping Mac, again and again.
+    for (let i = 0; i < 5; i++) await expect(l.tcp("127.0.0.1", 3000)).rejects.toThrow(/not connected/);
+    expect(m.conns).toHaveLength(0);
   });
 });
 

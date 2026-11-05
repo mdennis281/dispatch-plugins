@@ -250,11 +250,14 @@ export class HostLink {
   /**
    * A TCP connection to `host:port` as the machine sees it, over the control
    * connection as it is NOW: a forward made before a reconnect keeps working
-   * after it. Rejects while the machine is offline.
+   * after it. Rejects AT ONCE while the machine is offline: it never starts a
+   * connect, so a browser retrying a forwarded port can't skip the backoff
+   * (the link's own timer reconnects).
    */
   async tcp(host: string, port: number): Promise<ClientChannel> {
-    const { conn } = await this.ready();
-    return conn.tcp(host, port);
+    const l = this.linked;
+    if (!l?.conn.isOpen) throw new Error(`${this.host.label} is not connected`);
+    return l.conn.tcp(host, port);
   }
 
   /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
