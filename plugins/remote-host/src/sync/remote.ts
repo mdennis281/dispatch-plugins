@@ -48,10 +48,11 @@ export function remotePaths(root: string, instance: string, chatId: string, repo
 
 /** Every script here starts with it: they all run git. */
 const PRELUDE = [
-  // No DEVELOPER_DIR: on a Mac it would choose the git `/usr/bin/git` runs,
-  // and Xcode's is blocked after every Xcode update until its license is
-  // accepted (dispatch-host's git-env.ts). C: git's messages are matched
-  // below, and file names are bytes.
+  // DEVELOPER_DIR is the Command Line Tools' when they're installed, else
+  // unset: on a Mac it chooses the git `/usr/bin/git` runs, and Xcode's is
+  // blocked after every Xcode update until its license is accepted
+  // (dispatch-host's git-env.ts). C: git's messages are matched below, and
+  // file names are bytes.
   GIT_SH_ENV,
   "export GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1",
   "export GIT_AUTHOR_NAME=Dispatch GIT_AUTHOR_EMAIL=dispatch@localhost GIT_COMMITTER_NAME=Dispatch GIT_COMMITTER_EMAIL=dispatch@localhost",

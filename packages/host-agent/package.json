@@ -2,7 +2,7 @@
   "name": "@dispatch-plugins/host-agent",
   "private": true,
   "type": "module",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "dispatch-host: the small supervisor a remote-host machine runs under its own sshd. It owns each chat shell's process tree, journals its output so a dropped connection resumes, attributes listening ports, and cleans up after itself.",
   "exports": {
     ".": "./src/index.ts",

@@ -9,7 +9,7 @@ import { accessSync, constants, existsSync, readFileSync, statSync, statfsSync }
 import { homedir, release, userInfo } from "node:os";
 import { posix } from "node:path";
 import { captureLoginEnv, loginShell, shellEnv } from "./env.js";
-import { XCODE_DEVELOPER_DIR, gitEnv } from "./git-env.js";
+import { XCODE_DEVELOPER_DIR, gitEnv, hasCommandLineTools } from "./git-env.js";
 import { listInstances, type InstanceInfo } from "./lifecycle.js";
 import { AGENT_VERSION } from "./version.js";
 
@@ -17,7 +17,11 @@ import { AGENT_VERSION } from "./version.js";
 export interface GitCheck {
   /** Where `git` is on that PATH; null: nowhere. */
   path: string | null;
-  /** macOS: the developer directory `/usr/bin/git` runs from (`xcode-select -p`); null: none (no developer tools). */
+  /**
+   * macOS: the developer directory `/usr/bin/git` runs from: the Command Line
+   * Tools' when they're installed (git runs with `DEVELOPER_DIR` set to
+   * them), else the one `xcode-select` chose; null: none (no developer tools).
+   */
   developerDir?: string | null;
   /** `git --version`'s exit code; null when it wasn't run. 69 on macOS: Xcode's license isn't accepted. */
   exitCode: number | null;
@@ -52,8 +56,8 @@ export interface ProbeResult {
   };
   /**
    * The git sync runs: on the agent's own PATH (what a plain SSH command
-   * gets), without `DEVELOPER_DIR` (see git-env.ts). `tools.git` is the chat
-   * shell's. Older agents don't report it.
+   * gets), in `gitEnv()` (see git-env.ts). `tools.git` is the chat shell's.
+   * Agents older than 0.2.2 don't report it.
    */
   syncGit?: GitCheck;
   /**
@@ -112,11 +116,12 @@ function wouldPrompt(path: string | null, env: NodeJS.ProcessEnv, mac: { develop
 
 /**
  * Which git `env` runs, and whether it runs. `mac`: the host is a Mac, whose
- * `xcode-select` chose `developerDir`.
+ * `xcode-select` chose `developerDir`; the one reported is `env`'s
+ * `DEVELOPER_DIR` when it sets one (the Command Line Tools), since that wins.
  */
 export async function checkGit(env: NodeJS.ProcessEnv, mac?: { developerDir: string | null }): Promise<GitCheck> {
   const path = which("git", env.PATH);
-  const dev = mac ? { developerDir: mac.developerDir } : {};
+  const dev = mac ? { developerDir: env.DEVELOPER_DIR || mac.developerDir } : {};
   if (!path) return { path: null, ...dev, exitCode: null, version: null };
   if (wouldPrompt(path, env, mac)) {
     return { path, ...dev, exitCode: null, version: null, error: "no developer tools; install the Command Line Tools (xcode-select --install)" };
@@ -150,14 +155,17 @@ export async function probe(root?: string): Promise<ProbeResult> {
       return undefined;
     },
   );
-  const env = shellEnv({ agentEnv: process.env, ...(login ? { login } : {}) });
+  const clt = hasCommandLineTools();
+  // The chat shell's environment, as owner.ts makes it.
+  const env = shellEnv({ agentEnv: process.env, ...(login ? { login } : {}), clt });
   const darwin = process.platform === "darwin";
-  const forGit = gitEnv(process.env);
-  const mac = darwin ? { developerDir: await developerDir(forGit) } : undefined;
+  const forGit = gitEnv(process.env, clt);
+  // What xcode-select chose, asked with no DEVELOPER_DIR in the way.
+  const mac = darwin ? { developerDir: await developerDir(gitEnv(process.env, false)) } : undefined;
   // Xcode's tools run with Xcode's developer directory, the way the agent is
-  // told to run them: the chosen one is the Command Line Tools, which have no
-  // xcodebuild.
-  const xenv = env.DEVELOPER_DIR || !existsSync(XCODE_DEVELOPER_DIR) ? env : { ...env, DEVELOPER_DIR: XCODE_DEVELOPER_DIR };
+  // told to run them: the shell's is the Command Line Tools', which have no
+  // xcodebuild. One the login shell chose itself stands.
+  const xenv = login?.DEVELOPER_DIR || !existsSync(XCODE_DEVELOPER_DIR) ? env : { ...env, DEVELOPER_DIR: XCODE_DEVELOPER_DIR };
   const xcode = darwin && !wouldPrompt(which("xcodebuild", xenv.PATH), xenv, mac);
   const shellGit = wouldPrompt(which("git", env.PATH), env, mac) ? Promise.resolve(null) : firstLine("git", ["--version"], env);
 

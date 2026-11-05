@@ -8,6 +8,7 @@
  * up in the agent's transcripts.
  */
 import { spawn } from "node:child_process";
+import { CLT_DEVELOPER_DIR } from "./git-env.js";
 
 /** Login-shell variables a chat's shell may inherit. */
 export const LOGIN_ENV_ALLOW: readonly RegExp[] = [
@@ -40,11 +41,18 @@ export function filterLoginEnv(env: Record<string, string | undefined>): Record<
  * The shell's environment: the base variables from `agentEnv`, the
  * allow-listed login variables, then `extra` from the plugin. A login
  * environment that could not be read leaves {@link FALLBACK_PATH}.
+ *
+ * `clt`: the Mac has the Command Line Tools. Unless the login shell or the
+ * plugin chose one, `DEVELOPER_DIR` is then theirs, so the agent's own git in
+ * this shell works whatever `xcode-select` chose, Xcode's license or not
+ * (git-env.ts). The agent is told to run Xcode's tools with Xcode's, per
+ * command.
  */
 export function shellEnv(opts: {
   agentEnv: Record<string, string | undefined>;
   login?: Record<string, string>;
   extra?: Record<string, string>;
+  clt?: boolean;
 }): Record<string, string> {
   const env: Record<string, string> = {};
   for (const k of BASE_ENV) {
@@ -53,6 +61,7 @@ export function shellEnv(opts: {
   }
   Object.assign(env, opts.login ? filterLoginEnv(opts.login) : {});
   if (!env.PATH) env.PATH = FALLBACK_PATH;
+  if (opts.clt && !env.DEVELOPER_DIR) env.DEVELOPER_DIR = CLT_DEVELOPER_DIR;
   for (const [k, v] of Object.entries(opts.extra ?? {})) {
     if (!NAME.test(k)) throw new Error(`not an environment variable name: ${JSON.stringify(k)}`);
     env[k] = String(v);

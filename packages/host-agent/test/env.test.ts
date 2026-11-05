@@ -47,6 +47,17 @@ describe("the login environment allow-list", () => {
     expect(env).not.toHaveProperty("SSH_CONNECTION");
   });
 
+  it("defaults DEVELOPER_DIR to the Command Line Tools' on a Mac that has them, so the agent's git isn't Xcode's", () => {
+    const agentEnv = { HOME: "/Users/dispatch" };
+    const login = { PATH: "/usr/bin:/bin" };
+    expect(shellEnv({ agentEnv, login, clt: true }).DEVELOPER_DIR).toBe("/Library/Developer/CommandLineTools");
+    expect(shellEnv({ agentEnv, login, clt: false })).not.toHaveProperty("DEVELOPER_DIR");
+    expect(shellEnv({ agentEnv, login })).not.toHaveProperty("DEVELOPER_DIR");
+    // One the login shell or the plugin chose stands.
+    expect(shellEnv({ agentEnv, login: LOGIN, clt: true }).DEVELOPER_DIR).toBe(LOGIN.DEVELOPER_DIR);
+    expect(shellEnv({ agentEnv, login, clt: true, extra: { DEVELOPER_DIR: "/x" } }).DEVELOPER_DIR).toBe("/x");
+  });
+
   it("falls back to a PATH with Homebrew when the login shell couldn't be read, and refuses a bad name", () => {
     expect(shellEnv({ agentEnv: { HOME: "/h" } }).PATH).toBe(FALLBACK_PATH);
     expect(() => shellEnv({ agentEnv: {}, extra: { "A=B": "x" } })).toThrow(/not an environment variable name/);

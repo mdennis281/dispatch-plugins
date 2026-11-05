@@ -28,7 +28,7 @@ export { NODE_RUNTIME, compareVersions, nodeTarball, runtimeAction, type NodeDis
 export { INSTALL_EXIT, agentBuildId, agentPath, installAgentScript, installRuntimeScript, nodePath, shCommand, sq } from "./install.js";
 export { attribute, parseLsof, parsePs, type Attribution, type Listener, type ProcRow } from "./procs.js";
 export type { GitCheck, ProbeResult } from "./probe.js";
-export { GIT_SH_ENV, XCODE_DEVELOPER_DIR, gitEnv } from "./git-env.js";
+export { CLT_DEVELOPER_DIR, GIT_SH_ENV, XCODE_DEVELOPER_DIR, gitEnv, hasCommandLineTools } from "./git-env.js";
 export type { ChatDir, ForgetResult, GcResult, InstanceInfo } from "./lifecycle.js";
 export type { RunEntry } from "./journal.js";
 export { AGENT_VERSION } from "./version.js";

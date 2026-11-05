@@ -129,46 +129,40 @@ connection doesn't seem to, turn Remote Login off and on again.
 
 ### 5. Make `git` work for `dispatch`
 
-Sync needs git on the Mac. `/usr/bin/git` is only a stub: it runs the git of whichever developer directory
-`xcode-select` points at. Point it at the **Command Line Tools**, even if Xcode is installed too:
+Sync needs git on the Mac, and Dispatch uses the **Command Line Tools'** git. Install them, even if Xcode is
+installed too:
 
-1. Install them:
+```sh
+xcode-select --install
+```
 
-   ```sh
-   xcode-select --install
-   ```
+It opens a dialog and returns at once. Click **Install** and wait for the install to finish. If it says the tools
+are already installed, that's fine.
 
-   It opens a dialog and returns at once. Click **Install** and **wait for the install to finish**. If it says
-   the tools are already installed, that's fine; go on.
-2. Once the install is done, choose them:
-
-   ```sh
-   sudo xcode-select -s /Library/Developer/CommandLineTools
-   ```
-
-   `invalid developer directory` means the install hasn't finished yet. Wait, then run it again.
-
+- **How Dispatch uses them:** `/usr/bin/git` is only a stub that runs the git of a developer directory:
+  `DEVELOPER_DIR` when set, else the one `xcode-select` points at. From remote-host 0.5.8, whenever the Command
+  Line Tools are installed, Dispatch runs its git with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, and
+  gives every chat terminal that as its default. That needs no `sudo`, and works whichever directory
+  `xcode-select` points at.
 - **Why not Xcode's git:** every Xcode update, including one the App Store installs on its own, puts Xcode's
-  tools behind its new license until someone runs `sudo xcodebuild -license accept`. While Xcode is the
-  developer directory, that blocks `/usr/bin/git` too (exit 69, "You have not agreed to the Xcode license
-  agreements"), and with it every sync. This happened on cvx-mac when Xcode updated itself to 27.2. The
-  Command Line Tools' git has no such gate.
-- Xcode builds still work. From remote-host 0.5.7 (#29), Dispatch tells the agent to run Xcode's tools with
-  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` set on each command (step 14). Its own git runs
-  with `DEVELOPER_DIR` unset. Its probe checks Xcode the same way, so Xcode still shows on the machine's row.
+  tools behind its new license until someone runs `sudo xcodebuild -license accept`. With Xcode as the developer
+  directory, that blocks `/usr/bin/git` too (exit 69, "You have not agreed to the Xcode license agreements"), and
+  with it every sync. This happened on cvx-mac when Xcode updated itself to 27.2. The Command Line Tools' git has
+  no such gate.
+- **Optional:** `sudo xcode-select -s /Library/Developer/CommandLineTools` makes them the default for every
+  account on the Mac, your own Terminal included. Dispatch doesn't need it.
+- Xcode builds still work: Dispatch tells the agent to run Xcode's tools with
+  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` set on each command (step 14), and checks Xcode the
+  same way, so Xcode still shows on the machine's row.
 
 **Verify:**
 
 ```sh
-xcode-select -p
-ssh dispatch@localhost 'git --version'
+ssh dispatch@localhost 'DEVELOPER_DIR=/Library/Developer/CommandLineTools /usr/bin/git --version'
 ```
 
-- `xcode-select -p` must print `/Library/Developer/CommandLineTools`.
-- `git --version` must print `git version …`.
-  - `xcrun: error: invalid active developer path` means the tools aren't installed yet.
-  - "You have not agreed to the Xcode license agreements" means Xcode is still the developer directory. Run
-    the `sudo xcode-select -s` line again.
+It must print `git version …`. `xcrun: error: invalid active developer path` means the tools aren't installed yet.
+Once paired, the machine's row names the git sync uses, and why it won't run if it doesn't.
 
 ### 6. Install what your builds need
 
@@ -306,20 +300,17 @@ Do this while logged in as Dispatch. It's a per-user setting.
    sudo env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -runFirstLaunch
    ```
 
-Don't point `xcode-select` at Xcode. It stays on the Command Line Tools (step 5), so an Xcode update can't
-block git. Xcode's tools are run with `DEVELOPER_DIR` set on the command instead, as above. From remote-host
-0.5.7 (#29), Dispatch tells the agent to do the same. An older remote-host shows "no Xcode" for a Mac set up
-this way, and doesn't tell the agent.
+These work whichever developer directory `xcode-select` points at, because `DEVELOPER_DIR` names Xcode's. Chat
+terminals default to the Command Line Tools (step 5), so the agent is told to run Xcode's tools the same way,
+with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` on the command.
 
 **Verify:**
 
 ```sh
 ssh dispatch@localhost 'export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer; xcodebuild -version; xcodebuild -checkFirstLaunchStatus; echo "first-launch exit $?"'
-xcode-select -p
 ```
 
-- The first line must print Xcode's version and `first-launch exit 0`.
-- `xcode-select -p` must still print `/Library/Developer/CommandLineTools`.
+It must print Xcode's version and `first-launch exit 0`.
 
 **UNVERIFIED:** accepting the license and running the first launch through `DEVELOPER_DIR` rather than
 `xcode-select -s` hasn't been tried on cvx-mac yet.
