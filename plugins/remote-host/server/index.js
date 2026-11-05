@@ -23540,6 +23540,16 @@ class HostBackend {
   /** When the last reconcile ran, while its orphan pass still waits for the machine. */
   orphansSince;
   cleaning = false;
+  /**
+   * Chats deleted while the machine couldn't be reached. Core retries each on
+   * its own backoff (1 min, 5 min, 15 min, 1 h, then every 6 h), so a Mac that
+   * slept an hour would keep a deleted chat's checkout for hours after it
+   * woke. These are forgotten the moment the machine is back instead; core's
+   * retry then finds nothing left to do. Not kept across a restart: the
+   * reconcile after it finds them by their `served:` records.
+   */
+  pendingDeletes = /* @__PURE__ */ new Set();
+  forgetting = false;
   async spawn(info) {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
@@ -23620,7 +23630,13 @@ class HostBackend {
     this.syncs.delete(chatId);
     this.live?.delete(chatId);
     if (!await this.wasServed(chatId)) return;
-    await this.forget(chatId);
+    try {
+      await this.forget(chatId);
+      this.pendingDeletes.delete(chatId);
+    } catch (err) {
+      if (!this.deps.link.connected) this.pendingDeletes.add(chatId);
+      throw err;
+    }
   }
   /**
    * Dispatch listed the chats that exist (after every activation). Anything
@@ -23632,9 +23648,28 @@ class HostBackend {
     this.orphansSince = at;
     void this.cleanOrphans();
   }
-  /** The link (re)connected: an orphan pass that was waiting for the machine runs. */
+  /** The link (re)connected: deletes and an orphan pass that were waiting for the machine run. */
   onConnected() {
+    if (this.pendingDeletes.size) void this.forgetPending();
     if (this.orphansSince !== void 0) void this.cleanOrphans();
+  }
+  /** Forget the chats deleted while the machine was away. One that fails stays only while it is unreachable: core's retry has the rest. */
+  async forgetPending() {
+    if (this.forgetting) return;
+    this.forgetting = true;
+    try {
+      for (const chat of [...this.pendingDeletes]) {
+        try {
+          await this.forget(chat);
+          this.pendingDeletes.delete(chat);
+        } catch (err) {
+          if (this.deps.link.connected) this.pendingDeletes.delete(chat);
+          this.deps.log.warn(`remote-host ${this.deps.host().slug}: removing deleted chat ${chat}'s files failed: ${errText(err)}`);
+        }
+      }
+    } finally {
+      this.forgetting = false;
+    }
   }
   /** The plugin is being uninstalled: end every session of this instance there and remove its files. */
   async forgetAll(timeoutMs) {

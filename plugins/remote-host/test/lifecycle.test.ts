@@ -80,16 +80,35 @@ describe("a deleted chat", () => {
     expect(forgot()).toEqual(["chat-1"]);
   });
 
-  it("is refused while the machine can't be reached, so core retries it, and goes through once it can", async () => {
+  it("is refused while the machine can't be reached, and goes the moment it is back, ahead of core's retry", async () => {
     const { m, t, forgot, connected } = setup({ address: "refused", kv: { "served:studio:chat-1": { at: 1 } } });
     await expect(t.terminals.chatDeleted("chat-1")).rejects.toThrow(/refused/);
     expect(t.kv.has("served:studio:chat-1")).toBe(true);
+    expect(forgot()).toEqual([]);
     m.addresses[ADDR] = "ok";
-    // Core's retry comes a minute later, by when the link's own timer has the machine back.
+    // No retry from core (its next is a minute away, then 5, 15, 60): the reconnect itself forgets it.
     await connected();
+    await until(() => !t.kv.has("served:studio:chat-1"), 5_000, "the delete on reconnect");
+    expect(forgot()).toEqual(["chat-1"]);
+    // Core's retry, when it comes, finds nothing left to do.
     await t.terminals.chatDeleted("chat-1");
     expect(forgot()).toEqual(["chat-1"]);
-    expect(t.kv.has("served:studio:chat-1")).toBe(false);
+  });
+
+  it("is not forgotten on reconnect when the machine was up and refused it (core's retry has that)", async () => {
+    const { m, t, forgot, connected } = setup({ kv: { "served:studio:chat-1": { at: 1 } } });
+    await connected();
+    // Up, but forget itself fails (dispatch-host exits non-zero): nothing to wait for a reconnect for.
+    const run = m.run.bind(m);
+    m.run = async (command, opts) => (command.includes("'forget'") ? { code: 1, stdout: "", stderr: "boom" } : run(command, opts));
+    await expect(t.terminals.chatDeleted("chat-1")).rejects.toThrow(/forget exited 1: boom/);
+    m.run = run;
+    // A reconnect doesn't forget it on its own.
+    m.open()[0]!.close();
+    await connected();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(forgot()).toEqual([]);
+    expect(t.kv.has("served:studio:chat-1")).toBe(true);
   });
 });
 
