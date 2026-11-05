@@ -11,6 +11,9 @@
  *   ports    --instance I [--chat C]   print TCP listeners, attributed to sessions
  *   kill     --instance I (--sid S | --chat C | --all)
  *   sweep    --instance I [--dead-man-hours H]
+ *   forget   --instance I (--chat C | --all)   the chat was deleted / the plugin uninstalled (lifecycle.ts)
+ *   chats    --instance I              print the instance's chat directories
+ *   gc       --instance I [--repo-idle-days N]
  *   version
  *
  * Query commands print one line of JSON. `--root` (or DISPATCH_HOST_ROOT)
@@ -22,6 +25,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertId, rootDir } from "./layout.js";
 import { runOwner } from "./owner.js";
+import { collectGarbage, forgetChat, forgetInstance, listChats } from "./lifecycle.js";
 import { probe } from "./probe.js";
 import { decodeEnvArg } from "./env.js";
 import { attribute, hostKillIo, killTree, listListeners, listProcs, type KillTarget } from "./procs.js";
@@ -139,7 +143,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
 
     case "probe":
-      print(await probe());
+      print(await probe(root));
       return 0;
 
     case "list": {
@@ -198,6 +202,28 @@ export async function main(argv: readonly string[]): Promise<number> {
       return 0;
     }
 
+    case "forget": {
+      const id = instance();
+      touchContact(root, id);
+      if (flags.has("all")) print(await forgetInstance({ root, instance: id, kill: killSession }));
+      else print(await forgetChat({ root, instance: id, chat: need(opts, "chat"), kill: killSession }));
+      return 0;
+    }
+
+    case "chats": {
+      const id = instance();
+      touchContact(root, id);
+      print(listChats(root, id));
+      return 0;
+    }
+
+    case "gc": {
+      const id = instance();
+      touchContact(root, id);
+      print(await collectGarbage({ root, instance: id, now: Date.now(), repoIdleMs: num(opts, "repo-idle-days", 7) * 86_400_000 }));
+      return 0;
+    }
+
     case "sweep": {
       const id = instance();
       touchContact(root, id);
@@ -224,7 +250,7 @@ export async function main(argv: readonly string[]): Promise<number> {
  * `killed`). An owner that doesn't finish within 5 s, or is already gone, has
  * the tree killed from here and the record closed.
  */
-async function killSession(recordFile: string, rec: SessionRecord): Promise<void> {
+export async function killSession(recordFile: string, rec: SessionRecord): Promise<void> {
   // Only signal the owner while it is provably still that process: a pid
   // alone may have been reused by something of the user's.
   const owner = async () => ownerLive(await listProcs(), rec);

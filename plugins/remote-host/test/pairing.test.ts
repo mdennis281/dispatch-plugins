@@ -161,6 +161,8 @@ describe("finish", () => {
       hostKeyType: "ssh-ed25519",
       keyFingerprint: hostKeyFingerprint(Buffer.from(keys[0]!, "base64")),
       allowFrom: ["10.0.4.1", "10.69.69.69"],
+      // Its line lets forwards reach ::1 as well; the pane flags machines without it.
+      keyLine: 2,
     });
     // The pairing is spent.
     await expect(p.finish({ pairingId: r.pairingId })).rejects.toThrow(/unknown or has expired/);

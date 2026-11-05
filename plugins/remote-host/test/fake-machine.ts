@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import type { ClientChannel } from "ssh2";
-import { nodeTarball, type Attribution, type ProbeResult } from "@dispatch-plugins/host-agent";
+import { nodeTarball, type Attribution, type ChatDir, type ProbeResult } from "@dispatch-plugins/host-agent";
 import type { ExecResult, SshTarget } from "@dispatch-plugins/remote-core";
 import type { AgentBundle, RuntimeSource } from "../src/agent.js";
 import { sha256 } from "../src/agent.js";
@@ -55,6 +55,8 @@ export class FakeMachine {
   probe: ProbeResult = { ...PROBE };
   /** What `dispatch-host ports` reports. */
   ports: Attribution = { sessions: [], unattributed: [] };
+  /** What `dispatch-host chats` reports: this instance's chat directories there. */
+  chatDirs: ChatDir[] = [];
   helloFails = false;
   /** sshd's MaxSessions. */
   maxSessions = 10;
@@ -114,6 +116,9 @@ export class FakeMachine {
     if (command.includes("'probe'")) return ok(JSON.stringify(this.probe) + "\n");
     if (command.includes("'kill'")) return ok(JSON.stringify({ killed: [] }) + "\n");
     if (command.includes("'ports'")) return ok(JSON.stringify(this.ports) + "\n");
+    if (command.includes("'chats'")) return ok(JSON.stringify(this.chatDirs) + "\n");
+    if (command.includes("'forget'")) return ok(JSON.stringify({ killed: [], sessions: 0, refs: 0, removed: true }) + "\n");
+    if (command.includes("'gc'")) return ok(JSON.stringify({ trash: 0, reposRemoved: [], repos: 0, checkouts: 0, errors: [] }) + "\n");
     return ok("");
   }
 

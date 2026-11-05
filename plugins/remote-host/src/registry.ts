@@ -6,7 +6,7 @@
  */
 import type { PluginContext, TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
 import { errText, type SshTarget } from "@dispatch-plugins/remote-core";
-import type { ProbeResult } from "@dispatch-plugins/host-agent";
+import type { InstanceInfo, ProbeResult } from "@dispatch-plugins/host-agent";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
 import { HostBackend } from "./backend.js";
 import { backendId, connectionChanged, keySecretName, type HostConfig } from "./hosts.js";
@@ -16,6 +16,8 @@ import type { HostShellOptions } from "./session.js";
 export interface RegistryDeps {
   ctx: PluginContext;
   instanceId: string;
+  /** The id this Dispatch had before its data directory moved or was copied (`ctx.instance.previousId`). */
+  previousInstanceId?: string;
   agent: AgentBundle;
   runtime: RuntimeSource;
   connect?: (target: SshTarget) => LinkConnection;
@@ -38,6 +40,13 @@ export interface HostView extends HostConfig {
   /** The address it answered at last. */
   address?: string;
   probe?: ProbeResult;
+  /**
+   * What this Dispatch left on the machine under its previous instance id.
+   * Shown, never adopted or cleaned up: that id may still be a live Dispatch
+   * (a copied data directory), and dispatch-host's dead-man switch ends its
+   * sessions anyway once nothing talks to it.
+   */
+  abandoned?: InstanceInfo;
 }
 
 export class HostRegistry {
@@ -96,6 +105,7 @@ export class HostRegistry {
       agent: this.deps.agent,
       runtime: this.deps.runtime,
       setStatus: (s) => terminals.setStatus(id, s),
+      onConnected: () => entry.backend?.onConnected(),
       log: ctx.log,
       ...(ctx.kv ? { kv: ctx.kv } : {}),
       ...(this.deps.connect ? { connect: this.deps.connect } : {}),
@@ -129,13 +139,35 @@ export class HostRegistry {
   }
 
   list(): HostView[] {
-    return [...this.entries.values()].map(({ host, link }) => ({
-      ...host,
-      id: backendId(host.slug),
-      status: link.status,
-      ...(link.address ? { address: link.address } : {}),
-      ...(link.probe ? { probe: link.probe } : {}),
-    }));
+    const prev = this.deps.previousInstanceId;
+    return [...this.entries.values()].map(({ host, link }) => {
+      const abandoned = prev && prev !== this.deps.instanceId ? link.probe?.instances?.find((i) => i.id === prev) : undefined;
+      return {
+        ...host,
+        id: backendId(host.slug),
+        status: link.status,
+        ...(link.address ? { address: link.address } : {}),
+        ...(link.probe ? { probe: link.probe } : {}),
+        ...(abandoned ? { abandoned } : {}),
+      };
+    });
+  }
+
+  /** Dispatch listed the chats that exist: each machine drops what it holds for any other. */
+  reconcile(live: ReadonlySet<string>, at = Date.now()): void {
+    for (const e of this.entries.values()) e.backend.reconcile(live, at);
+  }
+
+  /** The plugin is being uninstalled: every reachable machine forgets this instance. Bounded by `timeoutMs`. */
+  async forgetAll(timeoutMs: number): Promise<void> {
+    const { ctx } = this.deps;
+    await Promise.all(
+      [...this.entries.values()].map((e) =>
+        e.backend.forgetAll(timeoutMs).catch((err: unknown) => {
+          ctx.log.warn(`remote-host ${e.host.slug}: could not remove this Dispatch's files there: ${errText(err)}`);
+        }),
+      ),
+    );
   }
 
   /** The plugin is going down: end the shells (KILL down their channels), then close every connection. */

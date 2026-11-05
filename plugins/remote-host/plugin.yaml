@@ -2,14 +2,14 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: remote-host
 name: Remote host
-version: 0.4.0
+version: 0.5.0
 dispatch: ">=1"
 description: >-
   Run a chat's managed terminals on your own machines over SSH. Each paired
   machine is a terminal location, remote-host/<name>; its shells run under
   dispatch-host, a small supervisor that survives dropped connections and
-  cleans up after itself. A dev server it starts there is forwarded here.
-  macOS first. (preview: no workspace cleanup yet)
+  cleans up after itself. A dev server it starts there is forwarded here,
+  and what a chat leaves there goes when the chat does. macOS first.
 homepage: https://github.com/mdennis281/dispatch-plugins/tree/main/plugins/remote-host
 server: ./server/index.js
 # The Settings pane (pair, rename, check, remove). Its directory, and only

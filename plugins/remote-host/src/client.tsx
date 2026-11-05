@@ -23,6 +23,7 @@ import { defineClientPlugin, type ClientHost } from "@dispatch/plugin-sdk";
 import type { ScanResult, StartResult } from "./pairing.js";
 import type { HostView } from "./registry.js";
 import type { HostConfig } from "./hosts.js";
+import { KEY_LINE } from "./key-line.js";
 import { RECONNECTING_WORDS } from "./link-status.js";
 
 /** How often the list re-reads the machines' status while the pane is open. */
@@ -232,6 +233,21 @@ function HostRow(props: {
           {view.probe && <div className="text-xs text-muted">{probeLine(view)}</div>}
           {view.probe && missingTools(view).length > 0 && (
             <div className="text-xs text-warn">Not on its PATH: {missingTools(view).join(", ")}</div>
+          )}
+          {(view.keyLine ?? 1) < KEY_LINE && (
+            <div className="text-xs text-warn">
+              Paired before 0.4.0: its key lets forwarded ports reach 127.0.0.1 only. Pair again to enable IPv6 dev servers
+              (Vite&apos;s <span className="cm-mono">localhost</span> on macOS).
+            </div>
+          )}
+          {view.abandoned && (
+            <div className="text-xs text-muted">
+              Also there: <span className="cm-mono">~/.dispatch-host/{view.abandoned.id}</span>, left by this Dispatch before its
+              id changed{view.abandoned.contactAt ? ` (last in touch ${ago(view.abandoned.contactAt)})` : ""}
+              {view.abandoned.running ? `, with ${view.abandoned.running} session${view.abandoned.running === 1 ? "" : "s"} still running` : ""}.
+              It is never cleaned up from here, since that id may still be a live Dispatch: delete it there once you know it
+              isn&apos;t.
+            </div>
           )}
           <div className="cm-mono truncate text-2xs text-faint" title="The machine's host key, pinned at pairing">
             {view.hostKey}

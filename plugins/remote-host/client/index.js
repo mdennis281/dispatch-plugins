@@ -22,6 +22,7 @@ const Trash2 = /* @__PURE__ */ pick("Trash2");
 function defineClientPlugin(mod) {
   return mod;
 }
+const KEY_LINE = 2;
 const CONNECTING = "connecting";
 const SETTINGS_CHANGED = "its settings changed; reconnecting";
 const CONNECTION_LOST = "connection lost; reconnecting";
@@ -183,6 +184,22 @@ function HostRow(props) {
       view.probe && missingTools(view).length > 0 && /* @__PURE__ */ jsxs("div", { className: "text-xs text-warn", children: [
         "Not on its PATH: ",
         missingTools(view).join(", ")
+      ] }),
+      (view.keyLine ?? 1) < KEY_LINE && /* @__PURE__ */ jsxs("div", { className: "text-xs text-warn", children: [
+        "Paired before 0.4.0: its key lets forwarded ports reach 127.0.0.1 only. Pair again to enable IPv6 dev servers (Vite's ",
+        /* @__PURE__ */ jsx("span", { className: "cm-mono", children: "localhost" }),
+        " on macOS)."
+      ] }),
+      view.abandoned && /* @__PURE__ */ jsxs("div", { className: "text-xs text-muted", children: [
+        "Also there: ",
+        /* @__PURE__ */ jsxs("span", { className: "cm-mono", children: [
+          "~/.dispatch-host/",
+          view.abandoned.id
+        ] }),
+        ", left by this Dispatch before its id changed",
+        view.abandoned.contactAt ? ` (last in touch ${ago(view.abandoned.contactAt)})` : "",
+        view.abandoned.running ? `, with ${view.abandoned.running} session${view.abandoned.running === 1 ? "" : "s"} still running` : "",
+        ". It is never cleaned up from here, since that id may still be a live Dispatch: delete it there once you know it isn't."
       ] }),
       /* @__PURE__ */ jsx("div", { className: "cm-mono truncate text-2xs text-faint", title: "The machine's host key, pinned at pairing", children: view.hostKey })
     ] }),

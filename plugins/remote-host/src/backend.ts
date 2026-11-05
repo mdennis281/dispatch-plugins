@@ -21,11 +21,12 @@ import type {
   TerminalBackend,
   TerminalBackendHandle,
   TerminalBeforeRunResult,
+  TerminalChatEvent,
   TerminalPortForwardInput,
   TerminalRunInfo,
   TerminalSpawnInfo,
 } from "@dispatch/plugin-sdk";
-import type { Attribution } from "@dispatch-plugins/host-agent";
+import type { Attribution, ChatDir, ForgetResult } from "@dispatch-plugins/host-agent";
 import { assertId, chatWorktreePath, instanceLayout, sq, type ProbeResult } from "@dispatch-plugins/host-agent";
 import { errText, git } from "@dispatch-plugins/remote-core";
 import type { HostConfig } from "./hosts.js";
@@ -69,6 +70,16 @@ export class HostBackend implements TerminalBackend {
   private remote?: RemoteSide;
   /** The chats' dev servers there, forwarded here. */
   readonly ports: PortForwards;
+  /** Chats known (this run) to have had a shell here; kv `served:<slug>:<chat>` remembers them across restarts. */
+  private readonly served = new Set<string>();
+  /**
+   * The chats Dispatch says exist (its last reconcile), plus every chat that
+   * has had a shell here since. Nothing in it is ever taken for an orphan.
+   */
+  private live?: Set<string>;
+  /** When the last reconcile ran, while its orphan pass still waits for the machine. */
+  private orphansSince?: number;
+  private cleaning = false;
 
   constructor(
     readonly id: string,
@@ -91,6 +102,8 @@ export class HostBackend implements TerminalBackend {
   async spawn(info: TerminalSpawnInfo): Promise<TerminalBackendHandle> {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
+    // Before anything is made there, so a delete always knows to clean up here.
+    await this.markServed(chatId);
     // In a repository, the shell starts at the same place in the chat's
     // checkout there. The checkout itself is filled by the first command's
     // sync, not here: spawn stays quick.
@@ -151,6 +164,143 @@ export class HostBackend implements TerminalBackend {
     this.ports.dispose();
   }
 
+  /**
+   * The chat went idle (core retired its session): its shells here end, and
+   * with them what they were running. The checkout stays for when it comes
+   * back. A machine that can't be reached now ends them itself once their
+   * heartbeat stops.
+   */
+  async onChatIdle(e: TerminalChatEvent): Promise<void> {
+    const chatId = e.chatId;
+    if (!ID.test(chatId)) return;
+    const ended = this.endShells(chatId);
+    if (!ended && !(await this.wasServed(chatId))) return;
+    if (!this.deps.link.connected) return;
+    await this.deps.link.agent(["kill", "--instance", this.deps.instanceId, "--chat", chatId], 30_000).catch((err: unknown) => {
+      this.deps.log.info(`remote-host ${this.deps.host().slug}: ending idle chat ${chatId}'s sessions: ${errText(err)}`);
+    });
+  }
+
+  /**
+   * The chat was deleted: its sessions, checkout and records go from the
+   * machine. Core retries this until it resolves, so it rejects when the
+   * machine can't be reached (asleep, off) and is a no-op for a chat this
+   * machine never served, which must not wait for it.
+   */
+  async onChatDeleted(e: TerminalChatEvent): Promise<void> {
+    const chatId = e.chatId;
+    if (!ID.test(chatId)) return;
+    this.endShells(chatId);
+    this.syncs.delete(chatId);
+    this.live?.delete(chatId);
+    if (!(await this.wasServed(chatId))) return;
+    await this.forget(chatId);
+  }
+
+  /**
+   * Dispatch listed the chats that exist (after every activation). Anything
+   * this machine holds for a chat not among them was deleted while the plugin
+   * wasn't listening, and goes: now, or once the machine is next reachable.
+   */
+  reconcile(live: ReadonlySet<string>, at: number): void {
+    this.live = new Set([...live, ...this.chatsWithShells()]);
+    this.orphansSince = at;
+    void this.cleanOrphans();
+  }
+
+  /** The link (re)connected: an orphan pass that was waiting for the machine runs. */
+  onConnected(): void {
+    if (this.orphansSince !== undefined) void this.cleanOrphans();
+  }
+
+  /** The plugin is being uninstalled: end every session of this instance there and remove its files. */
+  async forgetAll(timeoutMs: number): Promise<void> {
+    await this.killAll(0);
+    if (!this.deps.link.connected) return;
+    await this.deps.link.agent<ForgetResult>(["forget", "--instance", this.deps.instanceId, "--all"], timeoutMs);
+  }
+
+  private async cleanOrphans(): Promise<void> {
+    const since = this.orphansSince;
+    if (since === undefined || this.cleaning || !this.deps.link.connected) return;
+    this.cleaning = true;
+    const slug = this.deps.host().slug;
+    try {
+      const prefix = `served:${slug}:`;
+      const served = ((await this.deps.kv?.list(prefix)) ?? []).map((k) => k.slice(prefix.length));
+      const dirs = await this.deps.link.agent<ChatDir[]>(["chats", "--instance", this.deps.instanceId], 60_000);
+      const orphans = new Set<string>();
+      const alive = (chat: string) => this.live?.has(chat) || this.chatsWithShells().has(chat);
+      for (const chat of served) if (!alive(chat)) orphans.add(chat);
+      // A directory with no record (kv was lost): only an old one. A chat made
+      // around the time of the listing must never be taken for an orphan.
+      for (const d of dirs) if (!alive(d.chat) && d.mtimeMs < since - ORPHAN_GRACE_MS) orphans.add(d.chat);
+      for (const chat of orphans) {
+        if (!ID.test(chat) || alive(chat)) continue;
+        await this.forget(chat);
+        this.deps.log.info(`remote-host ${slug}: removed chat ${chat}'s files there; it was deleted while Dispatch wasn't watching`);
+      }
+      if (this.orphansSince === since) this.orphansSince = undefined;
+    } catch (err) {
+      // Stays pending: tried again at the next connect.
+      this.deps.log.warn(`remote-host ${slug}: looking for deleted chats' files failed: ${errText(err)}`);
+    } finally {
+      this.cleaning = false;
+    }
+  }
+
+  /** Everything this instance keeps for `chatId` on the machine goes, then the records of it here. Rejects while unreachable. */
+  private async forget(chatId: string): Promise<void> {
+    await this.deps.link.ready();
+    const r = await this.deps.link.agent<ForgetResult>(["forget", "--instance", this.deps.instanceId, "--chat", chatId], 50_000);
+    this.served.delete(chatId);
+    await this.deps.kv?.delete(this.servedKey(chatId));
+    await this.deps.kv?.delete(`sync:${chatId}`);
+    if (r.removed || r.killed.length) {
+      this.deps.log.info(
+        `remote-host ${this.deps.host().slug}: deleted chat ${chatId}'s checkout there` + (r.killed.length ? `, ending ${r.killed.length} session(s)` : ""),
+      );
+    }
+  }
+
+  /** End this backend's shells for one chat, and its forwards. Returns how many shells there were. */
+  private endShells(chatId: string): number {
+    let n = 0;
+    for (const [k, sh] of [...this.shells]) {
+      if (k.slice(0, k.indexOf("\u0000")) !== chatId) continue;
+      this.shells.delete(k);
+      sh.kill();
+      n++;
+    }
+    this.ports.dropChat(chatId);
+    return n;
+  }
+
+  private servedKey(chatId: string): string {
+    return `served:${this.deps.host().slug}:${chatId}`;
+  }
+
+  private async markServed(chatId: string): Promise<void> {
+    this.live?.add(chatId);
+    if (this.served.has(chatId)) return;
+    try {
+      await this.deps.kv?.set(this.servedKey(chatId), { at: Date.now() });
+      this.served.add(chatId);
+    } catch (err) {
+      // Not fatal: reconcile still finds the directory there, by its age.
+      this.deps.log.warn(`remote-host ${this.deps.host().slug}: could not record chat ${chatId}: ${errText(err)}`);
+    }
+  }
+
+  private async wasServed(chatId: string): Promise<boolean> {
+    if (this.served.has(chatId)) return true;
+    try {
+      return (await this.deps.kv?.get(this.servedKey(chatId))) !== undefined;
+    } catch {
+      return true; // can't tell: clean up rather than leave it
+    }
+  }
+
   /** The chats with at least one live shell here. */
   chatsWithShells(): Set<string> {
     return new Set([...this.shells.keys()].map((k) => k.slice(0, k.indexOf("\u0000"))));
@@ -209,12 +359,20 @@ export class HostBackend implements TerminalBackend {
         `on the same port when it is free here, else on another, which the terminal result and Ports & processes give. Open ` +
         `that URL, not the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those ` +
         `started from this chat's terminals; nothing else on the machine is.`,
+      `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its ` +
+        `checkout there.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you ` +
         `started (Ctrl-C the terminal, \`kill %1\`).`,
     ].join("\n");
   }
 }
+
+/** Chat ids that are safe as a path component there (dispatch-host's own check). */
+const ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** A chat directory there newer than this, relative to the reconcile, is never taken for an orphan (clocks differ). */
+const ORPHAN_GRACE_MS = 10 * 60_000;
 
 /** A chat's directory on the machine: its checkouts are inside, and a chat outside a repository starts here. */
 export function chatDir(paths: HostPaths, instanceId: string, chatId: string): string {

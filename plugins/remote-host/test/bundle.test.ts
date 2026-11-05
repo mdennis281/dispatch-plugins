@@ -117,6 +117,17 @@ describe("activation", () => {
     expect(t.terminalStatus.get("remote-host/lab")?.detail).toMatch(/connection refused/);
   });
 
+  it("has the cleanup hooks core calls, and an uninstall with no machine to reach is well inside its budget", async () => {
+    const t = await activate({ settings: { hosts: [] } });
+    const mod = active!.mod;
+    expect(mod.reconcile).toBeTypeOf("function");
+    expect((await t.lifecycle.reconcile(mod, [{ id: "chat-1", projectId: "p" }])).overran).toBe(false);
+    const r = await t.lifecycle.shutdown(mod, "uninstall");
+    expect(r.overran).toBe(false);
+    expect(r.error).toBeUndefined();
+    active = undefined; // shutdown deactivated it
+  });
+
   it("does nothing without an instance id to namespace its work by", async () => {
     const t = await activate({ instance: null, settings: { hosts: [host("lab", 1)] } });
     expect(t.terminalBackends.size).toBe(0);

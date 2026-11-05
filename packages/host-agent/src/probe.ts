@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
 import { readFileSync, statfsSync } from "node:fs";
 import { homedir, release, userInfo } from "node:os";
 import { captureLoginEnv, loginShell, shellEnv } from "./env.js";
+import { listInstances, type InstanceInfo } from "./lifecycle.js";
 import { AGENT_VERSION } from "./version.js";
 
 export interface ProbeResult {
@@ -33,6 +34,12 @@ export interface ProbeResult {
     /** `xcodebuild -checkFirstLaunchStatus` exited 0: the license is accepted and first launch done. */
     xcodeFirstLaunchDone: boolean | null;
   };
+  /**
+   * Every Dispatch instance with a namespace here: this one, the other one
+   * sharing the machine, and any left behind (a data directory that moved, so
+   * the instance got a new id). Older agents don't report it.
+   */
+  instances?: InstanceInfo[];
 }
 
 function out(file: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs = 10_000): Promise<{ code: number; stdout: string }> {
@@ -64,7 +71,7 @@ function osRelease(): ProbeResult["os"] {
   }
 }
 
-export async function probe(): Promise<ProbeResult> {
+export async function probe(root?: string): Promise<ProbeResult> {
   let loginEnvError: string | undefined;
   const login = await captureLoginEnv({ shell: loginShell(process.env, process.platform), node: process.execPath }).catch(
     (e: unknown) => {
@@ -115,5 +122,6 @@ export async function probe(): Promise<ProbeResult> {
       xcodebuild,
       xcodeFirstLaunchDone: firstLaunch ? firstLaunch.code === 0 : null,
     },
+    ...(root ? { instances: listInstances(root) } : {}),
   };
 }

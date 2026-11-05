@@ -2,7 +2,7 @@
 
 A [Dispatch](https://github.com/mdennis281/dispatch) plugin, part of [dispatch-plugins](https://github.com/mdennis281/dispatch-plugins), that runs a chat's **managed terminals** (the agent's `terminal` tool and the Terminals panel) on **your own machines** over SSH. Macs come first. Each machine you pair becomes a terminal location, `remote-host/<name>`, that a project or chat can pick.
 
-> **Status: preview.** This version pairs machines (Settings → Remote hosts), runs shells on them, and keeps each chat's worktree in sync with a checkout there. A dev server a chat starts there is forwarded to this computer. A chat's checkout and sessions on the machine stay when the chat ends; cleaning those up comes next. The design is [docs/design/remote-host.md](../../docs/design/remote-host.md).
+> **Status:** terminals only (Tier A of the design), macOS first. It pairs machines (Settings → Remote hosts), runs shells on them, keeps each chat's worktree in sync with a checkout there, forwards the chat's dev servers here, and cleans up after a chat when it goes idle or is deleted. The GUI side (Simulator, UI tests, Safari) and browser MCPs on the machine come later. The design is [docs/design/remote-host.md](../../docs/design/remote-host.md).
 
 ## What it does
 
@@ -11,6 +11,7 @@ A [Dispatch](https://github.com/mdennis281/dispatch) plugin, part of [dispatch-p
 - **Forwards the chat's dev servers** to this computer, on the same port when it is free (see [Forwarded ports](#forwarded-ports)).
 - **Syncs the chat's files around every command**, three ways (see [Syncing](#syncing)): your edits go there before it, its edits come back after it, and a conflict stops the next command instead of losing either side.
 - **Fails closed.** A machine that is asleep, off, or answering with the wrong host key is reported **offline**. A command sent to it is refused at once with the reason. It never runs in PowerShell on the Dispatch computer instead (`fallback: "refuse"`). The same goes for a sync that fails: the command doesn't run against stale files.
+- **Cleans up after a chat** (see [When a chat ends](#when-a-chat-ends)): idle, its shells end; deleted, its checkout there goes too.
 - **Stable and dev share machines safely.** Everything the plugin leaves on a machine lives under that Dispatch instance's id (`~/.dispatch-host/<instance>/`), so one instance's cleanup never touches the other's sessions.
 
 ## Pairing a machine
@@ -90,6 +91,15 @@ A server a chat starts in its terminal there (`pnpm dev`, say) is reachable on t
 - It goes when the chat's last terminal there does, or when the server stops (the machine is asked every 4 s while a terminal is open).
 
 Dispatch never asks the machine to reach back to this computer (no reverse forwards).
+
+## When a chat ends
+
+- **Idle.** When Dispatch retires an idle chat's session, its shells on the machine end, and whatever they were running (a dev server, a watcher) with them. Its checkout stays, so it picks up where it was when the chat is used again.
+- **Deleted.** The chat's sessions end, and its checkout, its session records (which hold its output) and its refs in the shared repository are deleted there. The checkout is moved aside at once and deleted in the background, so a big `node_modules` doesn't hold anything up. If the machine is asleep or off, Dispatch keeps the delete and tries again until the machine answers. A machine the chat never used is never asked.
+- **Deleted while Dispatch wasn't listening** (the plugin was off, or Dispatch was down). After every start Dispatch lists the chats that exist, and anything a machine holds for any other chat goes: at once, or when the machine is next reachable. A chat directory made in the last ten minutes is never taken for one of these.
+- **Garbage, once a day per machine.** dispatch-host empties its trash, deletes a shared repository no chat has used for a week, and lets git collect garbage in the rest once enough has piled up. A chat's checkout borrows its objects from the shared repository, so before that repository is collected, each checkout's commits are pinned in it. Only objects unreachable for two weeks are pruned.
+- **This Dispatch's old id.** If this Dispatch's data directory moved or was copied, it got a new instance id, and what it left on a machine under the old one is shown on the machine's row. It is never adopted or cleaned up from here, since the old id may still be a live Dispatch: delete it there once you know it isn't. dispatch-host ends its sessions after 12 hours without contact either way.
+- **Uninstalling the plugin** ends this Dispatch's sessions on every machine it can reach and deletes its files there (`~/.dispatch-host/<instance>`). The key lines stay in each machine's `authorized_keys`: remove the machines first to take them out as well. Disabling the plugin, or stopping Dispatch, keeps everything; a session left without Dispatch ends itself when its heartbeat stops.
 
 ## Removing a machine
 
