@@ -116,6 +116,42 @@ describe.skipIf(!SH)("pushing", () => {
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("one\ntwo\nthree\n");
   });
 
+  it("runs four git processes here and three there per look when nothing changed", async () => {
+    // Each git process costs 50-250 ms on Windows, and these run around every command.
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    const traces = { here: join(t.local, "..", "here.trace"), there: join(t.local, "..", "there.trace") };
+    const r2 = run();
+    process.env.GIT_TRACE2_EVENT = traces.here;
+    t.remote.env = { ...process.env, GIT_TRACE2_EVENT: traces.there };
+    try {
+      expect(await s.beforeRun(r2)).toEqual({});
+      expect(await s.afterRun(after(r2))).toEqual({});
+    } finally {
+      delete process.env.GIT_TRACE2_EVENT;
+      t.remote.env = undefined;
+    }
+    // Each git process's subcommand, in order (one that git started itself has a "/" in its sid).
+    const gits = (file: string) =>
+      readFileSync(file, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { event: string; sid: string; argv?: string[] })
+        .filter((e) => e.event === "start" && !e.sid.includes("/"))
+        .map((e) => e.argv![1]);
+    // Before: the snapshot (the index's path is known; its commit is the base's). After: nothing here.
+    expect(gits(traces.here)).toEqual(["ls-files", "config", "add", "write-tree"]);
+    // The look there, before and after.
+    expect(gits(traces.there)).toEqual(["add", "write-tree", "cat-file", "add", "write-tree", "cat-file"]);
+    // And a change still goes.
+    writeFileSync(join(t.local, "a.txt"), "changed\n");
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+    expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("changed\n");
+  });
+
   it("leaves big untracked files behind, and says so once", async () => {
     const t = setup();
     const s = t.mk({ capBytes: 1024 });
@@ -622,6 +658,23 @@ describe.skipIf(!SH)("never losing a file", () => {
     expect(b2.refuse).toBeUndefined();
     expect(text(b2)).toMatch(/\.git there was gone or broken .* rebuilt/);
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("mine\n");
+  });
+
+  it("rebuilds a checkout whose HEAD names a commit it can't read, rather than fail every push after", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    const bogus = "1".repeat(40);
+    writeFileSync(`${t.work}/.git/HEAD`, `${bogus}\n`);
+    writeFileSync(join(t.local, "a.txt"), "mine\n");
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toBeUndefined();
+    expect(text(b)).toMatch(/\.git there was gone or broken .* rebuilt/);
+    expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("mine\n");
+    expect(g(t.work, "rev-parse", "HEAD")).not.toBe(bogus);
+    expect(await s.beforeRun(run())).toEqual({});
   });
 
   it.skipIf(win)("keeps the machine's exec bit on a file that joins the sync, on a checkout that can't hold one", async () => {

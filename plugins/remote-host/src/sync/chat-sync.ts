@@ -515,8 +515,7 @@ export class ChatSync {
     const first = !base;
     const started = Date.now();
     if (first) await initCheckout(this.d.remote, p);
-    const since = base && (await hasObject(this.d.root, base.tree)) ? base.tree : undefined;
-    const sent = await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, since), signal);
+    const sent = await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, base?.tree), signal);
     if (signal.aborted) throw new Error("cancelled");
     for (let attempt = 0; ; attempt++) {
       try {
@@ -687,7 +686,13 @@ export class ChatSync {
   }
 
   private snapOpts() {
-    return { capBytes: this.cap, exclude: this.rec.conflicts.map((c) => c.copy), overlay: this.rec.overlay, pins: this.rec.pins };
+    return {
+      capBytes: this.cap,
+      exclude: this.rec.conflicts.map((c) => c.copy),
+      overlay: this.rec.overlay,
+      pins: this.rec.pins,
+      ...(this.rec.base ? { base: this.rec.base } : {}),
+    };
   }
 
   private key(): string {

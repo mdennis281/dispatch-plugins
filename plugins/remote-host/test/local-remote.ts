@@ -29,6 +29,8 @@ export interface LocalRemote extends RemoteSide {
   failStream(nth: number, afterBytes: number): void;
   /** Called with each script just before it runs (to change the "machine" at that moment). */
   before?: (script: string) => void;
+  /** The scripts' environment, when not this process's (to trace the machine's git apart from this side's). */
+  env?: NodeJS.ProcessEnv;
 }
 
 export function localRemote(): LocalRemote {
@@ -43,7 +45,7 @@ export function localRemote(): LocalRemote {
       scripts.push(script);
       r.before?.(script);
       return new Promise((res, rej) => {
-        const c = spawn(SH ?? "sh", ["-c", script], { windowsHide: true });
+        const c = spawn(SH ?? "sh", ["-c", script], { windowsHide: true, env: r.env ?? process.env });
         let stdout = "";
         let stderr = "";
         c.stdout.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
@@ -63,7 +65,7 @@ export function localRemote(): LocalRemote {
         cutAt = undefined;
       }
       return new Promise((res, rej) => {
-        const c = spawn(SH ?? "sh", ["-c", script], { windowsHide: true });
+        const c = spawn(SH ?? "sh", ["-c", script], { windowsHide: true, env: r.env ?? process.env });
         let stderr = "";
         c.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
         if (io.output) c.stdout.pipe(io.output, { end: true });
