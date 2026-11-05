@@ -203,8 +203,8 @@ describe.skipIf(!posix)("gc", () => {
     // The repository moved on (a newer snapshot) while the checkout still stands on the old one.
     send(a.repo, "refs/dispatch/chats/chat-a", { "a.txt": "second\n" }, { force: true });
     // And something nobody needs, to see the prune really ran.
-    const junk = send(a.repo, "refs/junk", { "junk.txt": "junk\n" });
-    git(a.repo, "update-ref", "-d", "refs/junk");
+    const junk = send(a.repo, "refs/junk/x", { "junk.txt": "junk\n" });
+    git(a.repo, "update-ref", "-d", "refs/junk/x");
     // A pin left by a chat that is gone.
     git(a.repo, "update-ref", "refs/dispatch/keep/chat-gone-head", git(a.repo, "rev-parse", "refs/dispatch/chats/chat-a"));
 
