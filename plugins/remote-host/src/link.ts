@@ -30,6 +30,7 @@ import type { ClientChannel } from "ssh2";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
 import { hostKeyAlgorithms, keySecretName, type HostConfig } from "./hosts.js";
 import { agentCommand, ensureAgent, type Exec, type HostPaths } from "./install.js";
+import { CONNECTING, CONNECTION_LOST, SETTINGS_CHANGED } from "./link-status.js";
 
 /** A connection to one address. `SshConnection` is one; tests pass fakes. */
 export interface LinkConnection extends Exec {
@@ -128,7 +129,7 @@ export class HostLink {
   private busy = false;
   private disposed = false;
   private memory: LinkMemory = {};
-  private current: TerminalBackendStatusInput = { state: "degraded", detail: "connecting" };
+  private current: TerminalBackendStatusInput = { state: "degraded", detail: CONNECTING };
   private readonly t: LinkTiming;
   private readonly now: () => number;
 
@@ -179,7 +180,7 @@ export class HostLink {
     this.host = host;
     if (!changedConnection) return;
     this.gen++;
-    this.drop("its settings changed; reconnecting", "degraded");
+    this.drop(SETTINGS_CHANGED, "degraded");
     this.closePool();
     this.failures = 0;
     void this.attempt().catch(() => {});
@@ -439,7 +440,7 @@ export class HostLink {
     if (this.linked?.conn !== conn) return;
     this.linked = undefined;
     if (this.disposed) return;
-    this.report({ state: "offline", detail: "connection lost; reconnecting", ...this.seen() });
+    this.report({ state: "offline", detail: CONNECTION_LOST, ...this.seen() });
     this.nextAttemptAt = this.now() + (this.t.backoffMs[0] ?? 2_000);
   }
 

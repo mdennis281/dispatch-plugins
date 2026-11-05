@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
 import type { HostConfig } from "../src/hosts.js";
+import { RECONNECTING_WORDS } from "../src/link-status.js";
 import { CONTROL_EXECS, HostLink, SESSIONS_PER_CONNECTION, describeConnectError, statusFrom, type LinkTiming } from "../src/link.js";
 import { AGENT, FakeMachine, PROBE, fakeRuntime, type AddressBehaviour, type FakeConn } from "./fake-machine.js";
 
@@ -78,6 +79,8 @@ describe("finding the machine", () => {
       expect(t.password).toBeUndefined();
     }
     expect(statuses[0]).toEqual({ state: "degraded", detail: "connecting" });
+    // The Settings pane shows it as connecting, not as degraded.
+    expect(RECONNECTING_WORDS[statuses[0]!.detail!]).toBe("Connecting");
     expect(statuses.at(-1)?.state).toBe("online");
   });
 
@@ -167,6 +170,7 @@ describe("staying up", () => {
     await l.ready();
     m.open()[0]!.close();
     expect(statuses.at(-1)).toMatchObject({ state: "offline", detail: "connection lost; reconnecting" });
+    expect(RECONNECTING_WORDS[statuses.at(-1)!.detail!]).toMatch(/^Reconnecting/);
     await until(() => statuses.at(-1)?.state === "online");
     expect(m.open()).toHaveLength(1);
   });

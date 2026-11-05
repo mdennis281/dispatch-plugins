@@ -6,3 +6,4 @@ name: dispatch-plugins
 description: Plugins for Dispatch, each installable on its own.
 plugins:
   - plugins/proxmox-terminal
+  - plugins/remote-host

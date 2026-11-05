@@ -2,15 +2,19 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: remote-host
 name: Remote host
-version: 0.2.0
+version: 0.3.0
 dispatch: ">=1"
 description: >-
   Run a chat's managed terminals on your own machines over SSH. Each paired
   machine is a terminal location, remote-host/<name>; its shells run under
   dispatch-host, a small supervisor that survives dropped connections and
-  cleans up after itself. macOS first.
+  cleans up after itself. macOS first. (preview: no port forwarding or
+  workspace cleanup yet)
 homepage: https://github.com/mdennis281/dispatch-plugins/tree/main/plugins/remote-host
 server: ./server/index.js
+# The Settings pane (pair, rename, check, remove). Its directory, and only
+# that, is served publicly at /plugins/remote-host/.
+client: ./client/index.js
 settings: ./settings.schema.json
 # One private key per paired machine, REMOTE_HOST_KEY_<NAME>, made and stored
 # by the plugin when you pair it and deleted when you remove it.
@@ -22,3 +26,4 @@ capabilities:
   - secrets:write
   - kv
   - routes
+  - ui
