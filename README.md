@@ -5,7 +5,7 @@ Plugins for [Dispatch](https://github.com/mdennis281/dispatch). Each one lives i
 | Plugin | id | What it does |
 |---|---|---|
 | [Proxmox terminal](plugins/proxmox-terminal) | `proxmox-terminal` | Runs each chat's managed terminals in its own Proxmox LXC, with the local worktree synced in before every command. |
-| [Remote host](plugins/remote-host) | `remote-host` | Runs a chat's managed terminals on your own machines over SSH, Mac first, with the chat's worktree synced around every command. Pair machines in Settings → Remote hosts. **Preview:** no port forwarding or workspace cleanup yet. Preparing a Mac: [docs/setup/macos-host.md](docs/setup/macos-host.md). |
+| [Remote host](plugins/remote-host) | `remote-host` | Runs a chat's managed terminals on your own machines over SSH, Mac first, with the chat's worktree synced around every command. Pair machines in Settings → Remote hosts. **Preview:** no workspace cleanup yet. Preparing a Mac: [docs/setup/macos-host.md](docs/setup/macos-host.md). |
 
 ## Planned
 

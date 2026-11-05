@@ -21,6 +21,8 @@ export interface RegistryDeps {
   connect?: (target: SshTarget) => LinkConnection;
   timing?: Partial<LinkTiming>;
   shell?: Partial<HostShellOptions>;
+  /** Tests: how often listeners are polled. */
+  portPollMs?: number;
 }
 
 export interface Entry {
@@ -55,6 +57,7 @@ export class HostRegistry {
       // the backend; the link last.
       void (async () => {
         await e.backend.killAll().catch(() => {});
+        e.backend.dispose();
         await terminals.unregisterBackend(backendId(slug)).catch((err: unknown) => {
           ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText(err)}`);
         });
@@ -103,8 +106,10 @@ export class HostRegistry {
       link: entry.link,
       instanceId: this.deps.instanceId,
       log: ctx.log,
+      publish: (port) => terminals.publishPort(id, port),
       ...(ctx.kv ? { kv: ctx.kv } : {}),
       ...(this.deps.shell ? { shell: this.deps.shell } : {}),
+      ...(this.deps.portPollMs ? { portPollMs: this.deps.portPollMs } : {}),
     });
     try {
       terminals.registerBackend(entry.backend);
@@ -138,6 +143,9 @@ export class HostRegistry {
     const entries = [...this.entries.values()];
     this.entries.clear();
     await Promise.all(entries.map((e) => e.backend.killAll().catch(() => {})));
-    for (const e of entries) e.link.dispose();
+    for (const e of entries) {
+      e.backend.dispose();
+      e.link.dispose();
+    }
   }
 }

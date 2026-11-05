@@ -2,12 +2,13 @@
 
 A [Dispatch](https://github.com/mdennis281/dispatch) plugin, part of [dispatch-plugins](https://github.com/mdennis281/dispatch-plugins), that runs a chat's **managed terminals** (the agent's `terminal` tool and the Terminals panel) on **your own machines** over SSH. Macs come first. Each machine you pair becomes a terminal location, `remote-host/<name>`, that a project or chat can pick.
 
-> **Status: preview.** This version pairs machines (Settings → Remote hosts), runs shells on them, and keeps each chat's worktree in sync with a checkout there. It doesn't forward a dev server's ports yet, and a chat's checkout and sessions on the machine stay when the chat ends; both come next. The design is [docs/design/remote-host.md](../../docs/design/remote-host.md).
+> **Status: preview.** This version pairs machines (Settings → Remote hosts), runs shells on them, and keeps each chat's worktree in sync with a checkout there. A dev server a chat starts there is forwarded to this computer. A chat's checkout and sessions on the machine stay when the chat ends; cleaning those up comes next. The design is [docs/design/remote-host.md](../../docs/design/remote-host.md).
 
 ## What it does
 
 - **SSH to the machine's own sshd**, in-process (ssh2), with one connection per machine. No extra daemon listens on the machine, and macOS needs nothing beyond Remote Login.
 - **Each shell runs under `dispatch-host`**, a small supervisor this plugin installs on the machine (`packages/host-agent`). It owns the shell's processes, journals its output, and keeps the shell running when the connection drops. Dispatch re-attaches, gets the output from the last byte it saw, and the command in flight carries on. The agent sees the command pause (`stalled`), not fail. If nobody comes back, dispatch-host kills the shell after 3 minutes (sleep doesn't count), and kills every session left by a Dispatch that hasn't been in touch for 12 hours.
+- **Forwards the chat's dev servers** to this computer, on the same port when it is free (see [Forwarded ports](#forwarded-ports)).
 - **Syncs the chat's files around every command**, three ways (see [Syncing](#syncing)): your edits go there before it, its edits come back after it, and a conflict stops the next command instead of losing either side.
 - **Fails closed.** A machine that is asleep, off, or answering with the wrong host key is reported **offline**. A command sent to it is refused at once with the reason. It never runs in PowerShell on the Dispatch computer instead (`fallback: "refuse"`). The same goes for a sync that fails: the command doesn't run against stale files.
 - **Stable and dev share machines safely.** Everything the plugin leaves on a machine lives under that Dispatch instance's id (`~/.dispatch-host/<instance>/`), so one instance's cleanup never touches the other's sessions.
@@ -23,7 +24,7 @@ Prepare the machine first: [docs/setup/macos-host.md](../../docs/setup/macos-hos
    ```
    Then name it (the `<name>` in `remote-host/<name>`), and check the account (`dispatch`) and the addresses this computer connects from, which the pane fills in from what it just saw. Trusting it (`POST /pair/start {slug, label, address, user, hostKey, allowFrom}`) makes Dispatch mint a keypair for this machine alone, with this `authorized_keys` line:
    ```
-   restrict,port-forwarding,permitopen="127.0.0.1:*",from="<this computer's addresses>" ssh-ed25519 AAAA… dispatch-remote-host:<slug>@<this computer>
+   restrict,port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",from="<this computer's addresses>" ssh-ed25519 AAAA… dispatch-remote-host:<slug>@<this computer>
    ```
    The key can't get a terminal, forward an agent or X11, or run `~/.ssh/rc`. It may only forward to the machine's own loopback (to reach a dev server), and only from this computer. Dispatch never asks for a reverse forward.
 3. **Let this computer in** (`POST /pair/finish {pairingId, password?}`). Either:
@@ -77,6 +78,18 @@ A chat working in a git repository gets its own checkout on the machine, `~/.dis
 - Transfers go in batches of up to 32 MB, and the machine keeps each batch it receives. A connection lost mid-way costs one batch: the next command sends only what is still missing. The first sync, which sends the whole worktree, runs in the first command's sync, not in starting the shell.
 - Submodules and Git LFS objects aren't synced yet.
 - On Windows, where files can't carry an exec bit or be symlinks, the plugin remembers those modes from the machine so they survive the round trip. A file made there that git would store differently here (CRLF line endings under `core.autocrlf`) goes back exactly as it came, and so does a conflict copy moved over your file.
+
+## Forwarded ports
+
+A server a chat starts in its terminal there (`pnpm dev`, say) is reachable on this computer while that terminal lives:
+
+- **Only the chat's own.** dispatch-host works out which session's processes hold each TCP listener on the machine. A chat's listeners are forwarded; nothing else there ever is: not AirPlay on 5000/7000, not another chat's, not the other Dispatch's, not the account's own.
+- **The same port here when it's free,** so OAuth redirects, CORS origins and cookies set for `localhost:3000` keep working. Otherwise another free port. Either way the terminal result and Ports & processes give the URL to open.
+- **Loopback only, on both ends.** It listens on 127.0.0.1 here, and dials the machine's 127.0.0.1 or ::1. A listener on all interfaces is reached through its loopback; one bound only to a LAN address isn't forwarded. The key's `permitopen` allows nothing else. Machines paired before 0.4.0 have only the IPv4 loopback in it, so a server bound only to `[::1]` (Vite's `localhost` on macOS) needs **Pair again**.
+- **It survives a dropped connection.** The port here stays open; while the machine is offline a connection to it is refused, and it works again after the reconnect.
+- It goes when the chat's last terminal there does, or when the server stops (the machine is asked every 4 s while a terminal is open).
+
+Dispatch never asks the machine to reach back to this computer (no reverse forwards).
 
 ## Removing a machine
 

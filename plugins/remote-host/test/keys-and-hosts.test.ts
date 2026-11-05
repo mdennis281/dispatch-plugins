@@ -20,7 +20,7 @@ const LINE = authorizedKeysLine(PUB, ["10.0.4.1", "10.69.69.69"]);
 describe("the authorized_keys line", () => {
   it("restricts the key to loopback forwards from this computer", () => {
     expect(LINE).toBe(
-      'restrict,port-forwarding,permitopen="127.0.0.1:*",from="10.0.4.1,10.69.69.69" ' + PUB,
+      'restrict,port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",from="10.0.4.1,10.69.69.69" ' + PUB,
     );
     expect(keyBlobOf(LINE)).toBe(PUB.split(" ")[1]);
   });

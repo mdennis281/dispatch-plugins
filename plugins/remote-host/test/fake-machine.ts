@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import type { ClientChannel } from "ssh2";
-import { nodeTarball, type ProbeResult } from "@dispatch-plugins/host-agent";
+import { nodeTarball, type Attribution, type ProbeResult } from "@dispatch-plugins/host-agent";
 import type { ExecResult, SshTarget } from "@dispatch-plugins/remote-core";
 import type { AgentBundle, RuntimeSource } from "../src/agent.js";
 import { sha256 } from "../src/agent.js";
@@ -53,9 +53,13 @@ export class FakeMachine {
   node: string | undefined = "v24.22.2";
   agent: string | undefined = "0.1.0";
   probe: ProbeResult = { ...PROBE };
+  /** What `dispatch-host ports` reports. */
+  ports: Attribution = { sessions: [], unattributed: [] };
   helloFails = false;
   /** sshd's MaxSessions. */
   maxSessions = 10;
+  /** What a `tcp` channel reaches: a test points it at a server of its own. */
+  tcp?: (host: string, port: number) => Promise<ClientChannel>;
   /** Holds a connect to an address until it resolves. */
   hold?: (address: string) => Promise<void>;
   readonly addresses: Record<string, AddressBehaviour>;
@@ -109,6 +113,7 @@ export class FakeMachine {
     }
     if (command.includes("'probe'")) return ok(JSON.stringify(this.probe) + "\n");
     if (command.includes("'kill'")) return ok(JSON.stringify({ killed: [] }) + "\n");
+    if (command.includes("'ports'")) return ok(JSON.stringify(this.ports) + "\n");
     return ok("");
   }
 
@@ -188,6 +193,13 @@ export class FakeConn extends EventEmitter implements LinkConnection {
     const ch = new FakeSessionChannel(command);
     this.channels.push(ch);
     return ch as unknown as ClientChannel;
+  }
+
+  /** Dials `tcp` on the machine; a test sets it to reach a server it runs. Default: nothing listens. */
+  async tcp(host: string, port: number): Promise<ClientChannel> {
+    if (!this.isOpen) throw new Error("closed");
+    if (!this.m.tcp) throw new Error(`(SSH) Channel open failure: connect failed (${host}:${port})`);
+    return this.m.tcp(host, port);
   }
 
   close(): void {
