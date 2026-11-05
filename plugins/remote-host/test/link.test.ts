@@ -181,6 +181,40 @@ describe("finding the machine", () => {
     expect(m.targets.length).toBe(before);
   });
 
+  it("dials anyway for a patient caller, one that won't get another chance (removing a machine)", async () => {
+    const m = machine({ "cvx-mac.lan": "refused", "10.0.10.16": "refused" });
+    let t = 1_000_000;
+    const { l, statuses } = link(m, { now: () => t, timing: { backoffMs: [60_000], recentContactMs: 20_000 } });
+    l.start();
+    await expect(l.ready()).rejects.toThrow(/connection refused/);
+    await until(() => statuses.at(-1)?.state === "offline");
+    t += 30_000;
+    // Back, but the link won't try again for another 30 s.
+    m.addresses["10.0.10.16"] = "ok";
+    await expect(l.ready()).rejects.toThrow(/it is offline/);
+    await expect(l.ready(undefined, { patient: true })).resolves.toMatchObject({ address: "10.0.10.16" });
+  });
+
+  it("counts a link dropped for an unanswered hello as just in touch, so a blip there is dialled too", async () => {
+    const m = machine({ "10.0.10.16": "ok" });
+    let t = 1_000_000;
+    const { l, statuses } = link(m, { now: () => t, timing: { backoffMs: [60_000], recentContactMs: 20_000, helloEveryMs: 30_000 } });
+    l.start();
+    await l.ready();
+    // The next hello, 31 s on, goes unanswered: the link drops it itself (lost()), not through a close.
+    m.helloFails = true;
+    t += 31_000;
+    await until(() => statuses.at(-1)?.state === "offline");
+    // Its own retry at once fails the same way; then it waits out the backoff.
+    const tries = m.targets.length;
+    await until(() => m.targets.length > tries);
+    await new Promise((r) => setTimeout(r, 50));
+    m.helloFails = false;
+    t += 5_000;
+    // The last hello was 36 s ago, but the link was up until 5 s ago: a real attempt, which gets through.
+    await expect(l.ready()).resolves.toMatchObject({ address: "10.0.10.16" });
+  });
+
   it("says the key was refused rather than that the machine is down", async () => {
     expect(describeConnectError(new Error("All configured authentication methods failed"))).toMatch(/key was refused/);
     const m = machine({ "cvx-mac.lan": "bad-key", "10.0.10.16": "bad-key" });

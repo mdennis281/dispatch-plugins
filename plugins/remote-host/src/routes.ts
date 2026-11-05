@@ -111,7 +111,9 @@ export function defineRoutes(deps: RoutesDeps): (r: PluginRouter<PluginRequest, 
       const key = await ctx.secrets?.get(name);
       if (e && key) {
         try {
-          await e.link.ready(AbortSignal.timeout(20_000));
+          // Patient: this is the one chance to take the key line out, so a
+          // machine the link thinks is offline is dialled anyway.
+          await e.link.ready(AbortSignal.timeout(20_000), { patient: true });
           const killed = await e.link
             .agent<{ killed?: string[] }>(["kill", "--instance", deps.instanceId, "--all"], 30_000)
             .catch(() => ({ killed: [] }));

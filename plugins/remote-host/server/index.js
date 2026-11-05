@@ -21115,7 +21115,7 @@ class HostLink {
   failures = 0;
   nextAttemptAt = 0;
   lastHelloAt = 0;
-  /** When a verified connection last closed: it was in touch until then. */
+  /** When a verified connection last ended, closed or dropped: it was in touch until then. */
   downAt = 0;
   lastProbeAt = 0;
   lastSweepAt = 0;
@@ -21172,12 +21172,16 @@ class HostLink {
   /**
    * A live, verified connection: the current one, or a new one. Rejects with
    * why the machine can't be reached: AT ONCE while the link is offline and
-   * the machine hasn't answered for a while (see {@link refusal}).
+   * the machine hasn't answered for a while (see {@link refusal}), unless the
+   * caller is `patient`: one that won't get another chance (removing a
+   * machine takes its key line out of authorized_keys only now) dials anyway.
    */
-  ready(signal) {
+  ready(signal, opts = {}) {
     if (this.linked?.conn.isOpen) return Promise.resolve(this.linked);
-    const refused = this.refusal();
-    if (refused) return Promise.reject(refused);
+    if (!opts.patient) {
+      const refused = this.refusal();
+      if (refused) return Promise.reject(refused);
+    }
     return withAbort(this.attempt(), signal);
   }
   /**
@@ -21454,6 +21458,7 @@ class HostLink {
   drop(detail, state) {
     const l = this.linked;
     this.linked = void 0;
+    if (l) this.downAt = this.now();
     l?.conn.close();
     this.report({ state, detail, ...this.seen() });
   }
@@ -24013,7 +24018,7 @@ function defineRoutes(deps) {
       const key2 = await ctx.secrets?.get(name);
       if (e && key2) {
         try {
-          await e.link.ready(AbortSignal.timeout(2e4));
+          await e.link.ready(AbortSignal.timeout(2e4), { patient: true });
           const killed = await e.link.agent(["kill", "--instance", deps.instanceId, "--all"], 3e4).catch(() => ({ killed: [] }));
           sessions = killed?.killed?.length ?? 0;
           const res = await e.link.exec(shCommand(removeKeyScript(keyBlobOf(publicKeyOf(key2)))), { timeoutMs: 3e4 });

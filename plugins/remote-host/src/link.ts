@@ -143,7 +143,7 @@ export class HostLink {
   private failures = 0;
   private nextAttemptAt = 0;
   private lastHelloAt = 0;
-  /** When a verified connection last closed: it was in touch until then. */
+  /** When a verified connection last ended, closed or dropped: it was in touch until then. */
   private downAt = 0;
   private lastProbeAt = 0;
   private lastSweepAt = 0;
@@ -216,12 +216,16 @@ export class HostLink {
   /**
    * A live, verified connection: the current one, or a new one. Rejects with
    * why the machine can't be reached: AT ONCE while the link is offline and
-   * the machine hasn't answered for a while (see {@link refusal}).
+   * the machine hasn't answered for a while (see {@link refusal}), unless the
+   * caller is `patient`: one that won't get another chance (removing a
+   * machine takes its key line out of authorized_keys only now) dials anyway.
    */
-  ready(signal?: AbortSignal): Promise<Linked> {
+  ready(signal?: AbortSignal, opts: { patient?: boolean } = {}): Promise<Linked> {
     if (this.linked?.conn.isOpen) return Promise.resolve(this.linked);
-    const refused = this.refusal();
-    if (refused) return Promise.reject(refused);
+    if (!opts.patient) {
+      const refused = this.refusal();
+      if (refused) return Promise.reject(refused);
+    }
     return withAbort(this.attempt(), signal);
   }
 
@@ -527,6 +531,9 @@ export class HostLink {
   private drop(detail: string, state: "offline" | "degraded"): void {
     const l = this.linked;
     this.linked = undefined;
+    // In touch until now: closing it below no longer reaches closed(), which
+    // checks it is still the link's connection.
+    if (l) this.downAt = this.now();
     l?.conn.close();
     this.report({ state, detail, ...this.seen() });
   }
