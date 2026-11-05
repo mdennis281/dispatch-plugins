@@ -22,6 +22,14 @@ const Trash2 = /* @__PURE__ */ pick("Trash2");
 function defineClientPlugin(mod) {
   return mod;
 }
+const CONNECTING = "connecting";
+const SETTINGS_CHANGED = "its settings changed; reconnecting";
+const CONNECTION_LOST = "connection lost; reconnecting";
+const RECONNECTING_WORDS = {
+  [CONNECTING]: "Connecting",
+  [SETTINGS_CHANGED]: "Reconnecting: its settings changed",
+  [CONNECTION_LOST]: "Reconnecting: the connection was lost"
+};
 const POLL_MS = 5e3;
 const inputCls = "w-full min-w-0 rounded-md border border-line bg-inset px-2.5 py-1.5 text-xs text-primary placeholder:text-faint focus:border-accent-line focus:outline-none disabled:opacity-60";
 const monoInputCls = `${inputCls} cm-mono`;
@@ -85,7 +93,15 @@ function RemoteHostsPage({ host }) {
         onChanged: refresh,
         onEdit: () => setEditing(h),
         onRemove: () => setRemoving(h),
-        onRepair: () => setPairing({ slug: h.slug, label: h.label, address: h.addresses[0], port: h.port, user: h.user, replace: true })
+        onRepair: () => setPairing({
+          slug: h.slug,
+          label: h.label,
+          address: h.addresses[0],
+          addresses: h.addresses,
+          port: h.port,
+          user: h.user,
+          replace: true
+        })
       },
       h.slug
     )) }),
@@ -134,7 +150,7 @@ function HostRow(props) {
   const { IconButton, Tooltip } = host.ui;
   const [checking, setChecking] = useState(false);
   const s = view.status;
-  const connecting = s.state === "offline" && /connecting/i.test(s.detail ?? "");
+  const connecting = reconnecting(view) !== void 0;
   const where = `${view.user}@${view.address ?? view.addresses[0] ?? "?"}${view.port && view.port !== 22 ? `:${view.port}` : ""}`;
   const check = async () => {
     setChecking(true);
@@ -178,11 +194,16 @@ function HostRow(props) {
     ] })
   ] }) });
 }
+function reconnecting(v) {
+  return v.status.state === "online" || !v.status.detail ? void 0 : RECONNECTING_WORDS[v.status.detail];
+}
 function statusWords(v) {
   const s = v.status;
   if (s.state === "online") return "Online";
+  const r = reconnecting(v);
+  if (r) return r;
   if (s.state === "degraded") return `Degraded${s.detail ? `: ${s.detail}` : ""}`;
-  return /connecting/i.test(s.detail ?? "") ? "Connecting" : `Offline${s.detail ? `: ${s.detail}` : ""}`;
+  return `Offline${s.detail ? `: ${s.detail}` : ""}`;
 }
 function statusLine(v) {
   const s = v.status;
@@ -247,6 +268,7 @@ function PairDialog({ host, prefill, onClose }) {
     setStep({ at: "confirm", scan: r });
   });
   const start = (scanned) => run(async () => {
+    var _a;
     const started = await call(host, "pair/start", "POST", {
       slug: slug.trim(),
       label: label.trim() || void 0,
@@ -256,6 +278,7 @@ function PairDialog({ host, prefill, onClose }) {
       hostKey: scanned.fingerprint,
       hostKeyType: scanned.keyType,
       allowFrom: splitList(allowFrom),
+      ...((_a = prefill.addresses) == null ? void 0 : _a.length) ? { addresses: prefill.addresses } : {},
       ...prefill.replace ? { replace: true } : {}
     });
     setStep({ at: "install", scan: scanned, started });

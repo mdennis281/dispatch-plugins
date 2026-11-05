@@ -185,12 +185,23 @@ describe("finish", () => {
     const first = p.start({ slug: "cvx-mac", address: s.host, port: s.port, user: "dispatch", hostKey: s.fingerprint });
     await p.finish({ pairingId: first.pairingId, password: "hunter2" });
     const oldKey = state.secrets.get("REMOTE_HOST_KEY_CVX_MAC");
-    const again = p.start({ slug: "cvx-mac", address: s.host, port: s.port, user: "dispatch", hostKey: s.fingerprint, replace: true });
+    // As the Settings pane sends it: the machine's saved addresses ride along (one added
+    // by Edit since), so pairing again doesn't shrink the list to the scanned one.
+    const again = p.start({
+      slug: "cvx-mac",
+      address: s.host,
+      addresses: ["mac.lan", s.host],
+      port: s.port,
+      user: "dispatch",
+      hostKey: s.fingerprint,
+      replace: true,
+    });
     const done = await p.finish({ pairingId: again.pairingId, password: "hunter2" });
     expect(done.oldKey).toBe("removed");
     expect(keys).toHaveLength(1);
     expect(state.secrets.get("REMOTE_HOST_KEY_CVX_MAC")).not.toBe(oldKey);
     expect(state.hosts).toHaveLength(1);
+    expect(state.hosts[0]!.addresses).toEqual([s.host, "mac.lan"]);
   });
 
   it("puts the old key back if the settings can't be saved", async () => {

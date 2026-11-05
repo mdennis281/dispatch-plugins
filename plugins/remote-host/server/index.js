@@ -21057,6 +21057,9 @@ function installError(what, r) {
 function agentCommand(paths, args) {
   return [paths.node, paths.agent, ...args].map(sq).join(" ");
 }
+const CONNECTING = "connecting";
+const SETTINGS_CHANGED = "its settings changed; reconnecting";
+const CONNECTION_LOST = "connection lost; reconnecting";
 const DEFAULT_TIMING = {
   tickMs: 5e3,
   helloEveryMs: 3e4,
@@ -21093,7 +21096,7 @@ class HostLink {
   busy = false;
   disposed = false;
   memory = {};
-  current = { state: "degraded", detail: "connecting" };
+  current = { state: "degraded", detail: CONNECTING };
   t;
   now;
   get status() {
@@ -21129,7 +21132,7 @@ class HostLink {
     this.host = host;
     if (!changedConnection) return;
     this.gen++;
-    this.drop("its settings changed; reconnecting", "degraded");
+    this.drop(SETTINGS_CHANGED, "degraded");
     this.closePool();
     this.failures = 0;
     void this.attempt().catch(() => {
@@ -21365,7 +21368,7 @@ class HostLink {
     if (this.linked?.conn !== conn) return;
     this.linked = void 0;
     if (this.disposed) return;
-    this.report({ state: "offline", detail: "connection lost; reconnecting", ...this.seen() });
+    this.report({ state: "offline", detail: CONNECTION_LOST, ...this.seen() });
     this.nextAttemptAt = this.now() + (this.t.backoffMs[0] ?? 2e3);
   }
   lost(detail) {

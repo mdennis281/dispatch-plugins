@@ -23,6 +23,7 @@ import { defineClientPlugin, type ClientHost } from "@dispatch/plugin-sdk";
 import type { ScanResult, StartResult } from "./pairing.js";
 import type { HostView } from "./registry.js";
 import type { HostConfig } from "./hosts.js";
+import { RECONNECTING_WORDS } from "./link-status.js";
 
 /** How often the list re-reads the machines' status while the pane is open. */
 const POLL_MS = 5_000;
@@ -128,7 +129,15 @@ function RemoteHostsPage({ host }: { host: ClientHost }) {
               onEdit={() => setEditing(h)}
               onRemove={() => setRemoving(h)}
               onRepair={() =>
-                setPairing({ slug: h.slug, label: h.label, address: h.addresses[0], port: h.port, user: h.user, replace: true })
+                setPairing({
+                  slug: h.slug,
+                  label: h.label,
+                  address: h.addresses[0],
+                  addresses: h.addresses,
+                  port: h.port,
+                  user: h.user,
+                  replace: true,
+                })
               }
             />
           ))}
@@ -187,7 +196,7 @@ function HostRow(props: {
   const { IconButton, Tooltip } = host.ui;
   const [checking, setChecking] = useState(false);
   const s = view.status;
-  const connecting = s.state === "offline" && /connecting/i.test(s.detail ?? "");
+  const connecting = reconnecting(view) !== undefined;
   const where = `${view.user}@${view.address ?? view.addresses[0] ?? "?"}${view.port && view.port !== 22 ? `:${view.port}` : ""}`;
 
   const check = async () => {
@@ -247,11 +256,22 @@ function HostRow(props: {
   );
 }
 
+/**
+ * The words for a link that is (re)connecting, not failing. It reports those
+ * as "degraded" (a new link, changed settings) or "offline" (a dropped one, while
+ * it retries at once), so match the exact details, whatever the state.
+ */
+function reconnecting(v: HostView): string | undefined {
+  return v.status.state === "online" || !v.status.detail ? undefined : RECONNECTING_WORDS[v.status.detail];
+}
+
 function statusWords(v: HostView): string {
   const s = v.status;
   if (s.state === "online") return "Online";
+  const r = reconnecting(v);
+  if (r) return r;
   if (s.state === "degraded") return `Degraded${s.detail ? `: ${s.detail}` : ""}`;
-  return /connecting/i.test(s.detail ?? "") ? "Connecting" : `Offline${s.detail ? `: ${s.detail}` : ""}`;
+  return `Offline${s.detail ? `: ${s.detail}` : ""}`;
 }
 
 function statusLine(v: HostView): string {
@@ -293,6 +313,11 @@ interface PairPrefill {
   address?: string;
   port?: number;
   user?: string;
+  /**
+   * Every address the machine has now, when pairing it again. Sent with the
+   * new pairing so its saved list survives; the scanned address goes first.
+   */
+  addresses?: string[];
   /** Pairing an already-paired machine again: a new key, or its host key changed. */
   replace?: boolean;
 }
@@ -356,6 +381,7 @@ function PairDialog({ host, prefill, onClose }: { host: ClientHost; prefill: Pai
         hostKey: scanned.fingerprint,
         hostKeyType: scanned.keyType,
         allowFrom: splitList(allowFrom),
+        ...(prefill.addresses?.length ? { addresses: prefill.addresses } : {}),
         ...(prefill.replace ? { replace: true } : {}),
       });
       setStep({ at: "install", scan: scanned, started });
