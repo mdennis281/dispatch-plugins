@@ -140,6 +140,24 @@ describe("reconcile", () => {
     expect(t.kv.has("served:studio:live")).toBe(true);
   });
 
+  it("goes on past an orphan it can't forget, and tries that one again at the next connect", async () => {
+    const { m, t, r, connected, forgot } = setup({ kv: { "served:studio:bad": { at: 1 }, "served:studio:good": { at: 1 } } });
+    await connected();
+    const run = m.run.bind(m);
+    m.run = async (command, opts) =>
+      command.includes("'forget'") && command.includes("'bad'") ? { code: 1, stdout: "", stderr: "p.git: git won't run" } : run(command, opts);
+    r.reconcile(new Set(), Date.now());
+    await until(() => forgot().includes("good"), 5_000, "the good orphan");
+    expect(t.kv.has("served:studio:good")).toBe(false);
+    expect(t.kv.has("served:studio:bad")).toBe(true);
+    // git works again; the next connect finishes the pass.
+    m.run = run;
+    m.open()[0]!.close();
+    await connected();
+    await until(() => forgot().includes("bad"), 5_000, "the bad orphan, retried");
+    expect(t.kv.has("served:studio:bad")).toBe(false);
+  });
+
   it("waits for a machine that is off, and cleans up once it is back", async () => {
     const { m, r, forgot } = setup({ address: "refused", kv: { "served:studio:gone": { at: 1 } } });
     r.reconcile(new Set(), Date.now());

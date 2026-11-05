@@ -235,12 +235,21 @@ export class HostBackend implements TerminalBackend {
       // A directory with no record (kv was lost): only an old one. A chat made
       // around the time of the listing must never be taken for an orphan.
       for (const d of dirs) if (!alive(d.chat) && d.mtimeMs < since - ORPHAN_GRACE_MS) orphans.add(d.chat);
+      // One at a time, each on its own: one that fails (git refusing to run
+      // there, say) doesn't keep the others. Any failure leaves the pass
+      // pending, to be tried again at the next connect.
+      let failed = 0;
       for (const chat of orphans) {
         if (!ID.test(chat) || alive(chat)) continue;
-        await this.forget(chat);
-        this.deps.log.info(`remote-host ${slug}: removed chat ${chat}'s files there; it was deleted while Dispatch wasn't watching`);
+        try {
+          await this.forget(chat);
+          this.deps.log.info(`remote-host ${slug}: removed chat ${chat}'s files there; it was deleted while Dispatch wasn't watching`);
+        } catch (err) {
+          failed++;
+          this.deps.log.warn(`remote-host ${slug}: removing deleted chat ${chat}'s files there failed: ${errText(err)}`);
+        }
       }
-      if (this.orphansSince === since) this.orphansSince = undefined;
+      if (!failed && this.orphansSince === since) this.orphansSince = undefined;
     } catch (err) {
       // Stays pending: tried again at the next connect.
       this.deps.log.warn(`remote-host ${slug}: looking for deleted chats' files failed: ${errText(err)}`);

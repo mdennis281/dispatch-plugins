@@ -101,6 +101,10 @@ export async function forgetChat(o: { root: string; instance: string; chat: stri
   let refs = 0;
   const errors: string[] = [];
   for (const repo of repos(reposDir)) {
+    // Not a repository (a sync that made the directory, then found git
+    // broken, leaves it empty): no refs to forget. Asked of git, it would
+    // fail every chat's delete here until gc took the directory away.
+    if (!existsSync(join(repo, "HEAD")) || !existsSync(join(repo, "objects"))) continue;
     const names = [`refs/dispatch/chats/${chat}`, ...keepRefs(chat)];
     const list = await git(["--git-dir", repo, "for-each-ref", "--format=%(refname)", ...names]);
     if (list.code !== 0) {

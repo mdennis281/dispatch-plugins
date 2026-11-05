@@ -155,6 +155,16 @@ describe.skipIf(!posix)("forget", () => {
     expect(refs(a.repo)).toEqual([]);
   });
 
+  it("passes over a repository directory git never initialised, rather than failing every delete", async () => {
+    // A sync that made repos/<key>.git and then found git broken leaves it empty.
+    const a = syncedChat("chat-a");
+    mkdirSync(repoPath(root, I, "half-made"), { recursive: true });
+    const r = await forgetChat({ root, instance: I, chat: "chat-a", kill });
+    expect(r.errors).toBeUndefined();
+    expect(r.refs).toBe(1);
+    expect(refs(a.repo)).toEqual([]);
+  });
+
   it("refuses a chat id that could reach outside its directory", async () => {
     await expect(forgetChat({ root, instance: I, chat: "../inst-b", kill })).rejects.toThrow(/chat must match/);
   });
