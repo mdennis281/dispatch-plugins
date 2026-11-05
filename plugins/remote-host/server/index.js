@@ -21898,7 +21898,8 @@ function isLoopback(host) {
   return host === "127.0.0.1" || host === "::1";
 }
 function command(c) {
-  return (c ?? "").match(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}/)?.[0];
+  const name = (c ?? "").match(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}/)?.[0];
+  return name === "MainThread" ? "node" : name;
 }
 const MAX_UNREADABLE = 3;
 class HostShell extends EventEmitter {

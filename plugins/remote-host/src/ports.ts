@@ -240,6 +240,9 @@ function isLoopback(host: string): boolean {
 }
 
 /** The listener's program, as a label: a short name only, since the machine's account chooses what it is called. */
-function command(c: string | undefined): string | undefined {
-  return (c ?? "").match(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}/)?.[0];
+export function command(c: string | undefined): string | undefined {
+  const name = (c ?? "").match(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}/)?.[0];
+  // Node names its main thread, and Linux's lsof reports a process by that
+  // thread's name (`comm`), so every Node server there would read "MainThread".
+  return name === "MainThread" ? "node" : name;
 }
