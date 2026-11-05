@@ -211,7 +211,19 @@ export class PortForwards {
   }
 }
 
-/** Listen on 127.0.0.1:`preferred` when it is free, else on any free port. Resolves with the port. */
+/** How many ephemeral ports to try before taking one that is busy on ::1. */
+const EPHEMERAL_TRIES = 8;
+
+/**
+ * Listen on 127.0.0.1:`preferred` when that port is free on BOTH loopbacks,
+ * else on another port that is. Resolves with the port.
+ *
+ * Both, because the forward is published as `http://127.0.0.1:<port>` but a
+ * person (or a browser that tries IPv6 first) types `localhost:<port>`. With
+ * another program on [::1]:<port>, which is how Vite listens on Windows,
+ * that name reached the other program, not the machine's dev server (seen in
+ * the live run on cvx-mac, where two other chats' Vite servers held ::1).
+ */
 export async function listen(server: Server, preferred: number): Promise<number> {
   const attempt = (port: number) =>
     new Promise<number>((resolve, reject) => {
@@ -227,11 +239,31 @@ export async function listen(server: Server, preferred: number): Promise<number>
       server.once("listening", ok);
       server.listen(port, "127.0.0.1");
     });
-  try {
-    return await attempt(preferred);
-  } catch {
-    return attempt(0);
+  if (await freeOnV6Loopback(preferred)) {
+    try {
+      return await attempt(preferred);
+    } catch {
+      /* busy on 127.0.0.1: any port will do */
+    }
   }
+  for (let i = 1; ; i++) {
+    const port = await attempt(0);
+    if (i >= EPHEMERAL_TRIES || (await freeOnV6Loopback(port))) return port;
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+}
+
+/**
+ * Whether nothing listens on [::1]:`port`. Asked by binding it for a moment.
+ * A computer without IPv6 has no [::1] for `localhost` to reach, so that
+ * counts as free; only "in use" (or, on Windows, a reserved port) is taken.
+ */
+export function freeOnV6Loopback(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createServer();
+    probe.once("error", (err: NodeJS.ErrnoException) => resolve(err.code !== "EADDRINUSE" && err.code !== "EACCES"));
+    probe.listen({ port, host: "::1", ipv6Only: true, exclusive: true }, () => probe.close(() => resolve(true)));
+  });
 }
 
 function key(chat: string, port: number): string {
