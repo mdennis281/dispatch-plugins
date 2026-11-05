@@ -132,20 +132,30 @@ connection doesn't seem to, turn Remote Login off and on again.
 Sync needs git on the Mac. `/usr/bin/git` is only a stub: it runs the git of whichever developer directory
 `xcode-select` points at. Point it at the **Command Line Tools**, even if Xcode is installed too:
 
-```sh
-xcode-select --install
-sudo xcode-select -s /Library/Developer/CommandLineTools
-```
+1. Install them:
 
-- `xcode-select --install` opens a dialog; click **Install**. If it says the tools are already installed,
-  that's fine; go on.
+   ```sh
+   xcode-select --install
+   ```
+
+   It opens a dialog and returns at once. Click **Install** and **wait for the install to finish**. If it says
+   the tools are already installed, that's fine; go on.
+2. Once the install is done, choose them:
+
+   ```sh
+   sudo xcode-select -s /Library/Developer/CommandLineTools
+   ```
+
+   `invalid developer directory` means the install hasn't finished yet. Wait, then run it again.
+
 - **Why not Xcode's git:** every Xcode update, including one the App Store installs on its own, puts Xcode's
   tools behind its new license until someone runs `sudo xcodebuild -license accept`. While Xcode is the
   developer directory, that blocks `/usr/bin/git` too (exit 69, "You have not agreed to the Xcode license
   agreements"), and with it every sync. This happened on cvx-mac when Xcode updated itself to 27.2. The
   Command Line Tools' git has no such gate.
-- Xcode builds still work: Dispatch tells the agent to run Xcode's tools with
-  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` set on each command (step 14).
+- Xcode builds still work. From remote-host 0.5.7 (#29), Dispatch tells the agent to run Xcode's tools with
+  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` set on each command (step 14). Its own git runs
+  with `DEVELOPER_DIR` unset. Its probe checks Xcode the same way, so Xcode still shows on the machine's row.
 
 **Verify:**
 
@@ -297,8 +307,9 @@ Do this while logged in as Dispatch. It's a per-user setting.
    ```
 
 Don't point `xcode-select` at Xcode. It stays on the Command Line Tools (step 5), so an Xcode update can't
-block git. Xcode's tools are run with `DEVELOPER_DIR` set on the command instead, as above. Dispatch tells the
-agent to do the same.
+block git. Xcode's tools are run with `DEVELOPER_DIR` set on the command instead, as above. From remote-host
+0.5.7 (#29), Dispatch tells the agent to do the same. An older remote-host shows "no Xcode" for a Mac set up
+this way, and doesn't tell the agent.
 
 **Verify:**
 
