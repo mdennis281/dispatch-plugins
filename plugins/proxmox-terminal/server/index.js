@@ -20402,6 +20402,18 @@ class SshConnection extends EventEmitter {
     });
   }
   /**
+   * One TCP connection to `host:port` as the machine sees it (a `direct-tcpip`
+   * channel). sshd counts these apart from `MaxSessions`, which limits shells
+   * and execs only. Rejects when the connection is down or the machine refuses
+   * (nothing listening, or a key whose `permitopen` doesn't cover it).
+   */
+  tcp(host, port) {
+    return new Promise((resolve2, reject) => {
+      if (!this.isOpen || !this.client) return reject(new Error("not connected"));
+      this.client.forwardOut("127.0.0.1", 0, host, port, (err, stream) => err ? reject(err) : resolve2(stream));
+    });
+  }
+  /**
    * Listen on 127.0.0.1:<ephemeral> and pipe each connection to
    * 127.0.0.1:<remotePort> on the machine. Resolves with the local port.
    */
@@ -20409,13 +20421,15 @@ class SshConnection extends EventEmitter {
     return new Promise((resolve2, reject) => {
       const server2 = createServer((sock) => {
         if (!this.isOpen) return sock.destroy();
-        this.client.forwardOut("127.0.0.1", 0, remoteHost, remotePort, (err, stream) => {
-          if (err) return sock.destroy();
-          sock.pipe(stream).pipe(sock);
-          sock.on("error", () => stream.close());
-          stream.on("error", () => sock.destroy());
-          stream.on("close", () => sock.destroy());
-        });
+        this.tcp(remoteHost, remotePort).then(
+          (stream) => {
+            sock.pipe(stream).pipe(sock);
+            sock.on("error", () => stream.close());
+            stream.on("error", () => sock.destroy());
+            stream.on("close", () => sock.destroy());
+          },
+          () => sock.destroy()
+        );
       });
       server2.on("error", reject);
       server2.listen(0, "127.0.0.1", () => {

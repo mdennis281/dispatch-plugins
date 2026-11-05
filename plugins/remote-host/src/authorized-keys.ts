@@ -4,8 +4,10 @@
  *
  * The key may do exactly what Dispatch needs and nothing else:
  * - `restrict`: no pty, agent or X11 forwarding, no `~/.ssh/rc`;
- * - `port-forwarding` + `permitopen="127.0.0.1:*"`: local forwards, to the
- *   machine's own loopback only (a dev server it runs);
+ * - `port-forwarding` + `permitopen="127.0.0.1:*"` + `permitopen="[::1]:*"`:
+ *   local forwards, to the machine's own loopback only (a dev server it runs).
+ *   Both loopbacks, because Vite's `localhost` on macOS binds only `[::1]`;
+ *   sshd matches the address literally, so a dev server there needs the v6 one;
  * - `from=`: only from the Dispatch computer's addresses.
  *
  * Dispatch never asks for a reverse forward; letting one in is a later,
@@ -21,7 +23,7 @@ export function authorizedKeysLine(publicKey: string, allowFrom: readonly string
   }
   if (!allowFrom.length) throw new Error("the key needs at least one address it may be used from");
   for (const a of allowFrom) if (!validFrom(a)) throw new Error(`not an address pattern: ${JSON.stringify(a)}`);
-  return `restrict,port-forwarding,permitopen="127.0.0.1:*",from="${allowFrom.join(",")}" ${parts.join(" ")}`;
+  return `restrict,port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",from="${allowFrom.join(",")}" ${parts.join(" ")}`;
 }
 
 /** The base64 key blob in an authorized_keys line or a public key line. */

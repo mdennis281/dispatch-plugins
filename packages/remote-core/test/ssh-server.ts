@@ -36,7 +36,7 @@ export interface TestSshServerOptions {
   authorizedKeys?: () => readonly string[];
   /** Answer one exec. Default: exit 0, no output. */
   exec?: (req: ExecRequest) => void;
-  /** Allow `direct-tcpip` (local forwards) to 127.0.0.1. Default true. */
+  /** Allow `direct-tcpip` (local forwards) to the loopback, 127.0.0.1 or ::1, as remote-host's `permitopen` does. Default true. */
   allowForwards?: boolean;
   /** Refuse a session past this many open at once on one connection, like sshd's `MaxSessions` (10). Default: no limit. */
   maxSessions?: number;
@@ -123,8 +123,8 @@ export async function startTestSshServer(opts: TestSshServerOptions = {}): Promi
         });
       });
       client.on("tcpip", (accept, reject, info) => {
-        if (opts.allowForwards === false || info.destIP !== "127.0.0.1") return reject();
-        const sock = connect(info.destPort, "127.0.0.1");
+        if (opts.allowForwards === false || (info.destIP !== "127.0.0.1" && info.destIP !== "::1")) return reject();
+        const sock = connect(info.destPort, info.destIP);
         sock.on("error", () => reject());
         sock.once("connect", () => {
           const ch = accept();

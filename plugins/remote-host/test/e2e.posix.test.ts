@@ -6,7 +6,8 @@
  *
  * Skipped on Windows; CI runs it on Linux and macOS.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { get } from "node:http";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -21,6 +22,8 @@ import type { HostConfig } from "../src/hosts.js";
 import { HostRegistry } from "../src/registry.js";
 
 const posix = process.platform !== "win32";
+/** dispatch-host finds listeners with lsof; a runner without it can't attribute ports. */
+const hasLsof = posix && spawnSync("sh", ["-c", "command -v lsof"]).status === 0;
 const INSTANCE = "e2e-instance";
 const ID = "remote-host/e2e";
 
@@ -92,6 +95,7 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       },
       timing: { tickMs: 100, helloEveryMs: 1_000, backoffMs: [100] },
       shell: { heartbeatMs: 200, stallAfterMs: 5_000, retryMs: [100] },
+      portPollMs: 300,
     });
     const host: HostConfig = {
       slug: "e2e",
@@ -230,6 +234,26 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     }
   });
 
+  it.skipIf(!hasLsof)("forwards a server the chat starts there, and withdraws it with the shell", { timeout: 60_000 }, async () => {
+    const h = await t.terminals.spawn(ID, { chatId: "chat-ports", name: "main" });
+    const w = watch(h);
+    // A dev server: started in the background from the chat's own shell, on a port the OS picks.
+    const js = "require('http').createServer((q,s)=>s.end('served-there')).listen(0,'127.0.0.1',function(){console.log('port='+this.address().port)})";
+    h.stdin.write(`${sq(process.execPath)} -e ${sq(js)} &\n`);
+    await until(() => /port=\d+/.test(w.out), 20_000, "the server's port");
+    const port = Number(w.out.match(/port=(\d+)/)![1]);
+    const mine = () => t.terminalPorts.find((p) => p.chatId === "chat-ports" && p.remotePort === port);
+    await until(() => !!mine(), 20_000, `port ${port} published (${JSON.stringify(t.terminalPorts)})`);
+    expect(mine()).toMatchObject({ backend: ID, label: "node" });
+    // The "machine" is this computer, so its port is taken here: another one carries it.
+    expect(mine()!.url).not.toBe(`http://127.0.0.1:${port}`);
+    expect(await fetchText(`${mine()!.url}/`)).toBe("served-there");
+    // Nothing another chat holds is forwarded for this one.
+    expect(t.terminalPorts.filter((p) => p.chatId !== "chat-ports")).toEqual([]);
+    h.kill();
+    await until(() => !mine(), 10_000, "the forward withdrawn");
+  });
+
   it("runs more shells than one connection has sessions for, and still answers", { timeout: 90_000 }, async () => {
     const shells = await Promise.all(Array.from({ length: 12 }, (_, i) => t.terminals.spawn(ID, { chatId: "chat-3", name: `s${i}` })));
     const ws = shells.map(watch);
@@ -242,6 +266,16 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     expect(ws.every((w) => w.exit?.reason?.kind === "killed")).toBe(true);
   });
 });
+
+function fetchText(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    get(url, (res) => {
+      let b = "";
+      res.on("data", (c) => (b += c));
+      res.on("end", () => resolve(b));
+    }).on("error", reject);
+  });
+}
 
 /** Whether a process exists (a zombie counts until it is reaped). */
 function alive(pid: number): boolean {

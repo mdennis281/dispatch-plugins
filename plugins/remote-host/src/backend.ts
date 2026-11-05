@@ -21,14 +21,17 @@ import type {
   TerminalBackend,
   TerminalBackendHandle,
   TerminalBeforeRunResult,
+  TerminalPortForwardInput,
   TerminalRunInfo,
   TerminalSpawnInfo,
 } from "@dispatch/plugin-sdk";
+import type { Attribution } from "@dispatch-plugins/host-agent";
 import { assertId, chatWorktreePath, instanceLayout, sq, type ProbeResult } from "@dispatch-plugins/host-agent";
 import { errText, git } from "@dispatch-plugins/remote-core";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
 import type { HostLink } from "./link.js";
+import { PortForwards } from "./ports.js";
 import { HostShell, type HostShellOptions, type SessionOpener } from "./session.js";
 import { ChatSync, DEFAULT_CAP_BYTES, type ChatSyncDeps } from "./sync/chat-sync.js";
 import { linkRemote } from "./sync/link-remote.js";
@@ -45,6 +48,10 @@ export interface HostBackendDeps {
   shell?: Partial<HostShellOptions>;
   /** Overrides for tests: the size cap, the batch size. */
   sync?: Pick<ChatSyncDeps, "capBytes" | "batchBytes">;
+  /** Announce a forwarded port (`ctx.terminals.publishPort` for this backend); returns its withdraw. */
+  publish?: (port: TerminalPortForwardInput) => () => void;
+  /** Overrides for tests: how often listeners are polled. */
+  portPollMs?: number;
 }
 
 export class HostBackend implements TerminalBackend {
@@ -60,12 +67,25 @@ export class HostBackend implements TerminalBackend {
   /** Each chat's checkout on the machine, by chat. */
   private readonly syncs = new Map<string, ChatSync>();
   private remote?: RemoteSide;
+  /** The chats' dev servers there, forwarded here. */
+  readonly ports: PortForwards;
 
   constructor(
     readonly id: string,
     private readonly deps: HostBackendDeps,
   ) {
     this.label = deps.host().label;
+    const { link, instanceId } = deps;
+    this.ports = new PortForwards({
+      list: () => link.agent<Attribution>(["ports", "--instance", instanceId], 30_000),
+      dial: (host, port) => link.tcp(host, port),
+      online: () => link.connected,
+      publish: deps.publish ?? (() => () => {}),
+      chats: () => this.chatsWithShells(),
+      log: deps.log,
+      label: () => this.label,
+      ...(deps.portPollMs ? { intervalMs: deps.portPollMs } : {}),
+    });
   }
 
   async spawn(info: TerminalSpawnInfo): Promise<TerminalBackendHandle> {
@@ -104,7 +124,10 @@ export class HostBackend implements TerminalBackend {
       if (this.shells.get(key) === sh) this.shells.delete(key);
       // Whatever it was running is over, so it no longer holds the checkout.
       this.syncs.get(chatId)?.releaseTerminal(info.name);
+      // Its last shell here is gone, and with it anything it served.
+      if (!this.chatsWithShells().has(chatId)) this.ports.dropChat(chatId);
     });
+    this.ports.wake();
     // A run is over there, even one core stopped waiting for.
     sh.on("runEnd", (m: { runId: string }) => this.syncs.get(chatId)?.runEnded(m.runId));
     return sh;
@@ -118,8 +141,19 @@ export class HostBackend implements TerminalBackend {
   async killAll(waitMs = 1_500): Promise<void> {
     const shells = [...this.shells.values()];
     this.shells.clear();
+    this.ports.dispose();
     for (const sh of shells) sh.kill();
     if (shells.length) await new Promise((r) => setTimeout(r, waitMs).unref?.());
+  }
+
+  /** Core unregistered the backend (the machine was removed, or the plugin is going down). */
+  dispose(): void {
+    this.ports.dispose();
+  }
+
+  /** The chats with at least one live shell here. */
+  chatsWithShells(): Set<string> {
+    return new Set([...this.shells.keys()].map((k) => k.slice(0, k.indexOf("\u0000"))));
   }
 
   /** Sync the chat's files there (fail closed), then mark the run in the session's journal. */
@@ -171,6 +205,10 @@ export class HostBackend implements TerminalBackend {
         `saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others ` +
         `are refused, so files never change under a running command; one that timed out holds every terminal until it ends ` +
         `(Ctrl-C it). Outside a git repository nothing is synced.`,
+      `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: ` +
+        `on the same port when it is free here, else on another, which the terminal result and Ports & processes give. Open ` +
+        `that URL, not the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those ` +
+        `started from this chat's terminals; nothing else on the machine is.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you ` +
         `started (Ctrl-C the terminal, \`kill %1\`).`,

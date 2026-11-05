@@ -96,17 +96,17 @@ function requireSafer() {
   var buffer = require$$0;
   var Buffer2 = buffer.Buffer;
   var safer = {};
-  var key;
-  for (key in buffer) {
-    if (!buffer.hasOwnProperty(key)) continue;
-    if (key === "SlowBuffer" || key === "Buffer") continue;
-    safer[key] = buffer[key];
+  var key2;
+  for (key2 in buffer) {
+    if (!buffer.hasOwnProperty(key2)) continue;
+    if (key2 === "SlowBuffer" || key2 === "Buffer") continue;
+    safer[key2] = buffer[key2];
   }
   var Safer = safer.Buffer = {};
-  for (key in Buffer2) {
-    if (!Buffer2.hasOwnProperty(key)) continue;
-    if (key === "allocUnsafe" || key === "allocUnsafeSlow") continue;
-    Safer[key] = Buffer2[key];
+  for (key2 in Buffer2) {
+    if (!Buffer2.hasOwnProperty(key2)) continue;
+    if (key2 === "allocUnsafe" || key2 === "allocUnsafeSlow") continue;
+    Safer[key2] = Buffer2[key2];
   }
   safer.Buffer.prototype = Buffer2.prototype;
   if (!Safer.from || Safer.from === Uint8Array.from) {
@@ -342,11 +342,11 @@ function requireWriter() {
     assert.ok(to);
     assert.equal(typeof to, "object");
     var keys = Object.getOwnPropertyNames(from);
-    keys.forEach(function(key) {
-      if (to[key])
+    keys.forEach(function(key2) {
+      if (to[key2])
         return;
-      var value = Object.getOwnPropertyDescriptor(from, key);
-      Object.defineProperty(to, key, value);
+      var value = Object.getOwnPropertyDescriptor(from, key2);
+      Object.defineProperty(to, key2, value);
     });
     return to;
   }
@@ -966,7 +966,7 @@ function requireNaclFast() {
         for (var i = 0; i < 8; i++) sn[i] = n[i + 16];
         return crypto_stream_salsa20_xor(c, cpos, m, mpos, d, sn, s);
       }
-      var poly13052 = function(key) {
+      var poly13052 = function(key2) {
         this.buffer = new Uint8Array(16);
         this.r = new Uint16Array(10);
         this.h = new Uint16Array(10);
@@ -974,32 +974,32 @@ function requireNaclFast() {
         this.leftover = 0;
         this.fin = 0;
         var t0, t1, t2, t3, t4, t5, t6, t7;
-        t0 = key[0] & 255 | (key[1] & 255) << 8;
+        t0 = key2[0] & 255 | (key2[1] & 255) << 8;
         this.r[0] = t0 & 8191;
-        t1 = key[2] & 255 | (key[3] & 255) << 8;
+        t1 = key2[2] & 255 | (key2[3] & 255) << 8;
         this.r[1] = (t0 >>> 13 | t1 << 3) & 8191;
-        t2 = key[4] & 255 | (key[5] & 255) << 8;
+        t2 = key2[4] & 255 | (key2[5] & 255) << 8;
         this.r[2] = (t1 >>> 10 | t2 << 6) & 7939;
-        t3 = key[6] & 255 | (key[7] & 255) << 8;
+        t3 = key2[6] & 255 | (key2[7] & 255) << 8;
         this.r[3] = (t2 >>> 7 | t3 << 9) & 8191;
-        t4 = key[8] & 255 | (key[9] & 255) << 8;
+        t4 = key2[8] & 255 | (key2[9] & 255) << 8;
         this.r[4] = (t3 >>> 4 | t4 << 12) & 255;
         this.r[5] = t4 >>> 1 & 8190;
-        t5 = key[10] & 255 | (key[11] & 255) << 8;
+        t5 = key2[10] & 255 | (key2[11] & 255) << 8;
         this.r[6] = (t4 >>> 14 | t5 << 2) & 8191;
-        t6 = key[12] & 255 | (key[13] & 255) << 8;
+        t6 = key2[12] & 255 | (key2[13] & 255) << 8;
         this.r[7] = (t5 >>> 11 | t6 << 5) & 8065;
-        t7 = key[14] & 255 | (key[15] & 255) << 8;
+        t7 = key2[14] & 255 | (key2[15] & 255) << 8;
         this.r[8] = (t6 >>> 8 | t7 << 8) & 8191;
         this.r[9] = t7 >>> 5 & 127;
-        this.pad[0] = key[16] & 255 | (key[17] & 255) << 8;
-        this.pad[1] = key[18] & 255 | (key[19] & 255) << 8;
-        this.pad[2] = key[20] & 255 | (key[21] & 255) << 8;
-        this.pad[3] = key[22] & 255 | (key[23] & 255) << 8;
-        this.pad[4] = key[24] & 255 | (key[25] & 255) << 8;
-        this.pad[5] = key[26] & 255 | (key[27] & 255) << 8;
-        this.pad[6] = key[28] & 255 | (key[29] & 255) << 8;
-        this.pad[7] = key[30] & 255 | (key[31] & 255) << 8;
+        this.pad[0] = key2[16] & 255 | (key2[17] & 255) << 8;
+        this.pad[1] = key2[18] & 255 | (key2[19] & 255) << 8;
+        this.pad[2] = key2[20] & 255 | (key2[21] & 255) << 8;
+        this.pad[3] = key2[22] & 255 | (key2[23] & 255) << 8;
+        this.pad[4] = key2[24] & 255 | (key2[25] & 255) << 8;
+        this.pad[5] = key2[26] & 255 | (key2[27] & 255) << 8;
+        this.pad[6] = key2[28] & 255 | (key2[29] & 255) << 8;
+        this.pad[7] = key2[30] & 255 | (key2[31] & 255) << 8;
       };
       poly13052.prototype.blocks = function(m, mpos, bytes) {
         var hibit = this.fin ? 0 : 1 << 11;
@@ -2642,23 +2642,23 @@ function requireNaclFast() {
         randombytes(b, n);
         return b;
       };
-      nacl.secretbox = function(msg, nonce, key) {
-        checkArrayTypes(msg, nonce, key);
-        checkLengths(key, nonce);
+      nacl.secretbox = function(msg, nonce, key2) {
+        checkArrayTypes(msg, nonce, key2);
+        checkLengths(key2, nonce);
         var m = new Uint8Array(crypto_secretbox_ZEROBYTES + msg.length);
         var c = new Uint8Array(m.length);
         for (var i = 0; i < msg.length; i++) m[i + crypto_secretbox_ZEROBYTES] = msg[i];
-        crypto_secretbox(c, m, m.length, nonce, key);
+        crypto_secretbox(c, m, m.length, nonce, key2);
         return c.subarray(crypto_secretbox_BOXZEROBYTES);
       };
-      nacl.secretbox.open = function(box, nonce, key) {
-        checkArrayTypes(box, nonce, key);
-        checkLengths(key, nonce);
+      nacl.secretbox.open = function(box, nonce, key2) {
+        checkArrayTypes(box, nonce, key2);
+        checkLengths(key2, nonce);
         var c = new Uint8Array(crypto_secretbox_BOXZEROBYTES + box.length);
         var m = new Uint8Array(c.length);
         for (var i = 0; i < box.length; i++) c[i + crypto_secretbox_BOXZEROBYTES] = box[i];
         if (c.length < 32) return false;
-        if (crypto_secretbox_open(m, c, c.length, nonce, key) !== 0) return false;
+        if (crypto_secretbox_open(m, c, c.length, nonce, key2) !== 0) return false;
         return m.subarray(crypto_secretbox_ZEROBYTES);
       };
       nacl.secretbox.keyLength = crypto_secretbox_KEYBYTES;
@@ -3930,11 +3930,11 @@ function requireBcryptPbkdf() {
     }
     return temp;
   }
-  Blowfish.prototype.expand0state = function(key, keybytes) {
+  Blowfish.prototype.expand0state = function(key2, keybytes) {
     var d = new Uint32Array(2), i, k;
     var d8 = new Uint8Array(d.buffer);
     for (i = 0, BLF_J = 0; i < 18; i++) {
-      this.P[i] ^= stream2word(key, keybytes);
+      this.P[i] ^= stream2word(key2, keybytes);
     }
     BLF_J = 0;
     for (i = 0; i < 18; i += 2) {
@@ -3950,10 +3950,10 @@ function requireBcryptPbkdf() {
       }
     }
   };
-  Blowfish.prototype.expandstate = function(data, databytes, key, keybytes) {
+  Blowfish.prototype.expandstate = function(data, databytes, key2, keybytes) {
     var d = new Uint32Array(2), i, k;
     for (i = 0, BLF_J = 0; i < 18; i++) {
-      this.P[i] ^= stream2word(key, keybytes);
+      this.P[i] ^= stream2word(key2, keybytes);
     }
     for (i = 0, BLF_J = 0; i < 18; i += 2) {
       d[0] ^= stream2word(data, databytes);
@@ -4035,7 +4035,7 @@ function requireBcryptPbkdf() {
       out[4 * i + 0] = cdata[i];
     }
   }
-  function bcrypt_pbkdf(pass, passlen, salt, saltlen, key, keylen, rounds) {
+  function bcrypt_pbkdf(pass, passlen, salt, saltlen, key2, keylen, rounds) {
     var sha2pass = new Uint8Array(64), sha2salt = new Uint8Array(64), out = new Uint8Array(BCRYPT_HASHSIZE), tmpout = new Uint8Array(BCRYPT_HASHSIZE), countsalt = new Uint8Array(saltlen + 4), i, j, amt, stride, dest, count, origkeylen = keylen;
     if (rounds < 1)
       return -1;
@@ -4066,7 +4066,7 @@ function requireBcryptPbkdf() {
         dest = i * stride + (count - 1);
         if (dest >= origkeylen)
           break;
-        key[dest] = out[i];
+        key2[dest] = out[i];
       }
       keylen -= i;
     }
@@ -4097,13 +4097,13 @@ function requireConstants() {
     const { bindingAvailable, CIPHER_INFO, MAC_INFO } = requireCrypto();
     const eddsaSupported = (() => {
       if (typeof crypto2.sign === "function" && typeof crypto2.verify === "function") {
-        const key = "-----BEGIN PRIVATE KEY-----\r\nMC4CAQAwBQYDK2VwBCIEIHKj+sVa9WcD/q2DJUJaf43Kptc8xYuUQA4bOFj9vC8T\r\n-----END PRIVATE KEY-----";
+        const key2 = "-----BEGIN PRIVATE KEY-----\r\nMC4CAQAwBQYDK2VwBCIEIHKj+sVa9WcD/q2DJUJaf43Kptc8xYuUQA4bOFj9vC8T\r\n-----END PRIVATE KEY-----";
         const data = Buffer.from("a");
         let sig;
         let verified;
         try {
-          sig = crypto2.sign(null, data, key);
-          verified = crypto2.verify(null, data, key, sig);
+          sig = crypto2.sign(null, data, key2);
+          verified = crypto2.verify(null, data, key2, sig);
         } catch {
         }
         return Buffer.isBuffer(sig) && sig.length === 64 && verified === true;
@@ -4472,7 +4472,7 @@ function requireConstants() {
       curve25519Supported,
       eddsaSupported
     };
-    module.exports.DISCONNECT_REASON_BY_VALUE = Array.from(Object.entries(module.exports.DISCONNECT_REASON)).reduce((obj, [key, value]) => ({ ...obj, [value]: key }), {});
+    module.exports.DISCONNECT_REASON_BY_VALUE = Array.from(Object.entries(module.exports.DISCONNECT_REASON)).reduce((obj, [key2, value]) => ({ ...obj, [value]: key2 }), {});
   })(constants);
   return constants.exports;
 }
@@ -6905,8 +6905,8 @@ ${formatted}-----END ${type} KEY-----`;
     getPublicSSH: function getPublicSSH() {
       return this[SYM_PUB_SSH];
     },
-    equals: function equals(key) {
-      const parsed = parseKey(key);
+    equals: function equals(key2) {
+      const parsed = parseKey(key2);
       if (parsed instanceof Error)
         return false;
       return this.type === parsed.type && this[SYM_PRIV_PEM] === parsed[SYM_PRIV_PEM] && this[SYM_PUB_PEM] === parsed[SYM_PUB_PEM] && this[SYM_PUB_SSH].equals(parsed[SYM_PUB_SSH]);
@@ -8554,12 +8554,12 @@ function requireAgent() {
               ));
             }
             const newKeys = [];
-            for (let key of keys) {
-              key = parseKey(key);
-              if (key instanceof Error) {
+            for (let key2 of keys) {
+              key2 = parseKey(key2);
+              if (key2 instanceof Error) {
                 continue;
               }
-              newKeys.push(key);
+              newKeys.push(key2);
             }
             this[SYM_AGENT_KEYS] = newKeys;
             this[SYM_AGENT_KEYS_IDX] = -1;
@@ -8858,7 +8858,7 @@ function requireHandlers_misc() {
   const {
     parseKey
   } = requireKeyParser();
-  const TERMINAL_MODE_BY_VALUE = Array.from(Object.entries(TERMINAL_MODE)).reduce((obj, [key, value]) => ({ ...obj, [key]: value }), {});
+  const TERMINAL_MODE_BY_VALUE = Array.from(Object.entries(TERMINAL_MODE)).reduce((obj, [key2, value]) => ({ ...obj, [key2]: value }), {});
   handlers_misc = {
     // Transport layer protocol ==================================================
     [MESSAGE.DISCONNECT]: (self2, payload) => {
@@ -9000,7 +9000,7 @@ function requireHandlers_misc() {
           if (hasSig !== void 0) {
             const keyAlgo = bufferParser.readString(true);
             let realKeyAlgo = keyAlgo;
-            const key = bufferParser.readString();
+            const key2 = bufferParser.readString();
             let hashAlgo;
             switch (keyAlgo) {
               case "rsa-sha2-256":
@@ -9031,7 +9031,7 @@ function requireHandlers_misc() {
                   );
                   methodData = {
                     keyAlgo: realKeyAlgo,
-                    key,
+                    key: key2,
                     signature,
                     blob,
                     hashAlgo
@@ -9039,7 +9039,7 @@ function requireHandlers_misc() {
                 }
               }
             } else {
-              methodData = { keyAlgo: realKeyAlgo, key, hashAlgo };
+              methodData = { keyAlgo: realKeyAlgo, key: key2, hashAlgo };
               methodDesc = "publickey -- check";
             }
           }
@@ -9048,7 +9048,7 @@ function requireHandlers_misc() {
         case "hostbased": {
           const keyAlgo = bufferParser.readString(true);
           let realKeyAlgo = keyAlgo;
-          const key = bufferParser.readString();
+          const key2 = bufferParser.readString();
           const localHostname = bufferParser.readString(true);
           const localUsername = bufferParser.readString(true);
           let hashAlgo;
@@ -9080,7 +9080,7 @@ function requireHandlers_misc() {
               );
               methodData = {
                 keyAlgo: realKeyAlgo,
-                key,
+                key: key2,
                 signature,
                 blob,
                 localHostname,
@@ -9176,9 +9176,9 @@ function requireHandlers_misc() {
         case "publickey": {
           bufferParser.init(payload, 1);
           const keyAlgo = bufferParser.readString(true);
-          const key = bufferParser.readString();
+          const key2 = bufferParser.readString();
           bufferParser.clear();
-          if (key === void 0) {
+          if (key2 === void 0) {
             return doFatalError(
               self2,
               "Inbound: Malformed USERAUTH_PK_OK packet"
@@ -9187,7 +9187,7 @@ function requireHandlers_misc() {
           self2._debug && self2._debug("Inbound: Received USERAUTH_PK_OK");
           self2._authsQueue.shift();
           const handler = self2._handlers.USERAUTH_PK_OK;
-          handler && handler(self2, keyAlgo, key);
+          handler && handler(self2, keyAlgo, key2);
           break;
         }
         case "keyboard-interactive": {
@@ -9297,9 +9297,9 @@ function requireHandlers_misc() {
                 data = void 0;
                 break;
               }
-              const key = parseKey(keyRaw);
-              if (!(key instanceof Error))
-                data.push(key);
+              const key2 = parseKey(keyRaw);
+              if (!(key2 instanceof Error))
+                data.push(key2);
             }
             break;
           }
@@ -10581,30 +10581,30 @@ function requireKex() {
       }
       getPublicKey() {
         this.generateKeys();
-        const key = this._public;
-        if (key)
-          return this.convertPublicKey(key);
+        const key2 = this._public;
+        if (key2)
+          return this.convertPublicKey(key2);
       }
-      convertPublicKey(key) {
+      convertPublicKey(key2) {
         let newKey;
         let idx = 0;
-        let len = key.length;
-        while (key[idx] === 0) {
+        let len = key2.length;
+        while (key2[idx] === 0) {
           ++idx;
           --len;
         }
-        if (key[idx] & 128) {
+        if (key2[idx] & 128) {
           newKey = Buffer.allocUnsafe(1 + len);
           newKey[0] = 0;
-          key.copy(newKey, 1, idx);
+          key2.copy(newKey, 1, idx);
           return newKey;
         }
-        if (len !== key.length) {
+        if (len !== key2.length) {
           newKey = Buffer.allocUnsafe(len);
-          key.copy(newKey, 0, idx);
-          key = newKey;
+          key2.copy(newKey, 0, idx);
+          key2 = newKey;
         }
-        return key;
+        return key2;
       }
       computeSecret(otherPublicKey) {
         this.generateKeys();
@@ -10800,25 +10800,25 @@ function requireKex() {
       }
       getPublicKey() {
         this.generateKeys();
-        const key = this._keys.publicKey.export({ type: "spki", format: "der" });
-        return key.slice(-32);
+        const key2 = this._keys.publicKey.export({ type: "spki", format: "der" });
+        return key2.slice(-32);
       }
-      convertPublicKey(key) {
+      convertPublicKey(key2) {
         let newKey;
         let idx = 0;
-        let len = key.length;
-        while (key[idx] === 0) {
+        let len = key2.length;
+        while (key2[idx] === 0) {
           ++idx;
           --len;
         }
-        if (key.length === 32)
-          return key;
-        if (len !== key.length) {
+        if (key2.length === 32)
+          return key2;
+        if (len !== key2.length) {
           newKey = Buffer.allocUnsafe(len);
-          key.copy(newKey, 0, idx);
-          key = newKey;
+          key2.copy(newKey, 0, idx);
+          key2 = newKey;
         }
-        return key;
+        return key2;
       }
       computeSecret(otherPublicKey) {
         this.generateKeys();
@@ -11138,17 +11138,17 @@ function requireKex() {
           let base;
           let val;
           let desc;
-          let key;
+          let key2;
           if (typeof prop === "string") {
             base = lists;
             val = obj[prop];
-            desc = key = prop;
+            desc = key2 = prop;
           } else {
             const parent = prop[0];
             base = lists[parent];
-            key = prop[1];
-            val = obj[parent][key];
-            desc = `${parent}.${key}`;
+            key2 = prop[1];
+            val = obj[parent][key2];
+            desc = `${parent}.${key2}`;
           }
           const entry = { array: void 0, buffer: void 0 };
           if (Buffer.isBuffer(val)) {
@@ -11166,7 +11166,7 @@ function requireKex() {
             }
             totalSize += 4 + entry.buffer.length;
           }
-          base[key] = entry;
+          base[key2] = entry;
         }
         const all = Buffer.allocUnsafe(totalSize);
         lists.all = all;
@@ -12333,10 +12333,10 @@ function requireProtocol() {
       );
       sendPacket(this, this._packetRW.write.finalize(packet));
     }
-    env(chan, key, val, wantReply) {
+    env(chan, key2, val, wantReply) {
       if (this._server)
         throw new Error("Client-only method called in server mode");
-      const keyLen = Buffer.byteLength(key);
+      const keyLen = Buffer.byteLength(key2);
       const isBuf = Buffer.isBuffer(val);
       const valLen = isBuf ? val.length : Buffer.byteLength(val);
       let p = this._packetRW.write.allocStart;
@@ -12349,14 +12349,14 @@ function requireProtocol() {
       packet.utf8Write("env", p += 4, 3);
       packet[p += 3] = wantReply === void 0 || wantReply === true ? 1 : 0;
       writeUInt32BE(packet, keyLen, ++p);
-      packet.utf8Write(key, p += 4, keyLen);
+      packet.utf8Write(key2, p += 4, keyLen);
       writeUInt32BE(packet, valLen, p += keyLen);
       if (isBuf)
         packet.set(val, p += 4);
       else
         packet.utf8Write(val, p += 4, valLen);
       this._debug && this._debug(
-        `Outbound: Sending CHANNEL_REQUEST (r:${chan}, env: ${key}=${val})`
+        `Outbound: Sending CHANNEL_REQUEST (r:${chan}, env: ${key2}=${val})`
       );
       sendPacket(this, this._packetRW.write.finalize(packet));
     }
@@ -12433,8 +12433,8 @@ function requireProtocol() {
         throw new Error("Client-only method called in server mode");
       let keysTotal = 0;
       const publicKeys = [];
-      for (const key of keys) {
-        const publicKey = key.getPublicSSH();
+      for (const key2 of keys) {
+        const publicKey = key2.getPublicSSH();
         keysTotal += 4 + publicKey.length;
         publicKeys.push(publicKey);
       }
@@ -12679,20 +12679,20 @@ function requireProtocol() {
       if (this._kex.negotiated.sc.compress === "zlib@openssh.com")
         this._packetRW.write = new ZlibPacketWriter(this);
     }
-    authPKOK(keyAlgo, key) {
+    authPKOK(keyAlgo, key2) {
       if (!this._server)
         throw new Error("Server-only method called in client mode");
       if (this._authsQueue.length === 0 || this._authsQueue[0] !== "publickey")
         throw new Error('"publickey" auth not in progress');
       const keyAlgoLen = Buffer.byteLength(keyAlgo);
-      const keyLen = key.length;
+      const keyLen = key2.length;
       let p = this._packetRW.write.allocStart;
       const packet = this._packetRW.write.alloc(1 + 4 + keyAlgoLen + 4 + keyLen);
       packet[p] = MESSAGE.USERAUTH_PK_OK;
       writeUInt32BE(packet, keyAlgoLen, ++p);
       packet.utf8Write(keyAlgo, p += 4, keyAlgoLen);
       writeUInt32BE(packet, keyLen, p += keyAlgoLen);
-      packet.set(key, p += 4);
+      packet.set(key2, p += 4);
       this._authsQueue.shift();
       this._debug && this._debug("Outbound: Sending USERAUTH_PK_OK");
       sendPacket(this, this._packetRW.write.finalize(packet));
@@ -12880,13 +12880,13 @@ function requireProtocol() {
     const bytes = Buffer.allocUnsafe(5 * keys.length + 1);
     let b = 0;
     for (let i = 0; i < keys.length; ++i) {
-      const key = keys[i];
-      if (key === "TTY_OP_END")
+      const key2 = keys[i];
+      if (key2 === "TTY_OP_END")
         continue;
-      const opcode = TERMINAL_MODE[key];
+      const opcode = TERMINAL_MODE[key2];
       if (opcode === void 0)
         continue;
-      const val = modes[key];
+      const val = modes[key2];
       if (typeof val === "number" && isFinite(val)) {
         bytes[b++] = opcode;
         bytes[b++] = val >>> 24;
@@ -14990,9 +14990,9 @@ function requireSFTP() {
     const stringFlagMapKeys = Object.keys(stringFlagMap);
     return (flags) => {
       for (let i = 0; i < stringFlagMapKeys.length; ++i) {
-        const key = stringFlagMapKeys[i];
-        if (stringFlagMap[key] === flags)
-          return key;
+        const key2 = stringFlagMapKeys[i];
+        if (stringFlagMap[key2] === flags)
+          return key2;
       }
       return null;
     };
@@ -16480,9 +16480,9 @@ function requireUtils() {
       const keys = Object.keys(algoList);
       let list2 = defaultList;
       for (let i = 0; i < keys.length; ++i) {
-        const key = keys[i];
-        let val = algoList[key];
-        switch (key) {
+        const key2 = keys[i];
+        let val = algoList[key2];
+        switch (key2) {
           case "append":
             if (!Array.isArray(val))
               val = [val];
@@ -16812,10 +16812,10 @@ function requireClient() {
         if (HASHES.indexOf(cfg.hostHash) !== -1) {
           hashAlgo = cfg.hostHash;
         }
-        hostVerifier = (key, verify) => {
+        hostVerifier = (key2, verify) => {
           if (hashAlgo)
-            key = createHash2(hashAlgo).update(key).digest("hex");
-          const ret = hashCb(key, verify);
+            key2 = createHash2(hashAlgo).update(key2).digest("hex");
+          const ret = hashCb(key2, verify);
           if (ret !== void 0)
             verify(ret);
         };
@@ -16970,10 +16970,10 @@ function requireClient() {
             if (curAuth.keyAlgos)
               [keyAlgo, hashAlgo] = curAuth.keyAlgos[0];
             if (curAuth.type === "agent") {
-              const key = curAuth.agentCtx.currentKey();
-              proto.authPK(curAuth.username, key, keyAlgo, (buf, cb) => {
+              const key2 = curAuth.agentCtx.currentKey();
+              proto.authPK(curAuth.username, key2, keyAlgo, (buf, cb) => {
                 const opts = { hash: hashAlgo };
-                curAuth.agentCtx.sign(key, buf, opts, (err, signed) => {
+                curAuth.agentCtx.sign(key2, buf, opts, (err, signed) => {
                   if (err) {
                     err.level = "agent";
                     this.emit("error", err);
@@ -17389,23 +17389,23 @@ function requireClient() {
               break;
             }
             case "publickey": {
-              const key = parseKey(nextAuth.key, nextAuth.passphrase);
-              if (key instanceof Error)
+              const key2 = parseKey(nextAuth.key, nextAuth.passphrase);
+              if (key2 instanceof Error)
                 return skipAuth("Skipping invalid key auth attempt");
-              if (!key.isPrivateKey())
+              if (!key2.isPrivateKey())
                 return skipAuth("Skipping non-private key");
-              nextAuth = { type, username, key };
+              nextAuth = { type, username, key: key2 };
               break;
             }
             case "hostbased": {
               const { localHostname, localUsername } = nextAuth;
-              const key = parseKey(nextAuth.key, nextAuth.passphrase);
-              if (key instanceof Error || typeof localHostname !== "string" || typeof localUsername !== "string") {
+              const key2 = parseKey(nextAuth.key, nextAuth.passphrase);
+              if (key2 instanceof Error || typeof localHostname !== "string" || typeof localUsername !== "string") {
                 return skipAuth("Skipping invalid hostbased auth attempt");
               }
-              if (!key.isPrivateKey())
+              if (!key2.isPrivateKey())
                 return skipAuth("Skipping non-private key");
-              nextAuth = { type, username, key, localHostname, localUsername };
+              nextAuth = { type, username, key: key2, localHostname, localUsername };
               break;
             }
             case "agent": {
@@ -17527,15 +17527,15 @@ function requireClient() {
       }
       const tryNextAgentKey = () => {
         if (curAuth.type === "agent") {
-          const key = curAuth.agentCtx.nextKey();
-          if (key === false) {
+          const key2 = curAuth.agentCtx.nextKey();
+          if (key2 === false) {
             debug && debug("Agent: No more keys left to try");
             debug && debug("Client: agent auth failed");
             tryNextAuth();
           } else {
             const pos = curAuth.agentCtx.pos();
             let keyAlgo;
-            curAuth.keyAlgos = getKeyAlgos(this, key, serverSigAlgs);
+            curAuth.keyAlgos = getKeyAlgos(this, key2, serverSigAlgs);
             if (curAuth.keyAlgos) {
               if (curAuth.keyAlgos.length) {
                 keyAlgo = curAuth.keyAlgos[0][0];
@@ -17548,7 +17548,7 @@ function requireClient() {
               }
             }
             debug && debug(`Agent: Trying key #${pos + 1}`);
-            proto.authPK(curAuth.username, key, keyAlgo);
+            proto.authPK(curAuth.username, key2, keyAlgo);
           }
         }
       };
@@ -18151,9 +18151,9 @@ function requireClient() {
     }
     const keys = Object.keys(env || {});
     for (let i = 0; i < keys.length; ++i) {
-      const key = keys[i];
-      const val = env[key];
-      chan._client._protocol.env(chan.outgoing.id, key, val, wantReply);
+      const key2 = keys[i];
+      const val = env[key2];
+      chan._client._protocol.env(chan.outgoing.id, key2, val, wantReply);
     }
   }
   function reqSubsystem(chan, name, cb) {
@@ -18301,8 +18301,8 @@ function requireClient() {
     if (!Array.isArray(keys_))
       throw new TypeError("Invalid keys argument type");
     const keys = [];
-    for (const key of keys_) {
-      const parsed = parseKey(key);
+    for (const key2 of keys_) {
+      const parsed = parseKey(key2);
       if (parsed instanceof Error)
         throw parsed;
       keys.push(parsed);
@@ -18319,15 +18319,15 @@ function requireClient() {
         while (bufferParser.avail()) {
           if (keyIdx === keys.length)
             break;
-          const key = keys[keyIdx++];
-          const keyPublic = key.getPublicSSH();
+          const key2 = keys[keyIdx++];
+          const keyPublic = key2.getPublicSSH();
           const sigEntry = bufferParser.readString();
           sigParser.init(sigEntry, 0);
           const type = sigParser.readString(true);
           let value = sigParser.readString();
           let algo;
-          if (type !== key.type) {
-            if (key.type === "ssh-rsa") {
+          if (type !== key2.type) {
+            if (key2.type === "ssh-rsa") {
               switch (type) {
                 case "rsa-sha2-256":
                   algo = "sha256";
@@ -18355,8 +18355,8 @@ function requireClient() {
           bufferCopy(keyPublic, verifyData, 0, keyPublic.length, p += 4);
           if (!(value = sigSSHToASN1(value, type)))
             continue;
-          if (key.verify(verifyData, value, algo) === true)
-            ret.push(key);
+          if (key2.verify(verifyData, value, algo) === true)
+            ret.push(key2);
         }
         sigParser.clear();
         bufferParser.clear();
@@ -18372,8 +18372,8 @@ function requireClient() {
       )
     );
   }
-  function getKeyAlgos(client2, key, serverSigAlgs) {
-    switch (key.type) {
+  function getKeyAlgos(client2, key2, serverSigAlgs) {
+    switch (key2.type) {
       case "ssh-rsa":
         if (client2._protocol._compatFlags & COMPAT.IMPLY_RSA_SHA2_SIGALGS) {
           if (!Array.isArray(serverSigAlgs))
@@ -20235,15 +20235,15 @@ class RemoteShell extends EventEmitter {
     this.finish(null);
   }
 }
-function hostKeyFingerprint(key) {
-  return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
+function hostKeyFingerprint(key2) {
+  return `SHA256:${createHash("sha256").update(key2).digest("base64").replace(/=+$/, "")}`;
 }
 function trustProvisioner() {
   return () => true;
 }
 function pinnedHostKey(fingerprints) {
   const want = new Set(typeof fingerprints === "string" ? [fingerprints] : fingerprints);
-  return (key) => want.has(hostKeyFingerprint(key));
+  return (key2) => want.has(hostKeyFingerprint(key2));
 }
 class SshConnection extends EventEmitter {
   constructor(target) {
@@ -20321,17 +20321,17 @@ class SshConnection extends EventEmitter {
     return this.client;
   }
   /** Run a command to completion; optionally feed it stdin. */
-  exec(command, opts = {}) {
+  exec(command2, opts = {}) {
     const client2 = this.requireClient();
     return new Promise((resolve2, reject) => {
-      client2.exec(command, (err, ch) => {
+      client2.exec(command2, (err, ch) => {
         if (err) return reject(err);
         const stdout = [];
         const stderr = [];
         let code = null;
         const timer = opts.timeoutMs ? setTimeout(() => {
           ch.close();
-          reject(new Error(`remote command timed out after ${opts.timeoutMs}ms: ${command.slice(0, 80)}`));
+          reject(new Error(`remote command timed out after ${opts.timeoutMs}ms: ${command2.slice(0, 80)}`));
         }, opts.timeoutMs) : void 0;
         ch.on("data", (c) => stdout.push(c));
         ch.stderr.on("data", (c) => stderr.push(c));
@@ -20356,16 +20356,16 @@ class SshConnection extends EventEmitter {
    * the caller drives itself (binary frames, say). {@link exec} would hold
    * every byte until the command ended.
    */
-  channel(command) {
+  channel(command2) {
     const client2 = this.requireClient();
     return new Promise((resolve2, reject) => {
-      client2.exec(command, (err, ch) => err ? reject(err) : resolve2(ch));
+      client2.exec(command2, (err, ch) => err ? reject(err) : resolve2(ch));
     });
   }
   /** `exec`, throwing on a non-zero exit with stderr in the message. */
-  async run(command, timeoutMs = 12e4) {
-    const r = await this.exec(command, { timeoutMs });
-    if (r.code !== 0) throw new Error(`remote \`${command.slice(0, 80)}\` exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
+  async run(command2, timeoutMs = 12e4) {
+    const r = await this.exec(command2, { timeoutMs });
+    if (r.code !== 0) throw new Error(`remote \`${command2.slice(0, 80)}\` exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
     return r.stdout;
   }
   /**
@@ -20411,6 +20411,18 @@ class SshConnection extends EventEmitter {
     });
   }
   /**
+   * One TCP connection to `host:port` as the machine sees it (a `direct-tcpip`
+   * channel). sshd counts these apart from `MaxSessions`, which limits shells
+   * and execs only. Rejects when the connection is down or the machine refuses
+   * (nothing listening, or a key whose `permitopen` doesn't cover it).
+   */
+  tcp(host, port) {
+    return new Promise((resolve2, reject) => {
+      if (!this.isOpen || !this.client) return reject(new Error("not connected"));
+      this.client.forwardOut("127.0.0.1", 0, host, port, (err, stream) => err ? reject(err) : resolve2(stream));
+    });
+  }
+  /**
    * Listen on 127.0.0.1:<ephemeral> and pipe each connection to
    * 127.0.0.1:<remotePort> on the machine. Resolves with the local port.
    */
@@ -20418,13 +20430,15 @@ class SshConnection extends EventEmitter {
     return new Promise((resolve2, reject) => {
       const server2 = createServer((sock) => {
         if (!this.isOpen) return sock.destroy();
-        this.client.forwardOut("127.0.0.1", 0, remoteHost, remotePort, (err, stream) => {
-          if (err) return sock.destroy();
-          sock.pipe(stream).pipe(sock);
-          sock.on("error", () => stream.close());
-          stream.on("error", () => sock.destroy());
-          stream.on("close", () => sock.destroy());
-        });
+        this.tcp(remoteHost, remotePort).then(
+          (stream) => {
+            sock.pipe(stream).pipe(sock);
+            sock.on("error", () => stream.close());
+            stream.on("error", () => sock.destroy());
+            stream.on("close", () => sock.destroy());
+          },
+          () => sock.destroy()
+        );
       });
       server2.on("error", reject);
       server2.listen(0, "127.0.0.1", () => {
@@ -20442,10 +20456,10 @@ class SshConnection extends EventEmitter {
   }
 }
 function toSsh2(verifier) {
-  return ((key, verify) => {
+  return ((key2, verify) => {
     let ret;
     try {
-      ret = verifier(key);
+      ret = verifier(key2);
     } catch {
       return false;
     }
@@ -20542,8 +20556,8 @@ function scanOnce(host, port, timeoutMs, keyTypes) {
         username: "dispatch-host-key-scan",
         readyTimeout: timeoutMs,
         ...keyTypes ? { algorithms: { serverHostKey: keyTypes } } : {},
-        hostVerifier: ((key) => {
-          seen = Buffer.from(key);
+        hostVerifier: ((key2) => {
+          seen = Buffer.from(key2);
           return false;
         })
       });
@@ -20689,10 +20703,10 @@ function nodeTarball(platform, arch, dist = NODE_RUNTIME) {
   const os = platform.toLowerCase();
   const p = os === "darwin" ? "darwin" : os === "linux" ? "linux" : void 0;
   const a = { arm64: "arm64", aarch64: "arm64", x86_64: "x64", amd64: "x64", x64: "x64" }[arch.toLowerCase()];
-  const key = p && a ? `${p}-${a}` : void 0;
-  const sha2562 = key ? dist.sha256[key] : void 0;
-  if (!key || !sha2562) throw new Error(`no pinned Node for ${platform}/${arch}`);
-  const dir = `node-v${dist.version}-${key}`;
+  const key2 = p && a ? `${p}-${a}` : void 0;
+  const sha2562 = key2 ? dist.sha256[key2] : void 0;
+  if (!key2 || !sha2562) throw new Error(`no pinned Node for ${platform}/${arch}`);
+  const dir = `node-v${dist.version}-${key2}`;
   return { url: `https://nodejs.org/dist/v${dist.version}/${dir}.tar.gz`, file: `${dir}.tar.gz`, dir, sha256: sha2562, version: dist.version };
 }
 function compareVersions(a, b) {
@@ -20947,7 +20961,7 @@ function authorizedKeysLine(publicKey, allowFrom) {
   }
   if (!allowFrom.length) throw new Error("the key needs at least one address it may be used from");
   for (const a of allowFrom) if (!validFrom(a)) throw new Error(`not an address pattern: ${JSON.stringify(a)}`);
-  return `restrict,port-forwarding,permitopen="127.0.0.1:*",from="${allowFrom.join(",")}" ${parts.join(" ")}`;
+  return `restrict,port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",from="${allowFrom.join(",")}" ${parts.join(" ")}`;
 }
 function keyBlobOf(line) {
   const m = line.match(/(?:^|\s)ssh-[a-z0-9-]+\s+([A-Za-z0-9+/=]+)/);
@@ -21112,6 +21126,10 @@ class HostLink {
   get paths() {
     return this.linked?.paths;
   }
+  /** Whether a verified connection is up right now. */
+  get connected() {
+    return !!this.linked?.conn.isOpen;
+  }
   get config() {
     return this.host;
   }
@@ -21147,7 +21165,7 @@ class HostLink {
    * A channel running `command` for a shell, on a connection with room for it
    * (opened if none has). The channel stays open for the shell's life.
    */
-  async openSession(command, signal) {
+  async openSession(command2, signal) {
     await this.ready(signal);
     const gen = this.gen;
     for (; ; ) {
@@ -21165,7 +21183,7 @@ class HostLink {
       slot.idleSince = void 0;
       let ch;
       try {
-        ch = await slot.conn.channel(command);
+        ch = await slot.conn.channel(command2);
       } catch (err) {
         this.release(slot);
         throw err;
@@ -21179,15 +21197,24 @@ class HostLink {
    * at once, the rest wait their turn: a burst (a dozen spawns each making
    * its directory, kills after a drop) must not hit sshd's `MaxSessions`.
    */
-  async exec(command, opts = {}) {
+  async exec(command2, opts = {}) {
     await this.takeExecSlot();
     try {
       const { conn } = await this.ready();
-      return await conn.exec(command, opts);
+      return await conn.exec(command2, opts);
     } finally {
       this.execs--;
       this.execWaiting.shift()?.();
     }
+  }
+  /**
+   * A TCP connection to `host:port` as the machine sees it, over the control
+   * connection as it is NOW: a forward made before a reconnect keeps working
+   * after it. Rejects while the machine is offline.
+   */
+  async tcp(host, port) {
+    const { conn } = await this.ready();
+    return conn.tcp(host, port);
   }
   /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
   async agent(args, timeoutMs = 3e4) {
@@ -21254,13 +21281,13 @@ class HostLink {
     this.connecting = { gen, p };
     return p;
   }
-  target(address, key) {
+  target(address, key2) {
     const host = this.host;
     return {
       host: address,
       port: host.port,
       username: host.user,
-      privateKey: key,
+      privateKey: key2,
       hostVerifier: pinnedHostKey(host.hostKey),
       algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) },
       keepalive: KEEPALIVE
@@ -21271,14 +21298,14 @@ class HostLink {
   }
   async connectOnce(gen) {
     const host = this.host;
-    const key = await this.deps.privateKey();
-    if (!key) throw new Error(`no key: the ${keySecretName(host.slug)} secret is missing; pair the machine again`);
+    const key2 = await this.deps.privateKey();
+    if (!key2) throw new Error(`no key: the ${keySecretName(host.slug)} secret is missing; pair the machine again`);
     const order = [...host.addresses];
     const last = this.memory.lastAddress;
     if (last && order.includes(last)) order.sort((a, b) => a === last ? -1 : b === last ? 1 : 0);
     const misses = [];
     for (const address of order) {
-      const conn = this.make(this.target(address, key));
+      const conn = this.make(this.target(address, key2));
       try {
         await conn.connectOnce();
       } catch (err) {
@@ -21335,9 +21362,9 @@ class HostLink {
   async addSessionConnection() {
     const linked = await this.ready();
     const gen = this.gen;
-    const key = await this.deps.privateKey();
-    if (!key) throw new Error(`no key: the ${keySecretName(this.host.slug)} secret is missing`);
-    const conn = this.make(this.target(linked.address, key));
+    const key2 = await this.deps.privateKey();
+    if (!key2) throw new Error(`no key: the ${keySecretName(this.host.slug)} secret is missing`);
+    const conn = this.make(this.target(linked.address, key2));
     try {
       await conn.connectOnce();
     } catch (err) {
@@ -21713,6 +21740,165 @@ function localIPv4() {
 }
 function safeName(name) {
   return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 50) || "dispatch";
+}
+const PORT_POLL_MS = 4e3;
+class PortForwards {
+  constructor(deps) {
+    this.deps = deps;
+  }
+  timer;
+  ticking;
+  forwards = /* @__PURE__ */ new Map();
+  /** Ports that failed to forward, so each failure is logged once rather than every poll. */
+  failed = /* @__PURE__ */ new Set();
+  listFailing = false;
+  disposed = false;
+  /** A shell started: poll while there are any. Idempotent. */
+  wake() {
+    if (this.disposed || this.timer) return;
+    this.timer = setInterval(() => void this.tick(), this.deps.intervalMs ?? PORT_POLL_MS);
+    this.timer.unref?.();
+    void this.tick();
+  }
+  /** One poll: forward each chat's new listeners, close those that went. Overlapping calls share one. */
+  tick() {
+    this.ticking ??= this.poll().finally(() => {
+      this.ticking = void 0;
+    });
+    return this.ticking;
+  }
+  async poll() {
+    if (this.disposed) return;
+    const chats = this.deps.chats();
+    if (!chats.size) {
+      this.stopTimer();
+      for (const k of [...this.forwards.keys()]) this.close(k);
+      return;
+    }
+    if (!this.deps.online()) return;
+    let report;
+    try {
+      report = await this.deps.list();
+      this.listFailing = false;
+    } catch (err) {
+      if (!this.listFailing) this.deps.log.warn(`remote-host ${this.deps.label()}: could not list its listening ports: ${errText(err)}`);
+      this.listFailing = true;
+      return;
+    }
+    if (this.disposed) return;
+    const live2 = this.deps.chats();
+    const want = /* @__PURE__ */ new Map();
+    for (const s of report.sessions ?? []) {
+      if (!live2.has(s.chat)) continue;
+      for (const l of s.ports ?? []) {
+        if (validPort(l.port) && isLoopback(l.host)) want.set(key(s.chat, l.port), { chat: s.chat, l });
+      }
+    }
+    for (const [k, f] of this.forwards) {
+      const w = want.get(k);
+      if (!w || w.l.host !== f.host) this.close(k);
+    }
+    for (const k of [...this.failed]) if (!want.has(k)) this.failed.delete(k);
+    for (const [k, { chat, l }] of want) {
+      if (this.forwards.has(k) || this.disposed) continue;
+      try {
+        this.forwards.set(k, await this.open(chat, l));
+        this.failed.delete(k);
+      } catch (err) {
+        if (!this.failed.has(k)) this.deps.log.warn(`remote-host ${this.deps.label()}: could not forward port ${l.port}: ${errText(err)}`);
+        this.failed.add(k);
+      }
+    }
+  }
+  /** The chat's shells here are gone (it ended them, went idle, was deleted): its forwards go too. */
+  dropChat(chat) {
+    for (const [k, f] of this.forwards) if (f.chat === chat) this.close(k);
+  }
+  /** What is forwarded now, for tests and the log. */
+  list(chat) {
+    return [...this.forwards.values()].filter((f) => !chat || f.chat === chat).map((f) => ({ chat: f.chat, remotePort: f.remotePort, localPort: f.localPort, url: urlOf(f.localPort) }));
+  }
+  dispose() {
+    this.disposed = true;
+    this.stopTimer();
+    for (const k of [...this.forwards.keys()]) this.close(k);
+  }
+  stopTimer() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = void 0;
+  }
+  async open(chat, l) {
+    const sockets = /* @__PURE__ */ new Set();
+    const server2 = createServer((sock) => {
+      sockets.add(sock);
+      sock.on("close", () => sockets.delete(sock));
+      sock.on("error", () => {
+      });
+      this.deps.dial(l.host, l.port).then(
+        (ch) => {
+          if (sock.destroyed) return void ch.destroy();
+          ch.on("error", () => sock.destroy());
+          ch.on("close", () => sock.destroy());
+          sock.on("close", () => ch.destroy());
+          sock.pipe(ch).pipe(sock);
+        },
+        () => sock.destroy()
+      );
+    });
+    const localPort = await listen(server2, l.port);
+    const label = command(l.command);
+    const withdraw = this.deps.publish({ chatId: chat, remotePort: l.port, url: urlOf(localPort), ...label ? { label } : {} });
+    this.deps.log.info(
+      `remote-host ${this.deps.label()}: forwarding port ${l.port}${label ? ` (${label})` : ""} for chat ${chat} to ${urlOf(localPort)}`
+    );
+    return { chat, remotePort: l.port, host: l.host, localPort, server: server2, sockets, withdraw };
+  }
+  close(k) {
+    const f = this.forwards.get(k);
+    if (!f) return;
+    this.forwards.delete(k);
+    try {
+      f.withdraw();
+    } catch {
+    }
+    f.server.close();
+    for (const s of f.sockets) s.destroy();
+  }
+}
+async function listen(server2, preferred) {
+  const attempt = (port) => new Promise((resolve2, reject) => {
+    const fail = (err) => {
+      server2.off("listening", ok);
+      reject(err);
+    };
+    const ok = () => {
+      server2.off("error", fail);
+      resolve2(server2.address().port);
+    };
+    server2.once("error", fail);
+    server2.once("listening", ok);
+    server2.listen(port, "127.0.0.1");
+  });
+  try {
+    return await attempt(preferred);
+  } catch {
+    return attempt(0);
+  }
+}
+function key(chat, port) {
+  return `${chat}\0${port}`;
+}
+function urlOf(port) {
+  return `http://127.0.0.1:${port}`;
+}
+function validPort(p) {
+  return typeof p === "number" && Number.isInteger(p) && p > 0 && p < 65536;
+}
+function isLoopback(host) {
+  return host === "127.0.0.1" || host === "::1";
+}
+function command(c) {
+  return (c ?? "").match(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}/)?.[0];
 }
 const MAX_UNREADABLE = 3;
 class HostShell extends EventEmitter {
@@ -22461,9 +22647,9 @@ async function removeEmptyParents(root, paths) {
 async function repoIds(root) {
   const common = resolve(root, await git(root, ["rev-parse", "--git-common-dir"]));
   const name = safeId(basename(common) === ".git" ? basename(dirname(common)) : basename(common).replace(/\.git$/, ""));
-  const key = createHash("sha256").update(common.replace(/\\/g, "/").toLowerCase()).digest("hex").slice(0, 12);
+  const key2 = createHash("sha256").update(common.replace(/\\/g, "/").toLowerCase()).digest("hex").slice(0, 12);
   const bool = async (k) => await git(root, ["config", "--bool", k]).catch(() => "") !== "false";
-  return { repoKey: `${name.slice(0, 40)}-${key}`, repoName: repoName(root), modes: await bool("core.filemode") && await bool("core.symlinks") };
+  return { repoKey: `${name.slice(0, 40)}-${key2}`, repoName: repoName(root), modes: await bool("core.filemode") && await bool("core.symlinks") };
 }
 function repoName(root) {
   return safeId(basename(resolve(root))).slice(0, 64);
@@ -23213,6 +23399,18 @@ class HostBackend {
     this.id = id;
     this.deps = deps;
     this.label = deps.host().label;
+    const { link, instanceId } = deps;
+    this.ports = new PortForwards({
+      list: () => link.agent(["ports", "--instance", instanceId], 3e4),
+      dial: (host, port) => link.tcp(host, port),
+      online: () => link.connected,
+      publish: deps.publish ?? (() => () => {
+      }),
+      chats: () => this.chatsWithShells(),
+      log: deps.log,
+      label: () => this.label,
+      ...deps.portPollMs ? { intervalMs: deps.portPollMs } : {}
+    });
   }
   shell = "bash";
   fallback = "refuse";
@@ -23226,6 +23424,8 @@ class HostBackend {
   /** Each chat's checkout on the machine, by chat. */
   syncs = /* @__PURE__ */ new Map();
   remote;
+  /** The chats' dev servers there, forwarded here. */
+  ports;
   async spawn(info) {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
@@ -23249,12 +23449,14 @@ class HostBackend {
       }
     };
     const sh = await HostShell.start(opener, { label: this.label, log: this.deps.log, ...this.deps.shell }, info.signal);
-    const key = shellKey(info.chatId, info.name);
-    this.shells.set(key, sh);
+    const key2 = shellKey(info.chatId, info.name);
+    this.shells.set(key2, sh);
     sh.on("exit", () => {
-      if (this.shells.get(key) === sh) this.shells.delete(key);
+      if (this.shells.get(key2) === sh) this.shells.delete(key2);
       this.syncs.get(chatId)?.releaseTerminal(info.name);
+      if (!this.chatsWithShells().has(chatId)) this.ports.dropChat(chatId);
     });
+    this.ports.wake();
     sh.on("runEnd", (m) => this.syncs.get(chatId)?.runEnded(m.runId));
     return sh;
   }
@@ -23266,8 +23468,17 @@ class HostBackend {
   async killAll(waitMs = 1500) {
     const shells = [...this.shells.values()];
     this.shells.clear();
+    this.ports.dispose();
     for (const sh of shells) sh.kill();
     if (shells.length) await new Promise((r) => setTimeout(r, waitMs).unref?.());
+  }
+  /** Core unregistered the backend (the machine was removed, or the plugin is going down). */
+  dispose() {
+    this.ports.dispose();
+  }
+  /** The chats with at least one live shell here. */
+  chatsWithShells() {
+    return new Set([...this.shells.keys()].map((k) => k.slice(0, k.indexOf("\0"))));
   }
   /** Sync the chat's files there (fail closed), then mark the run in the session's journal. */
   async beforeRun(info) {
@@ -23306,6 +23517,7 @@ class HostBackend {
       `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, with PATH and locale from the login shell. On it: ${tools(probe)}.`,
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB aren't sent.`,
       `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command; one that timed out holds every terminal until it ends (Ctrl-C it). Outside a git repository nothing is synced.`,
+      `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: on the same port when it is free here, else on another, which the terminal result and Ports & processes give. Open that URL, not the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started from this chat's terminals; nothing else on the machine is.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you started (Ctrl-C the terminal, \`kill %1\`).`
     ].join("\n");
@@ -23389,6 +23601,7 @@ class HostRegistry {
       void (async () => {
         await e.backend.killAll().catch(() => {
         });
+        e.backend.dispose();
         await terminals.unregisterBackend(backendId(slug)).catch((err) => {
           ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText(err)}`);
         });
@@ -23436,8 +23649,10 @@ class HostRegistry {
       link: entry.link,
       instanceId: this.deps.instanceId,
       log: ctx.log,
+      publish: (port) => terminals.publishPort(id, port),
       ...ctx.kv ? { kv: ctx.kv } : {},
-      ...this.deps.shell ? { shell: this.deps.shell } : {}
+      ...this.deps.shell ? { shell: this.deps.shell } : {},
+      ...this.deps.portPollMs ? { portPollMs: this.deps.portPollMs } : {}
     });
     try {
       terminals.registerBackend(entry.backend);
@@ -23467,7 +23682,10 @@ class HostRegistry {
     this.entries.clear();
     await Promise.all(entries.map((e) => e.backend.killAll().catch(() => {
     })));
-    for (const e of entries) e.link.dispose();
+    for (const e of entries) {
+      e.backend.dispose();
+      e.link.dispose();
+    }
   }
 }
 function wrap(log, fn) {
@@ -23536,13 +23754,13 @@ function defineRoutes(deps) {
       const name = keySecretName(host.slug);
       let keyLine = "unreachable";
       let sessions = 0;
-      const key = await ctx.secrets?.get(name);
-      if (e && key) {
+      const key2 = await ctx.secrets?.get(name);
+      if (e && key2) {
         try {
           await e.link.ready(AbortSignal.timeout(2e4));
           const killed = await e.link.agent(["kill", "--instance", deps.instanceId, "--all"], 3e4).catch(() => ({ killed: [] }));
           sessions = killed?.killed?.length ?? 0;
-          const res = await e.link.exec(shCommand(removeKeyScript(keyBlobOf(publicKeyOf(key)))), { timeoutMs: 3e4 });
+          const res = await e.link.exec(shCommand(removeKeyScript(keyBlobOf(publicKeyOf(key2)))), { timeoutMs: 3e4 });
           keyLine = res.code === 0 ? res.stdout.includes("removed") ? "removed" : "absent" : "unreachable";
         } catch (err) {
           ctx.log.warn(`remote-host ${host.slug}: removing its key on the machine failed: ${errText(err)}`);

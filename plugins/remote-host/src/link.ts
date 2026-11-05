@@ -40,6 +40,8 @@ export interface LinkConnection extends Exec {
   /** One attempt (the link, which tries the next address and comes back later). */
   connectOnce(): Promise<void>;
   channel(command: string): Promise<ClientChannel>;
+  /** A TCP connection to `host:port` on the machine (`direct-tcpip`); not a session, so outside `MaxSessions`. */
+  tcp(host: string, port: number): Promise<ClientChannel>;
   close(): void;
   on(event: "close", listener: () => void): unknown;
 }
@@ -158,6 +160,11 @@ export class HostLink {
     return this.linked?.paths;
   }
 
+  /** Whether a verified connection is up right now. */
+  get connected(): boolean {
+    return !!this.linked?.conn.isOpen;
+  }
+
   get config(): HostConfig {
     return this.host;
   }
@@ -238,6 +245,16 @@ export class HostLink {
       this.execs--;
       this.execWaiting.shift()?.();
     }
+  }
+
+  /**
+   * A TCP connection to `host:port` as the machine sees it, over the control
+   * connection as it is NOW: a forward made before a reconnect keeps working
+   * after it. Rejects while the machine is offline.
+   */
+  async tcp(host: string, port: number): Promise<ClientChannel> {
+    const { conn } = await this.ready();
+    return conn.tcp(host, port);
   }
 
   /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
