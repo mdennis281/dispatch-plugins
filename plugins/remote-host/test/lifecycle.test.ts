@@ -81,10 +81,12 @@ describe("a deleted chat", () => {
   });
 
   it("is refused while the machine can't be reached, so core retries it, and goes through once it can", async () => {
-    const { m, t, forgot } = setup({ address: "refused", kv: { "served:studio:chat-1": { at: 1 } } });
+    const { m, t, forgot, connected } = setup({ address: "refused", kv: { "served:studio:chat-1": { at: 1 } } });
     await expect(t.terminals.chatDeleted("chat-1")).rejects.toThrow(/refused/);
     expect(t.kv.has("served:studio:chat-1")).toBe(true);
     m.addresses[ADDR] = "ok";
+    // Core's retry comes a minute later, by when the link's own timer has the machine back.
+    await connected();
     await t.terminals.chatDeleted("chat-1");
     expect(forgot()).toEqual(["chat-1"]);
     expect(t.kv.has("served:studio:chat-1")).toBe(false);

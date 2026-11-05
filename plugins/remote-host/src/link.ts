@@ -63,6 +63,14 @@ export interface LinkTiming {
   gcEveryMs: number;
   /** Waits between failed connects; the last repeats. */
   backoffMs: readonly number[];
+  /**
+   * While the link is offline, a command makes a real attempt only if the
+   * machine answered within this long (a blip); otherwise it is refused at
+   * once, instead of waiting out a connect to every address.
+   */
+  recentContactMs: number;
+  /** A command refused while offline brings the link's next try at most this close. */
+  nudgeMs: number;
   /** An extra connection with no shells on it is closed after this long. */
   idleSessionConnectionMs: number;
 }
@@ -74,6 +82,8 @@ export const DEFAULT_TIMING: LinkTiming = {
   sweepEveryMs: 10 * 60_000,
   gcEveryMs: 24 * 3_600_000,
   backoffMs: [2_000, 5_000, 15_000, 30_000, 60_000],
+  recentContactMs: 20_000,
+  nudgeMs: 5_000,
   idleSessionConnectionMs: 60_000,
 };
 
@@ -133,6 +143,8 @@ export class HostLink {
   private failures = 0;
   private nextAttemptAt = 0;
   private lastHelloAt = 0;
+  /** When a verified connection last ended, closed or dropped: it was in touch until then. */
+  private downAt = 0;
   private lastProbeAt = 0;
   private lastSweepAt = 0;
   private busy = false;
@@ -201,10 +213,40 @@ export class HostLink {
     void this.attempt().catch(() => {});
   }
 
-  /** A live, verified connection: the current one, or a new one. Rejects with why the machine can't be reached. */
-  ready(signal?: AbortSignal): Promise<Linked> {
+  /**
+   * A live, verified connection: the current one, or a new one. Rejects with
+   * why the machine can't be reached: AT ONCE while the link is offline and
+   * the machine hasn't answered for a while (see {@link refusal}), unless the
+   * caller is `patient`: one that won't get another chance (removing a
+   * machine takes its key line out of authorized_keys only now) dials anyway.
+   */
+  ready(signal?: AbortSignal, opts: { patient?: boolean } = {}): Promise<Linked> {
     if (this.linked?.conn.isOpen) return Promise.resolve(this.linked);
+    if (!opts.patient) {
+      const refused = this.refusal();
+      if (refused) return Promise.reject(refused);
+    }
     return withAbort(this.attempt(), signal);
+  }
+
+  /**
+   * Why a caller shouldn't wait for a connect now. In the live run a command
+   * on a machine that had dropped off Wi-Fi waited 12 s for every address to
+   * fail before it was refused. So while the link reports offline and no
+   * connect is under way, a caller is refused at once with the last reason,
+   * unless the machine answered within {@link LinkTiming.recentContactMs}:
+   * then it was a blip, and a real attempt is worth the wait. A refusal brings
+   * the link's own next try closer, so a retry a few seconds later finds a
+   * machine that has come back.
+   */
+  private refusal(): Error | undefined {
+    if (this.current.state !== "offline") return undefined;
+    if (this.connecting && this.connecting.gen === this.gen) return undefined;
+    const now = this.now();
+    const lastContact = Math.max(this.lastHelloAt, this.downAt, this.memory.lastSeenAt ?? 0);
+    if (now - lastContact <= this.t.recentContactMs) return undefined;
+    this.nextAttemptAt = Math.min(this.nextAttemptAt, now + this.t.nudgeMs);
+    return new Error(`it is offline (${this.current.detail ?? "no answer"}); Dispatch keeps trying to reach it`);
   }
 
   /**
@@ -475,6 +517,7 @@ export class HostLink {
   private closed(conn: LinkConnection): void {
     if (this.linked?.conn !== conn) return;
     this.linked = undefined;
+    this.downAt = this.now();
     if (this.disposed) return;
     this.report({ state: "offline", detail: CONNECTION_LOST, ...this.seen() });
     this.nextAttemptAt = this.now() + (this.t.backoffMs[0] ?? 2_000);
@@ -488,6 +531,9 @@ export class HostLink {
   private drop(detail: string, state: "offline" | "degraded"): void {
     const l = this.linked;
     this.linked = undefined;
+    // In touch until now: closing it below no longer reaches closed(), which
+    // checks it is still the link's connection.
+    if (l) this.downAt = this.now();
     l?.conn.close();
     this.report({ state, detail, ...this.seen() });
   }
