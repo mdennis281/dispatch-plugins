@@ -205,8 +205,18 @@ export async function main(argv: readonly string[]): Promise<number> {
     case "forget": {
       const id = instance();
       touchContact(root, id);
-      if (flags.has("all")) print(await forgetInstance({ root, instance: id, kill: killSession }));
-      else print(await forgetChat({ root, instance: id, chat: need(opts, "chat"), kill: killSession }));
+      if (flags.has("all")) {
+        print(await forgetInstance({ root, instance: id, kill: killSession }));
+        return 0;
+      }
+      const chat = need(opts, "chat");
+      const r = await forgetChat({ root, instance: id, chat, kill: killSession });
+      print(r);
+      // Not done: say why, and fail, so the plugin's delete fails and core tries it again.
+      if (r.errors?.length) {
+        process.stderr.write(`dispatch-host: could not delete chat ${chat}'s refs: ${r.errors.join("; ")}\n`);
+        return 1;
+      }
       return 0;
     }
 

@@ -352,4 +352,35 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     expect(existsSync(sessionPaths(root, INSTANCE, id).dir)).toBe(false);
     expect((cli("chats") as Array<{ chat: string }>).map((c) => c.chat)).not.toContain("c1");
   });
+
+  it("forget exits 1 with git's reason when git won't run, keeping the ref for the retry that finishes", () => {
+    // A shared repository holding the chat's ref.
+    const repo = join(root, INSTANCE, "repos", "p.git");
+    execFileSync("git", ["init", "-q", "--bare", repo]);
+    const tree = execFileSync("git", ["--git-dir", repo, "mktree"], { input: "" }).toString().trim();
+    const commit = execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "--git-dir", repo, "commit-tree", tree, "-m", "x"]).toString().trim();
+    execFileSync("git", ["--git-dir", repo, "update-ref", "refs/dispatch/chats/c2", commit]);
+    const refsOf = () => execFileSync("git", ["--git-dir", repo, "for-each-ref", "--format=%(refname)"]).toString().trim();
+
+    // git as it was on cvx-mac once Xcode updated itself: it prints why, and won't run.
+    const bin = mkdtempSync(join(tmpdir(), "dh-badgit-"));
+    writeFileSync(join(bin, "git"), '#!/bin/sh\necho "You have not agreed to the Xcode license agreements." >&2\nexit 69\n');
+    chmodSync(join(bin, "git"), 0o755);
+    try {
+      const r = spawnSync(process.execPath, [DIST, "forget", "--chat", "c2", "--root", root, "--instance", INSTANCE], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/could not delete chat c2's refs: p\.git: You have not agreed to the Xcode license agreements/);
+      expect((JSON.parse(r.stdout.trim()) as { errors: string[] }).errors).toHaveLength(1);
+      expect(refsOf()).toBe("refs/dispatch/chats/c2");
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+
+    // git works again: the retry finishes.
+    expect(cli("forget", "--chat", "c2")).toMatchObject({ refs: 1 });
+    expect(refsOf()).toBe("");
+  });
 });
