@@ -149,8 +149,11 @@ are already installed, that's fine.
   directory, that blocks `/usr/bin/git` too (exit 69, "You have not agreed to the Xcode license agreements"), and
   with it every sync. This happened on cvx-mac when Xcode updated itself to 27.2. The Command Line Tools' git has
   no such gate.
-- **Optional:** `sudo xcode-select -s /Library/Developer/CommandLineTools` makes them the default for every
-  account on the Mac, your own Terminal included. Dispatch doesn't need it.
+- **Needed for Homebrew (step 6), otherwise optional:** `sudo xcode-select -s /Library/Developer/CommandLineTools`
+  makes them the default for every account on the Mac, your own Terminal included. Dispatch's git doesn't need it.
+  Homebrew does: it clears its environment (`DEVELOPER_DIR` included) before it starts, then checks the developer
+  directory `xcode-select` points at. If that is an Xcode whose license isn't accepted, every `brew` command stops
+  with "You have not agreed to the Xcode license", even under Dispatch.
 - Xcode builds still work: Dispatch tells the agent to run Xcode's tools with
   `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` set on each command (step 14), and checks Xcode the
   same way, so Xcode still shows on the machine's row.
@@ -170,7 +173,43 @@ Once paired, the machine's row names the git sync uses, and why it won't run if 
 for its own use only; that one is not on `PATH`. So whatever your builds call (node, pnpm, and so on) must be
 installed for `dispatch` to see.
 
-The simplest way is Homebrew under your admin account, made visible to every user:
+**Recommended: Homebrew owned by `dispatch`.** Then a chat installs what it's missing itself (`brew install
+<formula>`, no `sudo`), and Dispatch tells the agent so. Homebrew can't be shared this way: whoever owns
+`/opt/homebrew` is the only account that can install into it. If your own account already has Homebrew there, use
+the second option.
+
+1. Point `xcode-select` at the Command Line Tools (step 5, `sudo xcode-select -s …`). Homebrew won't run without
+   that while Xcode's license isn't accepted.
+2. Install Homebrew as `dispatch`:
+   - **If `dispatch` is an administrator** (cvx-mac's setup): sign in as `dispatch`, or run `su - dispatch` in
+     Terminal, then run the installer. It asks for `dispatch`'s password once.
+
+     ```sh
+     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+     ```
+
+   - **If `dispatch` is a standard user** (the default, step 1): the installer won't run for a user who can't use
+     `sudo`. Make `dispatch` own the prefix from your admin account, then unpack Homebrew into it as `dispatch`.
+     **UNVERIFIED.**
+
+     ```sh
+     sudo mkdir -p /opt/homebrew
+     sudo chown dispatch:admin /opt/homebrew
+     sudo -u dispatch -H /bin/sh -c 'curl -fsSL https://github.com/Homebrew/brew/tarball/main | tar xz --strip-components 1 -C /opt/homebrew'
+     ```
+
+3. Put it on `dispatch`'s login `PATH`, once, as `dispatch`. The `.zprofile` line counts from the next login
+   shell, so the `eval` line puts brew on this shell's `PATH` too:
+
+   ```sh
+   grep -q 'brew shellenv' ~/.zprofile 2>/dev/null || echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+   eval "$(/opt/homebrew/bin/brew shellenv)"
+   brew install node pnpm
+   ```
+
+**Or** keep Homebrew in your own admin account and make it visible to every user. Chats can then use what you
+install, but not install anything themselves (Dispatch sees that `dispatch` can't write to it, and tells the agent
+so):
 
 ```sh
 # Skip the first line if `brew --version` already works in your account.
@@ -183,9 +222,12 @@ echo /opt/homebrew/bin | sudo tee /etc/paths.d/homebrew
 
 ```sh
 ssh dispatch@localhost 'zsh -lc "command -v node pnpm git"'
+ssh dispatch@localhost 'zsh -lc "brew config >/dev/null && echo brew runs"'
 ```
 
-It must print three paths. `zsh -lc` matters: it's the login shell, which is where Dispatch reads `PATH` from.
+The first must print three paths. `zsh -lc` matters: it's the login shell, which is where Dispatch reads `PATH`
+from. The second must print `brew runs`. "You have not agreed to the Xcode license" means `xcode-select` still
+points at Xcode (1. above). Once paired, the machine's row says the same.
 
 ### 7. Keep it awake
 
@@ -361,6 +403,9 @@ It writes nothing outside `dispatch`'s home folder, and it never uses `sudo`.
    sudo rm -f /etc/paths.d/homebrew
    sudo pmset restoredefaults
    ```
+
+   If `dispatch` owned Homebrew, remove `/opt/homebrew` too (`sudo rm -rf /opt/homebrew`), after you check that
+   nothing of yours uses it.
 
 4. Turn auto-login, automatic updates and FileVault back to how you want them.
 

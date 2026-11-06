@@ -469,4 +469,17 @@ describe("statusFrom", () => {
     // Sync's git is what counts: a shell PATH without git is no reason to say so.
     expect(at({ path: "/usr/bin/git", developerDir: "/Library/Developer/CommandLineTools", exitCode: 0, version: "git version 2.50.1 (Apple Git-155)" })).toBeUndefined();
   });
+
+  it("says Homebrew is blocked, why, and the one fix; a brew that runs is no issue", () => {
+    const XCODE = "/Applications/Xcode.app/Contents/Developer";
+    const blocked = `Xcode's license isn't accepted (exit 69), and Homebrew ignores DEVELOPER_DIR, so it uses xcode-select's ${XCODE}`;
+    expect(statusFrom({ ...PROBE, brew: { path: "/opt/homebrew/bin/brew", version: "Homebrew 7.0.12", writable: true, blocked } }, 5)).toEqual({
+      state: "degraded",
+      detail:
+        `Homebrew (/opt/homebrew/bin/brew) won't run: ${blocked}. Point xcode-select at the Command Line Tools ` +
+        "(sudo xcode-select -s /Library/Developer/CommandLineTools), or accept the license (sudo xcodebuild -license accept)",
+      lastSeenAt: 5,
+    });
+    expect(statusFrom({ ...PROBE, brew: { path: "/opt/homebrew/bin/brew", version: "Homebrew 7.0.12", writable: true } }, 5)).toEqual({ state: "online", lastSeenAt: 5 });
+  });
 });

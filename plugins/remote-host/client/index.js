@@ -232,7 +232,12 @@ function probeLine(v) {
   const p = v.probe;
   const os = [p.os.name ?? p.platform, p.os.version].filter(Boolean).join(" ");
   const disk = typeof p.freeDiskBytes === "number" ? `${Math.round(p.freeDiskBytes / 1024 ** 3)} GB free` : void 0;
-  const tools = [p.tools.git && `git ${p.tools.git}`, p.tools.node && `node ${p.tools.node}`, p.tools.pnpm && `pnpm ${p.tools.pnpm}`].filter(Boolean).join(", ");
+  const tools = [
+    p.tools.git && `git ${p.tools.git}`,
+    p.tools.node && `node ${p.tools.node}`,
+    p.tools.pnpm && `pnpm ${p.tools.pnpm}`,
+    p.brew && (p.brew.version ?? "Homebrew")
+  ].filter(Boolean).join(", ");
   return [os, p.arch, disk, tools].filter(Boolean).join(" · ");
 }
 function missingTools(v) {

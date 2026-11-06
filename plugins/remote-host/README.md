@@ -119,7 +119,9 @@ Each machine reports one of three states to Dispatch, re-checked every 30 s:
   with the fix. On a Mac with the Command Line Tools installed, sync's git runs with
   `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, and so does a chat's shell by default. An Xcode update then
   can't block git, with no `sudo` and whatever `xcode-select` chose ([macOS setup](../../docs/setup/macos-host.md),
-  step 5);
+  step 5). Also a Homebrew that won't run there: brew ignores `DEVELOPER_DIR`, so it stops at an Xcode whose license
+  isn't accepted until `xcode-select` points at the Command Line Tools (step 6). When brew runs, the agent is told to
+  install missing tools with `brew install`, without `sudo`;
 - **offline**, with the reason: no answer, refused, the key refused, a different host key.
 
 The pane shows it on each machine's row, and refreshes every 5 s while it is open. `GET /hosts` lists the machines with their status and their last probe (OS, architecture, tools, free disk, who is logged in at the screen). **Check now** (`POST /hosts/<name>/check`) reconnects at once.
