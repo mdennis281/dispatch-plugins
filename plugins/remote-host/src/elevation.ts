@@ -301,6 +301,15 @@ export class Elevation {
       } catch (err) {
         return { code: null, error: `the root helper on ${host.label} did not start (${errText(err)}); nothing ran` };
       }
+      // Cancelled while the channel opened: the helper may have started it already, and stops it once the channel closes.
+      if (abort.signal.aborted) {
+        try {
+          ch.close();
+        } catch {
+          /* closed already */
+        }
+        return { code: null, error: `cancelled as it started; ${host.label} was told to stop it` };
+      }
       return await new Promise<Omit<ElevateEndMsg, "id">>((resolve) => {
         let code: number | null = null;
         let signal: string | null = null;

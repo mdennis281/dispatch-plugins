@@ -9,7 +9,7 @@ import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } f
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sessionPaths } from "../src/layout.js";
@@ -181,7 +181,17 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     const r = new Relay(sid());
     await r.ready();
     await r.run('echo "token=${GITHUB_TOKEN:-none} brew=$HOMEBREW_PREFIX path=$PATH"');
-    expect(r.text()).toMatch(/token=none brew=\/opt\/homebrew-test path=\/opt\/fake-tools\/bin:/);
+    // The sudo shims' directory first, then the login PATH as the profile left it.
+    const bin = join(dirname(DIST), "bin");
+    expect(r.text()).toContain(`token=none brew=/opt/homebrew-test path=${bin}:/opt/fake-tools/bin:`);
+    r.send(F.kill);
+  });
+
+  it("routes sudo to dispatch-elevate, which asks over the session's socket", async () => {
+    const r = new Relay(sid());
+    await r.ready();
+    await r.run('echo "sudo=$(command -v sudo) sock=${DISPATCH_ELEVATE_SOCK:+set}"');
+    expect(r.text()).toContain(`sudo=${join(dirname(DIST), "bin", "sudo")} sock=set`);
     r.send(F.kill);
   });
 

@@ -76,11 +76,16 @@ class FakeChannel extends EventEmitter {
   }
 }
 
-/** A machine the elevation key logs in to. `refuse` makes the login fail with that message. */
-function machine(opts: { refuse?: string } = {}) {
+/**
+ * A machine the elevation key logs in to. `refuse` makes the login fail with
+ * that message; `slowChannel` holds each channel's opening until the test
+ * calls `opened()`.
+ */
+function machine(opts: { refuse?: string; slowChannel?: boolean } = {}) {
   const logins: Array<{ target: SshTarget; commands: string[]; closed: boolean }> = [];
   const channels: FakeChannel[] = [];
   let waiters: Array<() => void> = [];
+  let opening: Array<() => void> = [];
   const connect = (target: SshTarget): ElevationConnection => {
     const login = { target, commands: [] as string[], closed: false };
     logins.push(login);
@@ -93,6 +98,7 @@ function machine(opts: { refuse?: string } = {}) {
         const ch = new FakeChannel();
         channels.push(ch);
         for (const w of waiters.splice(0)) w();
+        if (opts.slowChannel) await new Promise<void>((r) => opening.push(r));
         return ch as unknown as ClientChannel;
       },
       close: () => void (login.closed = true),
@@ -102,7 +108,10 @@ function machine(opts: { refuse?: string } = {}) {
     while (channels.length < n) await new Promise<void>((r) => waiters.push(r));
     return channels[n - 1]!;
   };
-  return { connect, logins, channels, channel };
+  const opened = () => {
+    for (const o of opening.splice(0)) o();
+  };
+  return { connect, logins, channels, channel, opened };
 }
 
 /** Approvals the test answers. Each request waits until `answer` is called for it. */
@@ -124,8 +133,8 @@ function approvals() {
   return { api, asked, nth };
 }
 
-function setup(o: { key?: string | undefined; approvals?: boolean; refuse?: string } = {}) {
-  const m = machine(o.refuse ? { refuse: o.refuse } : {});
+function setup(o: { key?: string | undefined; approvals?: boolean; refuse?: string; slowChannel?: boolean } = {}) {
+  const m = machine({ ...(o.refuse ? { refuse: o.refuse } : {}), ...(o.slowChannel ? { slowChannel: true } : {}) });
   const a = approvals();
   const key = "key" in o ? o.key : "ELEVATE-PRIVATE-KEY";
   const el = new Elevation({
@@ -252,6 +261,20 @@ describe("elevation", () => {
     await two;
     expect(ch.closed).toBe(true);
     expect(sh.ends[1]).toEqual({ id: "e-2", code: null, error: "cancelled while it ran; CVX Mac was told to stop it" });
+  });
+
+  it("a cancel while the helper's channel is still opening closes it as soon as it opens", async () => {
+    const { el, m, a } = setup({ slowChannel: true });
+    const sh = new FakeShell();
+    const done = el.handle(req("e-1"), origin, sh);
+    (await a.nth(1)).answer({});
+    const ch = await m.channel(1); // asked for, not open yet
+    el.cancel("e-1");
+    m.opened();
+    await done;
+    expect(ch.closed).toBe(true);
+    expect(sh.ends).toEqual([{ id: "e-1", code: null, error: "cancelled as it started; CVX Mac was told to stop it" }]);
+    expect(m.logins[0]!.closed).toBe(true);
   });
 
   it("the shell ending withdraws everything it asked for", async () => {

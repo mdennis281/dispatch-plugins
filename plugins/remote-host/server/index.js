@@ -22241,6 +22241,13 @@ class Elevation {
       } catch (err) {
         return { code: null, error: `the root helper on ${host.label} did not start (${errText(err)}); nothing ran` };
       }
+      if (abort.signal.aborted) {
+        try {
+          ch.close();
+        } catch {
+        }
+        return { code: null, error: `cancelled as it started; ${host.label} was told to stop it` };
+      }
       return await new Promise((resolve2) => {
         let code = null;
         let signal = null;
