@@ -171,6 +171,17 @@ describe.skipIf(!SH)("the agent's tools (the machine played by the local sh)", (
     expect(readFileSync(mine, "utf8")).toBe("all green");
   });
 
+  it("replaces nothing when the call is cancelled, even after the user approved", async () => {
+    const t = setup([cvx()]);
+    const mine = join(work, "mine3.txt");
+    writeFileSync(mine, "precious");
+    const r = await t.tools.call("remote_fetch", { path: "build/report.txt", to: mine }, { ...call, signal: AbortSignal.abort() as never });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/cancelled/);
+    expect(asked).toHaveLength(1);
+    expect(readFileSync(mine, "utf8")).toBe("precious");
+  });
+
   it("refuses to replace anything on a Dispatch that can't ask", async () => {
     const t = setup([cvx()], false);
     const mine = join(work, "mine2.txt");

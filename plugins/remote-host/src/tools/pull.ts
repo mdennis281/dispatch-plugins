@@ -67,7 +67,8 @@ export async function pull(
   try {
     if (found.kind === "file") {
       const files = remoteFiles(remote, { maxBytes: max, timeoutMs: PULL_MS });
-      if (!(await files.fetch(from, part))) throw new Error(`${from} went away while it was being copied`);
+      if (!(await files.fetch(from, part, opts.signal))) throw new Error(`${from} went away while it was being copied`);
+      cancelled(opts.signal);
       await replace(part, to);
       return { kind: "file", bytes: (await stat(to)).size };
     }
@@ -75,6 +76,7 @@ export async function pull(
     try {
       await streamTar(remote, from, archive, max, opts.signal);
       const unpacked = await extractTar(archive, part, opts.signal);
+      cancelled(opts.signal);
       await replace(part, to);
       return { kind: "dir", bytes: unpacked.bytes, unpacked };
     } finally {
@@ -120,6 +122,11 @@ async function streamTar(remote: RemoteSide, from: string, archive: string, max:
   if (seen > max + 1024 * 1024) throw new Error(`it grew past the ${mb(max)} one copy may be while it was copied`);
   if (signal?.aborted) throw new Error("cancelled");
   if (r.code !== 0) throw new Error(r.stderr.trim().split("\n").slice(-3).join("; ") || `tar exited ${r.code ?? "without a status"}`);
+}
+
+/** A cancelled call replaces nothing: what is at `to` stays, and the copy is dropped. */
+function cancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("cancelled; nothing was replaced");
 }
 
 /** Move `part` to `to`, removing what `to` was. */

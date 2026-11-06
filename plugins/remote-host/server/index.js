@@ -23092,7 +23092,7 @@ function remoteFiles(remote, opts = {}) {
   const max = opts.maxBytes ?? MAX_COPY_BYTES;
   const ms = opts.timeoutMs ?? COPY_MS;
   return {
-    async fetch(from, to) {
+    async fetch(from, to, signal) {
       await mkdir(dirname(to), { recursive: true });
       const part = `${to}.part-${process.pid}`;
       const out = createWriteStream(part);
@@ -23106,7 +23106,8 @@ function remoteFiles(remote, opts = {}) {
       ].join("\n");
       let r;
       try {
-        r = await remote.stream(script, { output: out }, AbortSignal.timeout(ms));
+        const stop = signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
+        r = await remote.stream(script, { output: out }, stop);
       } catch (err) {
         out.destroy();
         await closed;
@@ -23114,6 +23115,10 @@ function remoteFiles(remote, opts = {}) {
         throw err;
       }
       await closed;
+      if (signal?.aborted) {
+        await rm(part, { force: true });
+        throw new Error("cancelled");
+      }
       if (r.code !== 0) {
         await rm(part, { force: true });
         if (r.code === NO_FILE) return false;
@@ -26168,7 +26173,8 @@ async function pull(remote, from, found, to, opts = {}) {
   try {
     if (found.kind === "file") {
       const files = remoteFiles(remote, { maxBytes: max, timeoutMs: PULL_MS });
-      if (!await files.fetch(from, part)) throw new Error(`${from} went away while it was being copied`);
+      if (!await files.fetch(from, part, opts.signal)) throw new Error(`${from} went away while it was being copied`);
+      cancelled(opts.signal);
       await replace(part, to);
       return { kind: "file", bytes: (await stat(to)).size };
     }
@@ -26176,6 +26182,7 @@ async function pull(remote, from, found, to, opts = {}) {
     try {
       await streamTar(remote, from, archive, max, opts.signal);
       const unpacked = await extractTar(archive, part, opts.signal);
+      cancelled(opts.signal);
       await replace(part, to);
       return { kind: "dir", bytes: unpacked.bytes, unpacked };
     } finally {
@@ -26217,6 +26224,9 @@ async function streamTar(remote, from, archive, max, signal) {
   if (seen > max + 1024 * 1024) throw new Error(`it grew past the ${mb(max)} one copy may be while it was copied`);
   if (signal?.aborted) throw new Error("cancelled");
   if (r.code !== 0) throw new Error(r.stderr.trim().split("\n").slice(-3).join("; ") || `tar exited ${r.code ?? "without a status"}`);
+}
+function cancelled(signal) {
+  if (signal?.aborted) throw new Error("cancelled; nothing was replaced");
 }
 async function replace(part, to) {
   await rm(to, { recursive: true, force: true });
