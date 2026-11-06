@@ -94,7 +94,7 @@ export interface ProbeResult {
   instances?: InstanceInfo[];
   /**
    * The GUI agent (Tier B), or why there is none: nobody logged in at the
-   * screen, not loaded, not answering. macOS only; agents older than 0.4.0
+   * screen, not loaded, not answering. macOS only; agents older than 0.5.0
    * don't report it.
    */
   gui?: GuiState;
