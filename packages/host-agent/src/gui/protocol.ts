@@ -25,6 +25,10 @@ export const GF = {
   request: 0x20,
   /** JSON `{ signal }`: deliver a signal to the run's process group. */
   signal: F.signal,
+  /** Bytes for the run's stdin (a run asked with `stdin: true`). */
+  stdin: F.stdin,
+  /** Close the run's stdin: its EOF. */
+  stdinEnd: F.stdinEnd,
   /** JSON {@link GuiReply}. */
   reply: 0xa0,
   /** JSON {@link RunStarted}. */
@@ -50,6 +54,12 @@ export type GuiRequest =
       argv: string[];
       cwd: string;
       env: Record<string, string>;
+      /**
+       * The run reads its stdin from the client's GF.stdin frames (and its
+       * EOF from GF.stdinEnd), so a stdio MCP server can run in the session.
+       * Without it, stdin is /dev/null.
+       */
+      stdin?: boolean;
       /** The chat shell it came from, when it came from one: its runs end with the chat. */
       instance?: string;
       chat?: string;

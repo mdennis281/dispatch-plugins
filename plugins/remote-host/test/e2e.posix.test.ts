@@ -119,6 +119,8 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       LOGNAME: process.env.LOGNAME ?? process.env.USER ?? "test",
       TMPDIR: process.env.TMPDIR ?? "/tmp",
       LANG: "C.UTF-8",
+      // A macOS CI runner has a login session of its own: never give it a LaunchAgent.
+      DISPATCH_HOST_GUI: "off",
     });
     const asHelper = (req: ExecRequest) =>
       runLocally({ PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: helper.home, SSH_ORIGINAL_COMMAND: req.command })({

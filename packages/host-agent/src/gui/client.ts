@@ -76,6 +76,8 @@ export async function guiCall<T = Record<string, unknown>>(path: string, req: Re
 export interface RunIo {
   stdout: NodeJS.WritableStream;
   stderr: NodeJS.WritableStream;
+  /** The run's stdin, when it was asked for (`stdin: true`): sent as it comes, its end as EOF. */
+  stdin?: NodeJS.ReadableStream;
   /** Signals to pass on to the run; the client registers handlers for them. */
   onSignal?: (forward: (sig: NodeJS.Signals) => void) => void;
 }
@@ -100,6 +102,18 @@ export async function guiRun(path: string, req: Omit<Extract<GuiRequest, { op: "
     io.onSignal?.((sig) => {
       if (!s.destroyed) s.write(encodeFrame(GF.signal, { signal: sig }));
     });
+    if (req.stdin && io.stdin) {
+      const input = io.stdin;
+      input.on("data", (d: Buffer | string) => {
+        const b = Buffer.isBuffer(d) ? d : Buffer.from(d);
+        // A frame holds at most MAX_FRAME; a pipe's chunks are far smaller, but don't count on it.
+        for (let at = 0; at < b.length; at += 1 << 19) if (!s.destroyed) s.write(encodeFrame(GF.stdin, b.subarray(at, at + (1 << 19))));
+      });
+      input.once("end", () => {
+        if (!s.destroyed) s.write(encodeFrame(GF.stdinEnd));
+      });
+      input.on("error", () => {});
+    }
     s.on("data", (chunk: Buffer) => {
       let frames;
       try {
@@ -133,7 +147,18 @@ function signalNumber(sig: string | null): number {
 }
 
 /** Why there is (or isn't) a GUI agent to talk to. Asks launchd when the socket doesn't answer. */
+/**
+ * `DISPATCH_HOST_GUI=off` in the agent's environment: no GUI agent here, and
+ * launchd is never touched. For tests on a machine whose own login session
+ * must not get a LaunchAgent (a CI runner).
+ */
+function turnedOff(): GuiState | undefined {
+  return process.env.DISPATCH_HOST_GUI === "off" ? { state: "unsupported", detail: "turned off on this machine (DISPATCH_HOST_GUI=off)" } : undefined;
+}
+
 export async function guiState(o: { root: string; home: string; run?: Run; platform?: NodeJS.Platform }): Promise<GuiState> {
+  const off = turnedOff();
+  if (off) return off;
   if ((o.platform ?? process.platform) !== "darwin") return { state: "unsupported", detail: "the GUI agent is macOS-only for now" };
   const p = guiPaths(o.root, o.home);
   const r = await guiCall<GuiAgentStatus>(p.socket, { op: "status" }, 30_000);
@@ -162,6 +187,8 @@ export async function guiState(o: { root: string; home: string; run?: Run; platf
  * one, the plist waits there and launchd loads it at the next login.
  */
 export async function installGui(o: { root: string; home: string; script: string; run?: Run }): Promise<GuiInstallResult> {
+  const off = turnedOff();
+  if (off) return off;
   if (process.platform !== "darwin") return { state: "unsupported", detail: "the GUI agent is macOS-only for now" };
   const run = o.run ?? runFile;
   const install = await placeAgent(o);

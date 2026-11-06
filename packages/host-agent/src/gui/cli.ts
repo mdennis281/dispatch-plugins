@@ -111,7 +111,9 @@ export async function guiMain(sub: string, opts: Record<string, string>, flags: 
 
 const HELP = `dispatch-gui: run things in this Mac's login session (Tier B)
 
-  dispatch-gui run [--] CMD [ARGS…]   run CMD in the login session; its output comes here, Ctrl-C stops it.
+  dispatch-gui run [--stdin] [--] CMD [ARGS…]
+                                      run CMD in the login session; its output comes here, Ctrl-C stops it.
+                                      --stdin: CMD reads this command's stdin (otherwise /dev/null).
                                       For UI tests, the Simulator, Playwright WebKit, anything that needs the screen.
   dispatch-gui sim                    print this chat's own Simulator's UDID (made on first use; also $DISPATCH_SIM_UDID
                                       in shells started after that)
@@ -123,6 +125,8 @@ const HELP = `dispatch-gui: run things in this Mac's login session (Tier B)
 export interface DispatchGuiIo {
   env: NodeJS.ProcessEnv;
   cwd: string;
+  /** For `run --stdin`. */
+  stdin?: NodeJS.ReadableStream;
   stdout: NodeJS.WritableStream;
   stderr: NodeJS.WritableStream;
   onSignal?: (forward: (sig: NodeJS.Signals) => void) => void;
@@ -157,7 +161,11 @@ export async function dispatchGui(argv: readonly string[], ctx: Pick<GuiCliConte
     }
 
     case "run": {
-      const args = rest[0] === "--" ? rest.slice(1) : rest;
+      // `run [--stdin] [--] CMD …`: --stdin hands this command's stdin to the run (a stdio MCP server).
+      let args = rest;
+      const stdin = args[0] === "--stdin";
+      if (stdin) args = args.slice(1);
+      if (args[0] === "--") args = args.slice(1);
       if (!args.length) {
         say("run needs a command: dispatch-gui run xcodebuild test …");
         return 2;
@@ -170,7 +178,7 @@ export async function dispatchGui(argv: readonly string[], ctx: Pick<GuiCliConte
       }
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(io.env)) if (typeof v === "string") env[k] = v;
-      const r = await guiRun(p.socket, { op: "run", argv: args, cwd: io.cwd, env, ...ref }, io);
+      const r = await guiRun(p.socket, { op: "run", argv: args, cwd: io.cwd, env, ...(stdin ? { stdin: true } : {}), ...ref }, io);
       if (typeof r === "number") return r;
       say(r.code === GUI_UNAVAILABLE ? `${r.error}: ${await why()}` : r.error);
       return r.code;

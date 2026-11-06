@@ -45,7 +45,7 @@ import {
   type ProbeResult,
 } from "@dispatch-plugins/host-agent";
 import { errText, git } from "@dispatch-plugins/remote-core";
-import { guiNote } from "./gui.js";
+import { desktopOf, guiNote } from "./gui.js";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
 import { withAbort, type HostLink } from "./link.js";
@@ -307,8 +307,9 @@ export class HostBackend implements TerminalBackend {
    */
   async spawnProcess(info: TerminalProcessSpawnInfo): Promise<TerminalProcessHandle> {
     const chatId = assertId("chat", info.chatId);
-    // Refused before anything is installed or started: a headed browser, WebKit.
-    const plan = planProcess(info, { label: this.label, desktop: false });
+    // Refused before anything is installed or started: a headed browser, WebKit, with no desktop session there.
+    const desk = desktopOf(this.deps.link.probe);
+    const plan = planProcess(info, { label: this.label, desktop: desk.ok, ...(desk.why ? { noDesktop: desk.why } : {}) });
     const linked = await this.deps.link.ready(info.signal);
     await this.markServed(chatId);
     const paths = linked.paths;
@@ -330,7 +331,9 @@ export class HostBackend implements TerminalBackend {
       ...(prov?.browsersPath ? { browsersPath: prov.browsersPath } : {}),
       ...(prov?.executablePath ? { executablePath: prov.executablePath } : {}),
     };
-    const exec = plan.argv(pp);
+    // In the desktop session: the same session here, running `dispatch-gui run --stdin`, which starts the
+    // server in the login session, passes its stdio through, and ends it when it ends.
+    const exec = plan.desktop ? [paths.node, paths.agent, "dispatch-gui", "run", "--stdin", "--", ...plan.argv(pp)] : plan.argv(pp);
     const env = plan.env(pp);
     const cwd = plan.ownRoots ? dir : where.cwd;
 
@@ -742,7 +745,7 @@ export class HostBackend implements TerminalBackend {
         `another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never ` +
         `the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started ` +
         `from this chat's terminals; nothing else on the machine is.`,
-      mcpNote(host.label, this.mcpLocalDir(info.chatId)),
+      mcpNote(host.label, this.mcpLocalDir(info.chatId), desktopOf(probe).ok),
       ...(this.deps.agentTools
         ? [
             `- To bring here what the sync doesn't (build output, an .xcresult, a screenshot, a test report, a file outside ` +
@@ -915,7 +918,7 @@ function rootNote(label: string, state: ElevationState | undefined): string {
  * MCPs follow the chat's terminal), for the agent. Core's own "Where your MCP
  * servers run" section says WHICH run there; this says what that means.
  */
-function mcpNote(label: string, localDir: string): string {
+function mcpNote(label: string, localDir: string, desktop: boolean): string {
   return (
     `- Browser tools that run on ${label} (core lists which, under "Where your MCP servers run") drive a headless ` +
     `Chromium (Chrome for Testing) THERE, not a browser on this computer. In them \`localhost\` is the machine: open a dev ` +
@@ -923,8 +926,11 @@ function mcpNote(label: string, localDir: string): string {
     `one. Files they save (screenshots, snapshots, traces) are copied back here, under ${localDir}, and their results name ` +
     `the copies; a path you give one to save to is where its copy lands. A local file you pass to an upload, or open as a ` +
     `file:// page, is copied there first (just that file, not the folder around it). The browser sees the chat's files there ` +
-    `as of the last terminal command's sync. Headed browsers and WebKit need a desktop session on ${label}, which isn't set ` +
-    `up yet: they fail and say so. Their first use there installs the browser, which takes a minute or two.`
+    `as of the last terminal command's sync. ` +
+    (desktop
+      ? `Headed browsers and WebKit run in ${label}'s desktop session (nobody here sees their windows). `
+      : `Headed browsers and WebKit need a desktop session on ${label}, which it doesn't have now: they fail and say so. `) +
+    `A browser's first use there installs it, which takes a minute or two.`
   );
 }
 

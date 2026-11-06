@@ -268,6 +268,19 @@ export class GuiServer {
     const dec = new FrameDecoder();
     let handled = false;
     let run: LiveRun | undefined;
+    // Frames for the run that come before it exists (the same chunk as the request).
+    let early: Array<{ type: number; payload: Buffer }> | undefined = [];
+    const toRun = (f: { type: number; payload: Buffer }) => {
+      if (!run) return void early?.push(f);
+      if (f.type === GF.signal) {
+        const sig = (decodeJson<{ signal?: string }>(f.payload).signal ?? "SIGINT") as NodeJS.Signals;
+        if (/^SIG[A-Z0-9]+$/.test(sig)) this.signalRun(run, sig);
+      } else if (f.type === GF.stdin) {
+        if (run.child.stdin && !run.child.stdin.destroyed) run.child.stdin.write(f.payload);
+      } else if (f.type === GF.stdinEnd) {
+        run.child.stdin?.end();
+      }
+    };
     sock.on("error", () => {});
     sock.on("data", (chunk: Buffer) => {
       let frames;
@@ -289,10 +302,12 @@ export class GuiServer {
           }
           void this.handle(req, sock).then((r) => {
             run = r;
+            const held = early ?? [];
+            early = undefined;
+            if (run) for (const e of held) toRun(e);
           });
-        } else if (f.type === GF.signal && run) {
-          const sig = (decodeJson<{ signal?: string }>(f.payload).signal ?? "SIGINT") as NodeJS.Signals;
-          if (/^SIG[A-Z0-9]+$/.test(sig)) this.signalRun(run, sig);
+        } else if (handled && (f.type === GF.signal || f.type === GF.stdin || f.type === GF.stdinEnd)) {
+          toRun({ type: f.type, payload: Buffer.from(f.payload) });
         }
       }
     });
@@ -415,7 +430,9 @@ export class GuiServer {
     let child: ChildProcess;
     try {
       // Its own process group, so the whole tree it starts can be signalled.
-      child = spawn(req.argv[0]!, req.argv.slice(1), { cwd: req.cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(req.argv[0]!, req.argv.slice(1), { cwd: req.cwd, env, detached: true, stdio: [req.stdin ? "pipe" : "ignore", "pipe", "pipe"] });
+      // A server that exits while we still write to it must not take the agent down.
+      child.stdin?.on("error", () => {});
     } catch (e) {
       return this.fail(sock, "spawn-failed", e instanceof Error ? e.message : String(e));
     }

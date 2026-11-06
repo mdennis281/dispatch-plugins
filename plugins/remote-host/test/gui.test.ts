@@ -1,7 +1,7 @@
 /** Tier B in the machine's status and in the agent note. */
 import type { GuiAgentStatus, ProbeResult } from "@dispatch-plugins/host-agent";
 import { describe, expect, it } from "vitest";
-import { guiNote, guiStatus, nameToken } from "../src/gui.js";
+import { desktopOf, guiNote, guiStatus, nameToken } from "../src/gui.js";
 import { statusFrom } from "../src/link.js";
 
 const PROBE: ProbeResult = {
@@ -98,5 +98,27 @@ describe("Tier B in the agent note", () => {
   it("is absent before the machine was probed, or on an old agent", () => {
     expect(guiNote(undefined)).toBeUndefined();
     expect(guiNote(PROBE)).toBeUndefined();
+  });
+});
+
+describe("the desktop session a headed browser or WebKit runs in", () => {
+  it("is there when the agent runs in the paired user's session, the one on screen", () => {
+    expect(desktopOf(running())).toEqual({ ok: true });
+  });
+
+  it("isn't, and says why, otherwise", () => {
+    expect(desktopOf(undefined)).toEqual({ ok: false });
+    expect(desktopOf(PROBE)).toEqual({ ok: false });
+    expect(desktopOf({ ...PROBE, gui: { state: "unsupported", detail: "the GUI agent is macOS-only for now" } })).toEqual({
+      ok: false,
+      why: "the GUI agent is macOS-only for now",
+    });
+    expect(desktopOf({ ...PROBE, consoleUser: "mikedennis", gui: { state: "no-gui-session", user: "dispatch", consoleUser: "mikedennis", installed: true } })).toEqual({
+      ok: false,
+      why: "nobody is logged in there as dispatch",
+    });
+    expect(desktopOf({ ...PROBE, gui: { state: "not-answering", user: "dispatch" } }).why).toBe("its GUI agent isn't answering");
+    // Fast user switching: dispatch's session runs, behind someone else's.
+    expect(desktopOf({ ...running(), consoleUser: "mikedennis" })).toEqual({ ok: false, why: "the screen shows another user's session, not dispatch's" });
   });
 });

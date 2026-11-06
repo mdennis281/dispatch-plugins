@@ -117,6 +117,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return dispatchGui(argv.slice(1), { root, home: homedir() }, {
       env: process.env,
       cwd: process.cwd(),
+      stdin: process.stdin,
       stdout: process.stdout,
       stderr: process.stderr,
       onSignal: processSignals,

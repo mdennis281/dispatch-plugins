@@ -98,3 +98,22 @@ export function guiNote(probe: ProbeResult | undefined): string | undefined {
   }
   return lines.join("\n");
 }
+
+/**
+ * Whether a server may run in the machine's desktop session now: its GUI
+ * agent runs, in the paired user's own session, which is the one on screen.
+ * Files go to that user's home, so another user's session won't do. As of
+ * the last probe; if the session went since, `dispatch-gui run` fails at once
+ * and says why.
+ */
+export function desktopOf(probe: ProbeResult | undefined): { ok: boolean; why?: string } {
+  const g = probe?.gui;
+  if (!probe || !g) return { ok: false };
+  if (g.state === "unsupported") return { ok: false, why: g.detail };
+  if (g.state === "no-gui-session") return { ok: false, why: `nobody is logged in there as ${probe.user}` };
+  if (g.state !== "running") return { ok: false, why: "its GUI agent isn't answering" };
+  if (probe.consoleUser && probe.consoleUser !== probe.user) {
+    return { ok: false, why: `the screen shows another user's session, not ${probe.user}'s` };
+  }
+  return { ok: true };
+}

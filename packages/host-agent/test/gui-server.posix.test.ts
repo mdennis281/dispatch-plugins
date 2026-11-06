@@ -9,8 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { encodeFrame } from "../src/protocol.js";
+import { FrameDecoder, decodeOutput, encodeFrame } from "../src/protocol.js";
 import { GF } from "../src/gui/protocol.js";
 import { dispatchGui } from "../src/gui/cli.js";
 import { guiCall, guiRun } from "../src/gui/client.js";
@@ -115,6 +116,7 @@ async function startServer(over: Partial<ConstructorParameters<typeof GuiServer>
 }
 
 const sock = () => join(root, "run", "gui.sock");
+const DIST = fileURLToPath(new URL("../dist/dispatch-host.mjs", import.meta.url));
 
 function collect() {
   const out = new PassThrough();
@@ -199,6 +201,52 @@ d("dispatch-gui run", () => {
     expect(code).toBe(7);
     expect(io.text()).toBe("out\nenv-ok");
     expect(io.errText()).toBe("err\n");
+  });
+
+  it("with --stdin, is a transparent pipe for a stdio server: lines in, the same bytes out, EOF ends it", async () => {
+    await startServer();
+    const io = collect();
+    const input = new PassThrough();
+    const p = guiRun(sock(), { op: "run", argv: ["cat"], cwd: work, env: { PATH: process.env.PATH! }, stdin: true }, { ...io, stdin: input });
+    const msg = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"x":"é\\u0000"}}\n';
+    input.write(msg);
+    input.write(msg);
+    input.end();
+    expect(await p).toBe(0);
+    expect(io.text()).toBe(msg + msg);
+  });
+
+  it("keeps stdin frames that arrive in the same chunk as the request", async () => {
+    await startServer();
+    const c = connect(sock());
+    await new Promise((r) => c.once("connect", r));
+    const out: Buffer[] = [];
+    const dec = new FrameDecoder();
+    let exit: unknown;
+    c.on("data", (b: Buffer) => {
+      for (const f of dec.push(b)) {
+        if (f.type === GF.stdout) out.push(decodeOutput(f.payload).data);
+        if (f.type === GF.exit) exit = JSON.parse(f.payload.toString());
+      }
+    });
+    c.write(
+      Buffer.concat([
+        encodeFrame(GF.request, { v: 1, op: "run", argv: ["cat"], cwd: work, env: { PATH: process.env.PATH! }, stdin: true }),
+        encodeFrame(GF.stdin, Buffer.from("early\n")),
+        encodeFrame(GF.stdinEnd),
+      ]),
+    );
+    await until(() => exit !== undefined);
+    expect(Buffer.concat(out).toString()).toBe("early\n");
+    expect(exit).toEqual({ code: 0, signal: null });
+    c.destroy();
+  });
+
+  it("without --stdin, the run's stdin is empty (EOF at once)", async () => {
+    await startServer();
+    const io = collect();
+    expect(await guiRun(sock(), { op: "run", argv: ["sh", "-c", "cat; echo done"], cwd: work, env: { PATH: process.env.PATH! } }, io)).toBe(0);
+    expect(io.text()).toBe("done\n");
   });
 
   it("runs in the cwd it was given", async () => {
@@ -498,6 +546,29 @@ d("dispatch-gui, in a chat shell", () => {
     const io = collect();
     expect(await dispatchGui(["run", "--", "sh", "-c", "echo hi; exit 3"], { root, home }, { env, cwd: work, ...io })).toBe(3);
     expect(io.text()).toBe("hi\n");
+  });
+
+  // What remote-host's spawnProcess runs for a headed browser or WebKit MCP server: the built agent's
+  // `dispatch-gui run --stdin`, as its own process. Bytes in, the same bytes out, the exit code, the env.
+  it.skipIf(!existsSync(DIST))("passes a stdio server's bytes through both ways as `run --stdin`, a process", async () => {
+    await startServer();
+    const echo = "let n=0;process.stdin.on('data',c=>{n+=c.length;process.stdout.write(c)});process.stdin.on('end',()=>{process.stderr.write(process.env.SEAM+':'+n);process.exit(4)})";
+    const child = spawn(process.execPath, [DIST, "dispatch-gui", "run", "--stdin", "--", process.execPath, "-e", echo], {
+      cwd: work,
+      env: { ...env, DISPATCH_HOST_ROOT: root, SEAM: "plan-env" },
+    });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    child.stdout.on("data", (c: Buffer) => out.push(c));
+    child.stderr.on("data", (c: Buffer) => err.push(c));
+    const exited = new Promise<number | null>((r) => child.on("close", (c) => r(c)));
+    // More than one 512 KB frame, every byte value.
+    const sent = Buffer.alloc(1_300_000);
+    for (let i = 0; i < sent.length; i++) sent[i] = (i * 7919) & 0xff;
+    child.stdin.end(sent);
+    expect(await exited).toBe(4);
+    expect(Buffer.concat(out).equals(sent)).toBe(true);
+    expect(Buffer.concat(err).toString()).toBe(`plan-env:${sent.length}`);
   });
 
   it("says why, and exits 75, when there is no agent", async () => {
