@@ -76,7 +76,7 @@ async function activate(opts: Parameters<typeof createTestContext>[0] = {}) {
 
 describe("the manifest", () => {
   it("asks for what the plugin uses and no more", () => {
-    expect(capabilities).toEqual(["terminals", "secrets", "secrets:write", "kv", "routes", "ui", "approvals"]);
+    expect(capabilities).toEqual(["terminals", "secrets", "secrets:write", "kv", "routes", "ui", "approvals", "runner"]);
     expect(manifestSecrets).toEqual(["REMOTE_HOST_KEY_*", "REMOTE_HOST_ELEVATE_KEY_*"]);
     expect(manifest).toMatch(/^id: remote-host$/m);
     const pkg = JSON.parse(readFileSync(`${dir}/package.json`, "utf8")) as { version: string };

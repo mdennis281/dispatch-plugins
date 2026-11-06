@@ -9,6 +9,12 @@
  * - **The same port here when it is free**, so an OAuth redirect, a CORS
  *   origin or a cookie set for `localhost:3000` still works. Otherwise any free
  *   port, and the published URL says which.
+ * - **Never a port Dispatch reserves** (`ctx.runner.reservedPorts()`: both
+ *   instances' ports, the dev server's live-reload socket, plugins' process
+ *   ports), even while nothing holds it. A dev server on 4319 there, forwarded
+ *   onto 4319 here, would stop the dev instance from starting; on Windows it
+ *   could even share the port with it and answer half its requests. Such a
+ *   forward goes on another port, and the log says why.
  * - **Loopback only**, on both ends: it listens on 127.0.0.1 here and dials
  *   the machine's loopback there (the key's `permitopen` allows nothing else).
  * - **It outlives a reconnect.** The listener here stays put; each connection
@@ -38,11 +44,30 @@ export interface PortForwardsDeps {
   log: PluginLog;
   /** The machine, for log lines. */
   label(): string;
+  /** Ports here a forward must never take, and why (`ctx.runner.reservedPorts()`). Without it, {@link DEFAULT_RESERVED}. */
+  reserved?(): Promise<readonly ReservedPort[]>;
   intervalMs?: number;
 }
 
 /** How often a machine with live shells is asked what is listening. */
 export const PORT_POLL_MS = 4_000;
+
+/** A port here a forward must never take, and why: "the development Dispatch instance's default port". */
+export interface ReservedPort {
+  port: number;
+  reason: string;
+}
+
+/**
+ * Dispatch's own fixed ports, worded as core words them. Reserved always:
+ * alone when this Dispatch has no `ctx.runner` (older than Dispatch #517),
+ * and added to what it reports otherwise.
+ */
+export const DEFAULT_RESERVED: readonly ReservedPort[] = [
+  { port: 4318, reason: "the installed Dispatch instance's default port" },
+  { port: 4319, reason: "the development Dispatch instance's default port" },
+  { port: 24678, reason: "a development Dispatch instance's live-reload socket" },
+];
 
 interface Forward {
   chat: string;
@@ -69,6 +94,7 @@ export class PortForwards {
   /** Ports that failed to forward, so each failure is logged once rather than every poll. */
   private readonly failed = new Set<string>();
   private listFailing = false;
+  private reservedFailing = false;
   private disposed = false;
 
   constructor(private readonly deps: PortForwardsDeps) {}
@@ -116,17 +142,26 @@ export class PortForwards {
         if (validPort(l.port) && isLoopback(l.host)) want.set(key(s.chat, l.port), { chat: s.chat, l });
       }
     }
+    const reserved = want.size || this.forwards.size ? await this.reserved() : new Map<number, string>();
+    if (this.disposed) return;
     // Close first: a port that passed from one chat to another frees its
     // local port for the new owner.
     for (const [k, f] of this.forwards) {
       const w = want.get(k);
+      // A port can become reserved after it was taken (the installed Dispatch
+      // restarted onto it, say): give it up, and the loop below moves the forward.
+      const why = reserved.get(f.localPort);
       if (!w || w.l.host !== f.host) this.close(k);
+      else if (why) {
+        this.deps.log.info(`remote-host ${this.deps.label()}: moving port ${f.remotePort}'s forward off ${f.localPort}, now reserved here (${why})`);
+        this.close(k);
+      }
     }
     for (const k of [...this.failed]) if (!want.has(k)) this.failed.delete(k);
     for (const [k, { chat, l }] of want) {
       if (this.forwards.has(k) || this.disposed) continue;
       try {
-        const f = await this.open(chat, l);
+        const f = await this.open(chat, l, reserved);
         this.forwards.set(k, f);
         this.failed.delete(k);
         // Torn down, or the chat's last shell went, while it was opening.
@@ -161,7 +196,28 @@ export class PortForwards {
     this.timer = undefined;
   }
 
-  private async open(chat: string, l: Listener): Promise<Forward> {
+  /**
+   * The ports no forward may take, by port, with why. Dispatch's own fixed
+   * ones always, whatever `ctx.runner` says or if asking it fails.
+   */
+  private async reserved(): Promise<Map<number, string>> {
+    const out = new Map<number, string>();
+    if (this.deps.reserved) {
+      try {
+        for (const r of await this.deps.reserved()) if (validPort(r.port) && !out.has(r.port)) out.set(r.port, r.reason);
+        this.reservedFailing = false;
+      } catch (err) {
+        if (!this.reservedFailing) {
+          this.deps.log.warn(`remote-host ${this.deps.label()}: could not ask Dispatch which ports are reserved, so only its own are kept clear: ${errText(err)}`);
+        }
+        this.reservedFailing = true;
+      }
+    }
+    for (const r of DEFAULT_RESERVED) if (!out.has(r.port)) out.set(r.port, r.reason);
+    return out;
+  }
+
+  private async open(chat: string, l: Listener, reserved: ReadonlyMap<number, string>): Promise<Forward> {
     const sockets = new Set<Socket>();
     const server = createServer((sock) => {
       sockets.add(sock);
@@ -179,8 +235,9 @@ export class PortForwards {
         () => sock.destroy(),
       );
     });
-    const localPort = await listen(server, l.port);
+    const localPort = await listen(server, l.port, reserved);
     const label = command(l.command);
+    const why = reserved.get(l.port);
     let withdraw: () => void;
     try {
       // Throws once the backend is unregistered. The port must not stay bound
@@ -192,7 +249,8 @@ export class PortForwards {
       throw err;
     }
     this.deps.log.info(
-      `remote-host ${this.deps.label()}: forwarding port ${l.port}${label ? ` (${label})` : ""} for chat ${chat} to ${urlOf(localPort)}`,
+      `remote-host ${this.deps.label()}: forwarding port ${l.port}${label ? ` (${label})` : ""} for chat ${chat} to ${urlOf(localPort)}` +
+        (why ? `; not to ${l.port}, which is reserved here (${why})` : ""),
     );
     return { chat, remotePort: l.port, host: l.host, localPort, server, sockets, withdraw };
   }
@@ -213,10 +271,13 @@ export class PortForwards {
 
 /** How many ephemeral ports to try before taking one that is busy on ::1. */
 const EPHEMERAL_TRIES = 8;
+/** And before giving up on finding one that isn't reserved (the system only hands out a reserved one nothing holds). */
+const RESERVED_TRIES = 64;
 
 /**
- * Listen on 127.0.0.1:`preferred` when that port is free on BOTH loopbacks,
- * else on another port that is. Resolves with the port.
+ * Listen on 127.0.0.1:`preferred` when that port is free on BOTH loopbacks
+ * and not `reserved`, else on another port that is. Resolves with the port;
+ * never a reserved one.
  *
  * Both, because the forward is published as `http://127.0.0.1:<port>` but a
  * person (or a browser that tries IPv6 first) types `localhost:<port>`. With
@@ -224,7 +285,7 @@ const EPHEMERAL_TRIES = 8;
  * that name reached the other program, not the machine's dev server (seen in
  * the live run on cvx-mac, where two other chats' Vite servers held ::1).
  */
-export async function listen(server: Server, preferred: number): Promise<number> {
+export async function listen(server: Server, preferred: number, reserved: { has(port: number): boolean } = new Set()): Promise<number> {
   const attempt = (port: number) =>
     new Promise<number>((resolve, reject) => {
       const fail = (err: Error) => {
@@ -239,7 +300,7 @@ export async function listen(server: Server, preferred: number): Promise<number>
       server.once("listening", ok);
       server.listen(port, "127.0.0.1");
     });
-  if (await freeOnV6Loopback(preferred)) {
+  if (!reserved.has(preferred) && (await freeOnV6Loopback(preferred))) {
     try {
       return await attempt(preferred);
     } catch {
@@ -248,8 +309,9 @@ export async function listen(server: Server, preferred: number): Promise<number>
   }
   for (let i = 1; ; i++) {
     const port = await attempt(0);
-    if (i >= EPHEMERAL_TRIES || (await freeOnV6Loopback(port))) return port;
+    if (!reserved.has(port) && (i >= EPHEMERAL_TRIES || (await freeOnV6Loopback(port)))) return port;
     await new Promise<void>((r) => server.close(() => r()));
+    if (i >= RESERVED_TRIES) throw new Error(`no free port here that isn't reserved, after ${i} tries`);
   }
 }
 
@@ -264,6 +326,18 @@ export function freeOnV6Loopback(port: number): Promise<boolean> {
     probe.once("error", (err: NodeJS.ErrnoException) => resolve(err.code !== "EADDRINUSE" && err.code !== "EACCES"));
     probe.listen({ port, host: "::1", ipv6Only: true, exclusive: true }, () => probe.close(() => resolve(true)));
   });
+}
+
+/**
+ * `ctx.runner.reservedPorts`, when this Dispatch has it (#517) and the
+ * manifest declared `runner`. Looked up, not assumed: an older Dispatch has
+ * no such member, and the defaults stand in.
+ */
+export function reservedPortsOf(ctx: unknown): (() => Promise<readonly ReservedPort[]>) | undefined {
+  const runner = (ctx as { runner?: { reservedPorts?: unknown } } | undefined)?.runner;
+  if (!runner || typeof runner.reservedPorts !== "function") return undefined;
+  const view = runner as { reservedPorts(): Promise<readonly ReservedPort[]> };
+  return () => view.reservedPorts();
 }
 
 function key(chat: string, port: number): string {

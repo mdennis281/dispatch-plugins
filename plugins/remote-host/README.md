@@ -89,6 +89,7 @@ A server a chat starts in its terminal there (`pnpm dev`, say) is reachable on t
 
 - **Only the chat's own.** dispatch-host works out which session's processes hold each TCP listener on the machine. A chat's listeners are forwarded; nothing else there ever is: not AirPlay on 5000/7000, not another chat's, not the other Dispatch's, not the account's own.
 - **The same port here when it's free,** so OAuth redirects, CORS origins and cookies set for `localhost:3000` keep working. Otherwise another free port. Either way the terminal result and Ports & processes give the URL to open.
+- **Never a port Dispatch keeps for itself,** even while nothing holds it: both instances' ports (4318, 4319, or wherever the installed one runs), the dev server's live-reload socket (24678), and the ports Dispatch's plugins run their processes on. A dev server there on 4319, forwarded onto 4319 here, would stop the dev instance from starting. Such a server is forwarded to another port, and Dispatch's log says why. The list comes from Dispatch (`ctx.runner`, Dispatch #517); the three fixed ports are kept clear even without it.
 - **Loopback only, on both ends.** It listens on 127.0.0.1 here, and dials the machine's 127.0.0.1 or ::1. A listener on all interfaces is reached through its loopback; one bound only to a LAN address isn't forwarded. The key's `permitopen` allows nothing else. Machines paired before 0.4.0 have only the IPv4 loopback in it, so a server bound only to `[::1]` (Vite's `localhost` on macOS) needs **Pair again**.
 - **It survives a dropped connection.** The port here stays open; while the machine is offline a connection to it is refused, and it works again after the reconnect.
 - It goes when the chat's last terminal there does, or when the server stops (the machine is asked every 4 s while a terminal is open).
@@ -106,7 +107,7 @@ The account Dispatch logs in as has no sudo password, and never gets one. Instea
 - **Interrupting it** (Ctrl-C, the terminal ending) withdraws the card, or stops the command on the machine.
 - **What `sudo` can't do here** is refused with the reason: another user (`-u`), keeping the environment (`-E`), a root shell (`-s`, `-i`), `-n`. `-v` and `-k` succeed and do nothing.
 
-It needs a Dispatch with plugin approval requests (Dispatch #512): this version declares the `approvals` capability, so an older Dispatch won't load it. Until elevation is set up on the machine, `sudo` there says so and fails, and the agent is told to ask you instead.
+It needs a Dispatch with plugin approval requests (Dispatch #512) and its reserved-port list (#517): this version declares the `approvals` and `runner` capabilities, so an older Dispatch won't load it. Until elevation is set up on the machine, `sudo` there says so and fails, and the agent is told to ask you instead.
 
 ### Setting it up
 

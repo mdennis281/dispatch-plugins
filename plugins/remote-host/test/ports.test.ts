@@ -8,9 +8,9 @@ import { createServer as createHttp, get } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import type { TerminalPortForwardInput } from "@dispatch/plugin-sdk";
 import type { Attribution, Listener } from "@dispatch-plugins/host-agent";
-import { PortForwards, command, freeOnV6Loopback, listen } from "../src/ports.js";
+import { createTestContext } from "@dispatch/plugin-sdk/testing";
+import { DEFAULT_RESERVED, PortForwards, command, freeOnV6Loopback, listen, reservedPortsOf, type ReservedPort } from "../src/ports.js";
 
-const quiet = { info() {}, warn() {}, error() {} };
 /** Whether this computer has an IPv6 loopback to hold a port on. */
 const hasV6Loopback = await new Promise<boolean>((r) => {
   const s = createServer();
@@ -58,10 +58,11 @@ function fetchText(url: string): Promise<string> {
 
 const listener = (port: number, command = "node", host = "127.0.0.1"): Listener => ({ pid: 100 + port, command, host, port });
 
-function rig(opts: { remote: Map<number, number> }) {
+function rig(opts: { remote: Map<number, number>; reserved?: () => Promise<ReservedPort[]> }) {
   const report: Attribution = { sessions: [], unattributed: [] };
   const chats = new Set<string>();
   const published: Array<TerminalPortForwardInput & { withdrawn?: boolean }> = [];
+  const logged: string[] = [];
   let online = true;
   let lists = 0;
   let failPublish = false;
@@ -90,8 +91,9 @@ function rig(opts: { remote: Map<number, number> }) {
       };
     },
     chats: () => chats,
-    log: quiet,
+    log: { info: (m: string) => logged.push(m), warn: (m: string) => logged.push(m), error: (m: string) => logged.push(m) },
     label: () => "Studio",
+    ...(opts.reserved ? { reserved: opts.reserved } : {}),
     intervalMs: 60_000,
   });
   cleanup.push(() => pf.dispose());
@@ -100,6 +102,7 @@ function rig(opts: { remote: Map<number, number> }) {
     report,
     chats,
     published,
+    logged,
     live: () => published.filter((p) => !p.withdrawn),
     setOnline: (v: boolean) => (online = v),
     failPublish: (v: boolean) => (failPublish = v),
@@ -131,6 +134,71 @@ describe("port forwards", () => {
     expect(p?.remotePort).toBe(real);
     expect(p?.url).not.toBe(`http://127.0.0.1:${real}`);
     expect(await fetchText(`${p!.url}/`)).toBe("busy port");
+  });
+
+  it("never takes a port Dispatch reserves, though it is free here, and says why", async () => {
+    const real = await devServer("dev server on a reserved port");
+    const remotePort = await freePort();
+    const reason = 'declared by plugin "studio-proxy" for its process "proxy"';
+    const r = rig({ remote: new Map([[remotePort, real]]), reserved: async () => [{ port: remotePort, reason }] });
+    r.chats.add("chat-a");
+    r.report.sessions.push({ sid: "s1", chat: "chat-a", ports: [listener(remotePort)] });
+    await r.pf.tick();
+    const [p] = r.live();
+    expect(p?.remotePort).toBe(remotePort);
+    expect(p?.url).not.toBe(`http://127.0.0.1:${remotePort}`);
+    expect(await fetchText(`${p!.url}/`)).toBe("dev server on a reserved port");
+    await expectFree(remotePort);
+    expect(r.logged.find((m) => m.includes(`forwarding port ${remotePort}`))).toContain(
+      `; not to ${remotePort}, which is reserved here (${reason})`,
+    );
+  });
+
+  it("keeps Dispatch's own ports clear when this Dispatch can't say which are reserved", async () => {
+    const real = await devServer("a dev server there on 4319");
+    // No ctx.runner (an older Dispatch), and one whose runner fails: either way 4318, 4319 and 24678 stay clear.
+    for (const reserved of [undefined, async () => Promise.reject(new Error("runner went away"))]) {
+      const r = rig({ remote: new Map([[4319, real], [4318, real], [24678, real]]), ...(reserved ? { reserved } : {}) });
+      r.chats.add("chat-a");
+      r.report.sessions.push({ sid: "s1", chat: "chat-a", ports: [listener(4319), listener(4318), listener(24678)] });
+      await r.pf.tick();
+      const urls = r.live().map((p) => Number(new URL(p.url).port));
+      expect(urls).toHaveLength(3);
+      for (const port of urls) expect(DEFAULT_RESERVED.map((d) => d.port)).not.toContain(port);
+      expect(await fetchText(`${r.live()[0]!.url}/`)).toBe("a dev server there on 4319");
+      if (reserved) expect(r.logged.filter((m) => m.includes("could not ask Dispatch which ports are reserved"))).toHaveLength(1);
+      r.pf.dispose();
+    }
+  });
+
+  it("moves a forward off a port that became reserved after it was taken", async () => {
+    const real = await devServer("moved");
+    const remotePort = await freePort();
+    const reserved: ReservedPort[] = [];
+    const r = rig({ remote: new Map([[remotePort, real]]), reserved: async () => reserved });
+    r.chats.add("chat-a");
+    r.report.sessions.push({ sid: "s1", chat: "chat-a", ports: [listener(remotePort)] });
+    await r.pf.tick();
+    expect(r.live().map((p) => p.url)).toEqual([`http://127.0.0.1:${remotePort}`]);
+    // The installed Dispatch restarted onto that port, say.
+    reserved.push({ port: remotePort, reason: "the installed (stable) Dispatch instance" });
+    await r.pf.tick();
+    const [p] = r.live();
+    expect(p?.url).not.toBe(`http://127.0.0.1:${remotePort}`);
+    expect(await fetchText(`${p!.url}/`)).toBe("moved");
+    await expectFree(remotePort);
+    expect(r.logged.some((m) => m.includes(`moving port ${remotePort}'s forward off ${remotePort}, now reserved here (the installed (stable) Dispatch instance)`))).toBe(true);
+  });
+
+  it("asks which ports are reserved only while there is something to forward", async () => {
+    let asked = 0;
+    const r = rig({ remote: new Map(), reserved: async () => (asked++, []) });
+    r.chats.add("chat-a");
+    await r.pf.tick();
+    expect(asked).toBe(0);
+    r.report.sessions.push({ sid: "s1", chat: "chat-a", ports: [listener(await freePort())] });
+    await r.pf.tick();
+    expect(asked).toBe(1);
   });
 
   it("never forwards what another chat, another Dispatch or the account started, nor a LAN-only listener", async () => {
@@ -263,6 +331,19 @@ describe("port forwards", () => {
   });
 });
 
+describe("reservedPortsOf", () => {
+  it("reads ctx.runner's deny-list, and finds nothing on a Dispatch without one", async () => {
+    const t = createTestContext({ capabilities: ["terminals", "runner"] });
+    t.reservedPorts.push({ port: 5005, owner: "plugin:studio-proxy", reason: 'held by plugin "studio-proxy"\'s process "proxy"' });
+    const ask = reservedPortsOf(t.ctx);
+    expect(ask).toBeTypeOf("function");
+    const ports = (await ask!()).map((r) => r.port);
+    expect(ports).toEqual(expect.arrayContaining([4318, 4319, 24678, 5005]));
+
+    expect(reservedPortsOf(createTestContext({ capabilities: ["terminals"] }).ctx)).toBeUndefined();
+  });
+});
+
 describe("listen", () => {
   it("takes the port asked for when it is free, else any", async () => {
     const want = await freePort();
@@ -272,6 +353,18 @@ describe("listen", () => {
     const other = await listen(s2, want);
     expect(other).not.toBe(want);
     await Promise.all([new Promise((r) => s1.close(r)), new Promise((r) => s2.close(r))]);
+  });
+
+  it("never takes a reserved port, asked for or not", async () => {
+    const want = await freePort();
+    const s: Server = createServer();
+    const got = await listen(s, want, new Set([want]));
+    expect(got).not.toBe(want);
+    await new Promise((r) => s.close(r));
+    // A port the system hands out can be a reserved one nothing holds yet: it is passed over, and never taken.
+    const s2: Server = createServer();
+    await expect(listen(s2, want, { has: () => true })).rejects.toThrow(/isn't reserved/);
+    expect(s2.listening).toBe(false);
   });
 
   it.skipIf(!hasV6Loopback)("counts a port another program holds on [::1] as taken, so localhost:<port> can't reach that program", async () => {
