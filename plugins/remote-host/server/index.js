@@ -21487,6 +21487,13 @@ run() {
     kill -KILL -- "-$pid" 2>/dev/null
   ) </dev/null >/dev/null 2>&1 &
   watcher=$!
+  # Out of the job table at once. With job control on, bash reports a job it
+  # finds killed by a signal ("[2]+ Terminated  ( cat …") on its own stderr,
+  # which is the command's stderr here, whenever it next looks: the watcher is
+  # always killed below, so that line now and then followed the command's own
+  # output. A disowned job is never reported, and is still killed by group.
+  # (By pid; failing that, the current job, which is the watcher just started.)
+  disown "$watcher" 2>/dev/null || disown 2>/dev/null
   exec 3<&-
   trap 'kill -TERM -- "-$pid" 2>/dev/null' HUP INT TERM
   wait "$pid" 2>/dev/null
@@ -22578,7 +22585,7 @@ function localIPv4() {
 function safeName$1(name) {
   return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 50) || "dispatch";
 }
-const HELPER_VERSION = "1";
+const HELPER_VERSION = "2";
 const MAC_PATHS = {
   helper: HELPER_PATH,
   account: ELEVATE_USER,
@@ -22659,10 +22666,15 @@ class ElevationSetups {
   }
   pending = /* @__PURE__ */ new Map();
   now;
-  /** Mint a key for `host` (replacing one minted before) and make its setup command. */
-  start(host) {
+  /**
+   * Make `host`'s setup command, with a new key (replacing one minted before),
+   * or with `keep`, the key elevation is on with now. Kept, the command writes
+   * the same key line, so running it again (to install a newer helper, say)
+   * never locks out the login that works, even if Verify is never pressed.
+   */
+  start(host, keep) {
     this.expire();
-    const kp = generateKeyPair(`dispatch-elevate:${host.slug}@${safeName$1(this.d.dispatchName ?? hostname())}`);
+    const kp = keep ? { privateKey: keep, publicKey: publicKeyOf(keep) } : generateKeyPair(`dispatch-elevate:${host.slug}@${safeName$1(this.d.dispatchName ?? hostname())}`);
     const paths = this.d.paths ?? MAC_PATHS;
     const keyLine = elevationKeyLine(kp.publicKey, host.allowFrom, paths.helper);
     const script = setupScript(host.slug, keyLine, paths);
@@ -26699,9 +26711,17 @@ function defineRoutes(deps) {
       await registry.refreshElevation();
       return { hosts: registry.list() };
     }));
-    r.post("/hosts/:slug/elevation/setup", h((req) => {
+    r.post("/hosts/:slug/elevation/setup", h(async (req) => {
       const host = find(req);
       if (!registry.get(host.slug)) throw new UserError(`${host.slug} is not registered in this instance`, 409);
+      const stored = await ctx.secrets?.get(elevateSecretName(host.slug));
+      if (stored?.trim()) {
+        try {
+          return deps.setups.start(host, stored);
+        } catch (err) {
+          ctx.log.warn(`remote-host ${host.slug}: the stored elevation key can't be read (${errText$1(err)}); making a new one`);
+        }
+      }
       return deps.setups.start(host);
     }));
     r.post("/hosts/:slug/elevation/verify", h(async (req) => {
@@ -26720,7 +26740,9 @@ function defineRoutes(deps) {
         ctx.log.info(`remote-host ${host.slug}: elevation is on (helper ${version2})`);
       }
       await e.backend.elevation.refresh();
-      return { on: true, version: version2, canAsk: e.backend.elevation.canAsk };
+      const outdated = version2 !== HELPER_VERSION;
+      if (outdated) ctx.log.info(`remote-host ${host.slug}: its root helper is version ${version2}; this plugin has ${HELPER_VERSION}`);
+      return { on: true, version: version2, current: HELPER_VERSION, outdated, canAsk: e.backend.elevation.canAsk };
     }));
     r.delete("/hosts/:slug/elevation", h(async (req) => elevationOff(find(req))));
     r.post("/pair/scan", h((req) => pairing.scan(body(req))));

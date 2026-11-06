@@ -148,10 +148,12 @@ Once per machine, from Settings → Remote hosts → the machine's **Root: off �
    - It writes `/etc/sudoers.d/dispatch-elevate`: that account, and nobody else, may run the helper as root without a password. The rule is checked with `visudo -cf` before it is installed, and the whole configuration with `visudo -c` after; if that fails, the rule is taken out again.
    - It starts the helper's log, `/var/log/dispatch-elevate.log`, readable by root only.
 
-   Running it again is safe: it replaces the key and the helper.
+   Running it again is safe: it replaces the key line and the helper, and keeps the account.
 3. **Verify.** Dispatch logs in with the new key and has the helper prove it runs as root (`uid=0`). Only then is the key stored, and the row says **Root: with your approval, each time**.
 
 The command is good for 2 hours. Verify needs no approval card: it runs one fixed check, nothing of the agent's.
+
+**Updating the helper.** A plugin update can bring a newer helper; its version is what `check` prints (2 since remote-host 0.9.1). **Manage → Check it** compares the machine's with this plugin's. When the machine's is older, it says so: the old one still works. **Update the helper** makes the setup command again, with the key elevation is already on with, so the key line stays the same and nothing stops working, whether or not you press Verify afterwards. Run it at the machine, then **Verify**.
 
 ### Turning it off
 

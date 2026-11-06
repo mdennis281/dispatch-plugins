@@ -119,6 +119,13 @@ run() {
     kill -KILL -- "-$pid" 2>/dev/null
   ) </dev/null >/dev/null 2>&1 &
   watcher=$!
+  # Out of the job table at once. With job control on, bash reports a job it
+  # finds killed by a signal ("[2]+ Terminated  ( cat …") on its own stderr,
+  # which is the command's stderr here, whenever it next looks: the watcher is
+  # always killed below, so that line now and then followed the command's own
+  # output. A disowned job is never reported, and is still killed by group.
+  # (By pid; failing that, the current job, which is the watcher just started.)
+  disown "$watcher" 2>/dev/null || disown 2>/dev/null
   exec 3<&-
   trap 'kill -TERM -- "-$pid" 2>/dev/null' HUP INT TERM
   wait "$pid" 2>/dev/null

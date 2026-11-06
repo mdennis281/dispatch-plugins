@@ -82,6 +82,15 @@ describe.skipIf(!posix)("the root helper (POSIX)", () => {
     expect(r.err).toBe("err\n");
   });
 
+  it("never adds bash's job reports to a command's output, however the timing falls", async () => {
+    // Version 1 now and then ended a command's stderr with "[2]+ Terminated  ( cat …":
+    // bash reporting the killed watcher job. Many at once, so the timings vary.
+    const runs = await Promise.all(Array.from({ length: 24 }, () => run(join(dir, "work"), "sh", "-c", "echo err >&2; exit 3")));
+    for (const r of runs) expect({ code: r.code, out: r.out, err: r.err }).toEqual({ code: 3, out: "", err: "err\n" });
+    const quick = await Promise.all(Array.from({ length: 24 }, () => run("/", "true")));
+    for (const r of quick) expect({ code: r.code, err: r.err }).toEqual({ code: 0, err: "" });
+  });
+
   it("never lets a shell see the request: quotes, $(…) and backquotes stay literal", async () => {
     const r = await run(join(dir, "work"), "printf", "%s|", `$(touch ${dir}/pwned)`, "`id`", "a'b", "two words", "");
     expect(r.code).toBe(0);
