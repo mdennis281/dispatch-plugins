@@ -83,7 +83,7 @@ describe("scan", () => {
 describe("start", () => {
   it("mints a key whose line may only forward to loopback, only from this computer", async () => {
     const p = pairing(fresh());
-    const r = p.start({ slug: "cvx-mac", address: "10.0.10.16", user: "dispatch", hostKey: `SHA256:${"a".repeat(43)}` });
+    const r = p.start({ slug: "cvx-mac", address: "10.0.4.5", user: "dispatch", hostKey: `SHA256:${"a".repeat(43)}` });
     expect(r.id).toBe("remote-host/cvx-mac");
     expect(r.authorizedKeysLine).toMatch(
       /^restrict,port-forwarding,permitopen="127\.0\.0\.1:\*",permitopen="\[::1\]:\*",from="10\.0\.4\.1,10\.69\.69\.69" ssh-ed25519 \S+ dispatch-remote-host:cvx-mac@DipDuo$/,

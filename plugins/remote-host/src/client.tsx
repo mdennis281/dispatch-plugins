@@ -430,7 +430,7 @@ function PairDialog({ host, prefill, onClose }: { host: ClientHost; prefill: Pai
             className={monoInputCls}
             value={address}
             autoFocus
-            placeholder="10.0.10.16"
+            placeholder="10.0.4.5"
             onChange={(e) => setAddress(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && address.trim() && void scan()}
           />

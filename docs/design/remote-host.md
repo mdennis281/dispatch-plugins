@@ -3,7 +3,9 @@
 Scope v2, 2026-10-31. It folds in research on core seams, proxmox-terminal reuse and macOS realities, plus an
 adversarial edge-case review. Nothing has been built yet.
 
-**First target:** `cvx-mac.lan`, at 10.0.10.16 on the same /20 as the Dispatch host.
+**First target:** `cvx-mac`, on the same /20 as the Dispatch host. Since 2026-11-06 it is pinned at 10.0.4.5 by a
+DHCP reservation, with Private Wi-Fi Address off (MAC `f4:d4:88:8d:c7:9e`). It was 10.0.10.16 when this was scoped,
+and `cvx-mac.lan` may still answer with that until the old lease expires, so use the IP. When it was scoped:
 - It answers ping.
 - **TCP 22 is closed, so Remote Login is off.**
 - The Dispatch host is Windows 11 and has ZeroTier at 10.69.69.69/24.
