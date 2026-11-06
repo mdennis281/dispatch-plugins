@@ -141,7 +141,8 @@ export function currentBuild(p: GuiPaths): string | undefined {
 /** Point `current.mjs` at `script`, atomically: a new link beside it, renamed over. */
 export function pointCurrent(p: GuiPaths, script: string): void {
   mkdirSync(p.dir, { recursive: true, mode: 0o700 });
-  const rel = posix.relative(p.dir, script);
+  // Both sides real paths, so the link is `../agent/<build>/…` (macOS's /tmp is /private/tmp).
+  const rel = posix.relative(realpathSync(p.dir), realpathSync(script));
   const tmp = `${p.current}.${process.pid}.tmp`;
   rmSync(tmp, { force: true });
   symlinkSync(rel, tmp);

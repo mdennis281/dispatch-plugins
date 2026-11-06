@@ -163,7 +163,7 @@ export async function dispatchGui(argv: readonly string[], ctx: Pick<GuiCliConte
       for (const [k, v] of Object.entries(io.env)) if (typeof v === "string") env[k] = v;
       const r = await guiRun(p.socket, { op: "run", argv: args, cwd: io.cwd, env, ...ref }, io);
       if (typeof r === "number") return r;
-      say(r.code === GUI_UNAVAILABLE ? `${r.error}. ${await why()}` : r.error);
+      say(r.code === GUI_UNAVAILABLE ? `${r.error}: ${await why()}` : r.error);
       return r.code;
     }
 

@@ -4,7 +4,7 @@
  * the window server, launchd) is faked. POSIX only; CI runs it on Linux and macOS.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
@@ -371,6 +371,8 @@ d("upgrades", () => {
     // The older build connects again (stable after dev): nothing moves.
     expect(await placeAgent({ root, home, script })).toMatchObject({ link: "keep", current: `99.0.0-${H}`, plist: "kept" });
     expect(realpathSync(join(root, "gui", "current.mjs"))).toBe(realpathSync(newer));
+    // Relative within the root, so moving it (or /tmp → /private/tmp) never breaks it.
+    expect(readlinkSync(join(root, "gui", "current.mjs"))).toBe(`../agent/99.0.0-${H}/dispatch-host.mjs`);
   });
 
   it("never overwrites a plist of a newer format", async () => {
@@ -489,6 +491,6 @@ d("dispatch-gui, in a chat shell", () => {
     const io = collect();
     const code = await dispatchGui(["run", "true"], { root, home }, { env, cwd: work, ...io });
     expect(code).toBe(75);
-    expect(io.errText()).toMatch(/^dispatch-gui: the GUI agent isn't answering\. /);
+    expect(io.errText()).toMatch(/^dispatch-gui: the GUI agent isn't answering: /);
   });
 });
