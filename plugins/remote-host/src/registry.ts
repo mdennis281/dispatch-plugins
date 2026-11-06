@@ -9,7 +9,8 @@ import { errText, type SshTarget } from "@dispatch-plugins/remote-core";
 import type { InstanceInfo, ProbeResult } from "@dispatch-plugins/host-agent";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
 import { HostBackend } from "./backend.js";
-import { approvalsOf, type Approvals, type ElevationDeps } from "./elevation.js";
+import { HELPER_PATH, approvalsOf, type Approvals, type ElevationDeps } from "./elevation.js";
+import { removeElevation } from "./elevation-setup.js";
 import { backendId, connectionChanged, elevateSecretName, keySecretName, type HostConfig } from "./hosts.js";
 import { HostLink, type LinkConnection, type LinkTiming } from "./link.js";
 import type { HostShellOptions } from "./session.js";
@@ -52,6 +53,8 @@ export interface HostView extends HostConfig {
    * sessions anyway once nothing talks to it.
    */
   abandoned?: InstanceInfo;
+  /** Root with approval: whether its key is stored, and whether this Dispatch can ask for approval at all. */
+  elevation: { on: boolean; canAsk: boolean };
 }
 
 export class HostRegistry {
@@ -149,7 +152,7 @@ export class HostRegistry {
 
   list(): HostView[] {
     const prev = this.deps.previousInstanceId;
-    return [...this.entries.values()].map(({ host, link }) => {
+    return [...this.entries.values()].map(({ host, link, backend }) => {
       const abandoned = prev && prev !== this.deps.instanceId ? link.probe?.instances?.find((i) => i.id === prev) : undefined;
       return {
         ...host,
@@ -158,8 +161,14 @@ export class HostRegistry {
         ...(link.address ? { address: link.address } : {}),
         ...(link.probe ? { probe: link.probe } : {}),
         ...(abandoned ? { abandoned } : {}),
+        elevation: { on: backend.elevation.configured, canAsk: backend.elevation.canAsk },
       };
     });
+  }
+
+  /** Look again at which machines have elevation on (the pane, the other instance, may have changed it). */
+  async refreshElevation(): Promise<void> {
+    await Promise.all([...this.entries.values()].map((e) => e.backend.elevation.refresh().catch(() => undefined)));
   }
 
   /** Dispatch listed the chats that exist: each machine drops what it holds for any other. */
@@ -167,16 +176,43 @@ export class HostRegistry {
     for (const e of this.entries.values()) e.backend.reconcile(live, at);
   }
 
-  /** The plugin is being uninstalled: every reachable machine forgets this instance. Bounded by `timeoutMs`. */
+  /**
+   * The plugin is being uninstalled: every reachable machine forgets this
+   * instance, and root with approval is taken out wherever it is on (nothing
+   * would be left to ask the user). Bounded by `timeoutMs`.
+   */
   async forgetAll(timeoutMs: number): Promise<void> {
     const { ctx } = this.deps;
     await Promise.all(
-      [...this.entries.values()].map((e) =>
+      [...this.entries.values()].flatMap((e) => [
         e.backend.forgetAll(timeoutMs).catch((err: unknown) => {
           ctx.log.warn(`remote-host ${e.host.slug}: could not remove this Dispatch's files there: ${errText(err)}`);
         }),
-      ),
+        this.elevationOff(e, timeoutMs),
+      ]),
     );
+  }
+
+  private async elevationOff(e: Entry, timeoutMs: number): Promise<void> {
+    const { ctx } = this.deps;
+    const name = elevateSecretName(e.host.slug);
+    if (!(await ctx.secrets?.get(name).catch(() => undefined))?.trim()) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<{ there: "unreachable"; detail: string }>((resolve) => {
+      timer = setTimeout(() => resolve({ there: "unreachable", detail: "no answer in time" }), timeoutMs);
+    });
+    const res = await Promise.race([removeElevation(e.backend.elevation), late]);
+    clearTimeout(timer);
+    if (res.there === "removed") {
+      // Kept otherwise: installed again, the plugin can still take it out with it.
+      await ctx.secrets?.delete?.(name);
+      ctx.log.info(`remote-host ${e.host.slug}: elevation removed there`);
+    } else {
+      ctx.log.warn(
+        `remote-host ${e.host.slug}: root with approval is still set up there (${res.detail ?? res.there}); ` +
+          `run "sudo ${HELPER_PATH} uninstall" there to remove it`,
+      );
+    }
   }
 
   /** The plugin is going down: end the shells (KILL down their channels), then close every connection. */

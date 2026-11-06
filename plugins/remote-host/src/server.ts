@@ -6,13 +6,14 @@
 import { definePlugin } from "@dispatch/plugin-sdk";
 import { errText } from "@dispatch-plugins/remote-core";
 import { bundledAgent, nodejsOrgRuntime } from "./agent.js";
+import { ElevationSetups } from "./elevation-setup.js";
 import { readHosts, type HostConfig } from "./hosts.js";
 import { Pairing } from "./pairing.js";
 import { HostRegistry } from "./registry.js";
 import { defineRoutes } from "./routes.js";
 
 /** What one activation holds, for `deactivate`. */
-let live: { registry: HostRegistry; pairing: Pairing; off: () => void } | undefined;
+let live: { registry: HostRegistry; pairing: Pairing; setups: ElevationSetups; off: () => void } | undefined;
 
 export default definePlugin({
   activate(ctx) {
@@ -64,8 +65,9 @@ export default definePlugin({
         ctx.log.error(`remote-host: applying new settings failed: ${errText(err)}`, err);
       }
     });
-    ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, hosts, saveHosts }));
-    live = { registry, pairing, off };
+    const setups = new ElevationSetups();
+    ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, setups, hosts, saveHosts }));
+    live = { registry, pairing, setups, off };
   },
 
   /**
@@ -80,9 +82,10 @@ export default definePlugin({
 
   /**
    * Uninstall: nothing will reconcile this instance's work again, so every
-   * reachable machine ends its sessions and deletes its files now. Disable,
-   * stop and restart keep everything: a session left without Dispatch ends
-   * itself when its heartbeat stops.
+   * reachable machine ends its sessions and deletes its files now, and root
+   * with approval is taken out wherever it is on. Disable, stop and restart
+   * keep everything: a session left without Dispatch ends itself when its
+   * heartbeat stops.
    */
   async onShutdown(e) {
     if (e.reason !== "uninstall" || !live) return;
@@ -94,6 +97,7 @@ export default definePlugin({
     live = undefined;
     l?.off();
     l?.pairing.clear();
+    l?.setups.clear();
     await l?.registry.dispose();
   },
 });

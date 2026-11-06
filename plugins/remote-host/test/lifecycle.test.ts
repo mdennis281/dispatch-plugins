@@ -38,10 +38,21 @@ const until = async (cond: () => boolean, ms = 5_000, what = "condition") => {
   }
 };
 
-function setup(opts: { address?: AddressBehaviour; kv?: Record<string, unknown>; previous?: string; approvals?: Approvals; elevateKey?: string } = {}) {
+function setup(
+  opts: {
+    address?: AddressBehaviour;
+    kv?: Record<string, unknown>;
+    previous?: string;
+    approvals?: Approvals;
+    elevateKey?: string;
+    /** A context without `ctx.approvals`, as a host that withheld it. */
+    withoutApprovals?: boolean;
+  } = {},
+) {
   const m = new FakeMachine({ [ADDR]: opts.address ?? "ok" });
   const t = createTestContext({
     id: "remote-host",
+    ...(opts.withoutApprovals ? { capabilities: ["terminals", "secrets", "secrets:write", "kv", "routes", "ui"] } : {}),
     secrets: { REMOTE_HOST_KEY_STUDIO: "PRIVATE", ...(opts.elevateKey ? { REMOTE_HOST_ELEVATE_KEY_STUDIO: opts.elevateKey } : {}) },
     instance: { id: INSTANCE },
     kv: opts.kv ?? {},
@@ -287,7 +298,7 @@ describe("the agent's note", () => {
     await off.connected();
     await off.r.get("studio")!.backend.elevation.refresh();
     expect(off.r.get("studio")!.backend.agentNote({ chatId: "chat-1" })).toMatch(/nothing can run as root on Studio: elevation isn't set up there/);
-    const old = setup({ elevateKey: "ELEVATE" });
+    const old = setup({ elevateKey: "ELEVATE", withoutApprovals: true });
     await old.connected();
     await old.r.get("studio")!.backend.elevation.refresh();
     expect(old.r.get("studio")!.backend.agentNote({ chatId: "chat-1" })).toMatch(/this Dispatch can't ask the user for\s+approval/);

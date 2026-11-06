@@ -2,7 +2,7 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: remote-host
 name: Remote host
-version: 0.6.0
+version: 0.7.0
 dispatch: ">=1"
 description: >-
   Run a chat's managed terminals on your own machines over SSH. Each paired
@@ -31,3 +31,7 @@ capabilities:
   - kv
   - routes
   - ui
+  # Root with your approval: `sudo` in a chat shell on a machine asks you, on
+  # the same card a tool permission gets, before anything runs as root. A
+  # Dispatch older than plugin approval requests (#512) can't load this.
+  - approvals

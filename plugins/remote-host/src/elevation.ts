@@ -50,7 +50,9 @@ export function displayCommand(argv: readonly string[]): string {
   return argv.map((a) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`)).join(" ");
 }
 
-// ---- core E31, feature-detected: older Dispatches have no `ctx.approvals`.
+// ---- core E31 (Dispatch #512). The manifest declares `approvals`, so a Dispatch without
+// it doesn't load this plugin at all; still looked up, not assumed, so a context without
+// it (a test, a host that withheld it) refuses instead of throwing.
 
 export interface ApprovalRequest {
   title: string;
@@ -129,7 +131,30 @@ interface Job {
 /** Whether this machine can elevate now, for the agent note. */
 export type ElevationState = "on" | "off" | "unsupported";
 
+/** Logging in as the helper's account failed; `kind` says how, for the message. */
+export class ElevationLoginError extends Error {
+  constructor(
+    message: string,
+    readonly kind: "refused" | "host-key" | "unreachable",
+  ) {
+    super(message);
+    this.name = "ElevationLoginError";
+  }
+}
+
+/** A fixed verb's whole answer (`check`, `uninstall`). */
+export interface HelperResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
 const DONE_KEPT = 256;
+/** What core's approval card shows at most (`PLUGIN_APPROVAL_LIMITS`); a longer field makes the request reject. */
+const APPROVAL_COMMAND_MAX = 8_000;
+const APPROVAL_CWD_MAX = 1_000;
+/** How long a fixed verb's login (the pane's Verify, Turn off) keeps trying. */
+const HELPER_CONNECT_MS = 5_000;
 
 export class Elevation {
   private readonly active = new Map<string, Job>();
@@ -138,6 +163,7 @@ export class Elevation {
   private busy = false;
   private readonly waiting: Array<() => void> = [];
   private stateNow?: ElevationState;
+  private keyNow = false;
 
   constructor(private readonly deps: ElevationDeps) {}
 
@@ -146,11 +172,99 @@ export class Elevation {
     return this.stateNow;
   }
 
+  /** Whether this machine's elevation key is stored (as last seen), whether or not this Dispatch can ask for approval. */
+  get configured(): boolean {
+    return this.keyNow;
+  }
+
+  /** Whether this Dispatch can ask the user to approve (core E31). */
+  get canAsk(): boolean {
+    return this.deps.approvals !== undefined;
+  }
+
   /** Look again: the key may have been added or removed (the Settings pane, the other instance). */
   async refresh(): Promise<ElevationState> {
-    const state: ElevationState = !this.deps.approvals ? "unsupported" : (await this.deps.key().catch(() => undefined)) ? "on" : "off";
+    this.keyNow = !!(await this.deps.key().catch(() => undefined));
+    const state: ElevationState = !this.deps.approvals ? "unsupported" : this.keyNow ? "on" : "off";
     this.stateNow = state;
     return state;
+  }
+
+  /**
+   * Log in with `key` (default: the stored one) and run one of the helper's
+   * fixed verbs to its end. No approval: `check` only reports who it runs as,
+   * `uninstall` only takes elevation away, and both are the user's own button
+   * in the Settings pane (or Remove machine, or uninstalling the plugin).
+   */
+  async helper(verb: "check" | "uninstall", key?: string, timeoutMs = 30_000): Promise<HelperResult> {
+    const k = key ?? (await this.deps.key());
+    if (!k) throw new Error(`elevation isn't set up on ${this.deps.host().label}`);
+    // Someone is looking at a button: a few tries, not the full 20 s a waiting command gets.
+    const conn = await this.login(k, undefined, Math.min(this.deps.connectTimeoutMs ?? HELPER_CONNECT_MS, HELPER_CONNECT_MS));
+    try {
+      const ch = await conn.channel(verb);
+      return await new Promise<HelperResult>((resolve, reject) => {
+        const out: Buffer[] = [];
+        const err: Buffer[] = [];
+        let code: number | null | undefined;
+        const timer = setTimeout(() => {
+          try {
+            ch.close();
+          } catch {
+            /* closed already */
+          }
+          reject(new Error(`the helper on ${this.deps.host().label} didn't finish ${verb} within ${Math.round(timeoutMs / 1000)} s`));
+        }, timeoutMs);
+        ch.on("data", (d: Buffer) => out.push(d));
+        ch.stderr.on("data", (d: Buffer) => err.push(d));
+        ch.on("exit", (c: number | null) => (code = typeof c === "number" ? c : null));
+        ch.on("error", () => {
+          /* 'close' follows */
+        });
+        ch.on("close", () => {
+          clearTimeout(timer);
+          resolve({
+            code: code !== undefined ? code : (channelExit(ch)?.code ?? null),
+            stdout: Buffer.concat(out).toString("utf8"),
+            stderr: Buffer.concat(err).toString("utf8"),
+          });
+        });
+      });
+    } finally {
+      conn.close();
+    }
+  }
+
+  /** A connection logged in as the helper's account with `key`, or an {@link ElevationLoginError}. */
+  private async login(key: string, signal?: AbortSignal, deadlineMs = this.deps.connectTimeoutMs ?? 20_000): Promise<ElevationConnection> {
+    const host = this.deps.host();
+    const address = this.deps.address() ?? host.addresses[0]!;
+    const family = dialFamily(address, host.allowFrom);
+    const target: SshTarget = {
+      host: address,
+      port: host.port,
+      username: ELEVATE_USER,
+      privateKey: key,
+      hostVerifier: pinnedHostKey(host.hostKey),
+      algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) as never },
+      // A dead link is noticed in about 15 s, like the shells'.
+      keepalive: { intervalMs: 5_000, countMax: 3 },
+      ...(family ? { family } : {}),
+    };
+    const conn = this.deps.connect ? this.deps.connect(target) : (new SshConnection(target) as ElevationConnection);
+    try {
+      await conn.connect(deadlineMs, signal);
+      return conn;
+    } catch (err) {
+      conn.close();
+      if (signal?.aborted) throw err;
+      const why = errText(err);
+      if (/authentication/i.test(why)) {
+        throw new ElevationLoginError(`${host.label} refused the elevation key`, "refused");
+      }
+      if (/host denied/i.test(why)) throw new ElevationLoginError(`a different host key answered at ${address}`, "host-key");
+      throw new ElevationLoginError(`could not reach ${host.label} (${why})`, "unreachable");
+    }
   }
 
   /** A shell's `dispatch-elevate` asked. Answers it (always, unless the id is unusable), however it ends. */
@@ -199,6 +313,18 @@ export class Elevation {
       return { code: null, error: errText(err) };
     }
     const cmd = displayCommand(msg.argv);
+    // Core shows the command in full or not at all (E31's caps): what can't be shown can't be approved.
+    if (cmd.length > APPROVAL_COMMAND_MAX) {
+      return {
+        code: null,
+        error:
+          `the command is too long to show the user for approval (${cmd.length} characters, at most ${APPROVAL_COMMAND_MAX}); ` +
+          `nothing ran. Put it in a script and run that.`,
+      };
+    }
+    if (msg.cwd.length > APPROVAL_CWD_MAX) {
+      return { code: null, error: `this directory's path is too long to show the user for approval; nothing ran. Run it from a shorter one.` };
+    }
     const approvals = this.deps.approvals;
     if (!approvals) {
       return {
@@ -264,37 +390,23 @@ export class Elevation {
     const host = this.deps.host();
     const key = await this.deps.key();
     if (!key) return { code: null, error: `elevation was turned off on ${host.label} meanwhile; nothing ran` };
-    const address = this.deps.address() ?? host.addresses[0]!;
-    const family = dialFamily(address, host.allowFrom);
-    const target: SshTarget = {
-      host: address,
-      port: host.port,
-      username: ELEVATE_USER,
-      privateKey: key,
-      hostVerifier: pinnedHostKey(host.hostKey),
-      algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) as never },
-      // A dead link is noticed in about 15 s, like the shells'.
-      keepalive: { intervalMs: 5_000, countMax: 3 },
-      ...(family ? { family } : {}),
-    };
-    const conn = this.deps.connect ? this.deps.connect(target) : (new SshConnection(target) as ElevationConnection);
     const { abort, shell, id } = job;
+    let conn: ElevationConnection;
     try {
-      try {
-        await conn.connect(this.deps.connectTimeoutMs ?? 20_000, abort.signal);
-      } catch (err) {
-        if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
-        const why = errText(err);
-        return {
-          code: null,
-          error: /authentication/i.test(why)
-            ? `${host.label} refused the elevation key, so nothing ran. Elevation may have been removed there; the user ` +
-              `can turn it off and set it up again in Settings → Remote hosts.`
-            : /host denied/i.test(why)
-              ? `a different host key answered at ${address}; nothing ran`
-              : `could not reach ${host.label} to run it (${why}); nothing ran`,
-        };
-      }
+      conn = await this.login(key, abort.signal);
+    } catch (err) {
+      if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
+      const kind = err instanceof ElevationLoginError ? err.kind : "unreachable";
+      return {
+        code: null,
+        error:
+          kind === "refused"
+            ? `${host.label} refused the elevation key, so nothing ran. Elevation may have been removed there, or this ` +
+              `computer's address changed; the user can set it up again in Settings → Remote hosts.`
+            : `${errText(err)}; nothing ran`,
+      };
+    }
+    try {
       let ch: ClientChannel;
       try {
         ch = await conn.channel(runCommand(id, cwd, argv));

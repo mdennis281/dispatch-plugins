@@ -330,6 +330,16 @@ describe("elevation", () => {
     expect(a.asked).toHaveLength(0);
     expect(sh.ends.map((e) => e.id)).toEqual(["e-1", "e-2"]); // an unusable id can't even be answered
   });
+
+  it("refuses, without asking, a command too long for the approval card to show in full", async () => {
+    const { el, a } = setup();
+    const sh = new FakeShell();
+    await el.handle(req("e-1", ["sh", "-c", "x".repeat(8_001)]), origin, sh);
+    await el.handle(req("e-2", ["id"], `/${"d".repeat(1_000)}`), origin, sh);
+    expect(a.asked).toHaveLength(0);
+    expect(sh.ends[0]!.error).toMatch(/too long to show the user for approval \(\d+ characters, at most 8000\); nothing ran/);
+    expect(sh.ends[1]!.error).toMatch(/directory's path is too long/);
+  });
 });
 
 describe("elevation's wire format and helpers", () => {
