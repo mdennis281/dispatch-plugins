@@ -540,6 +540,13 @@ function brewNote(brew: NonNullable<ProbeResult["brew"]>): string {
     );
   }
   const ver = token(brew.version?.replace(/^\D*(?=\d)/, ""));
+  if (brew.writable === false) {
+    // Another account's Homebrew, shared through /etc/paths.d: every install would fail on its prefix.
+    return (
+      `- Homebrew${ver ? ` ${ver}` : ""} is installed there${at}, but another account owns it: use what it has installed, ` +
+      `and don't \`brew install\` (it can't write there) or use sudo. If a tool is missing, tell the user.`
+    );
+  }
   return (
     `- Homebrew${ver ? ` ${ver}` : ""} is installed there${at}: install a tool the machine lacks with ` +
     `\`brew install <formula>\`. No sudo: never \`sudo brew\`. It stays installed for every chat using this machine, so ` +

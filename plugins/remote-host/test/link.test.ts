@@ -473,13 +473,13 @@ describe("statusFrom", () => {
   it("says Homebrew is blocked, why, and the one fix; a brew that runs is no issue", () => {
     const XCODE = "/Applications/Xcode.app/Contents/Developer";
     const blocked = `Xcode's license isn't accepted (exit 69), and Homebrew ignores DEVELOPER_DIR, so it uses xcode-select's ${XCODE}`;
-    expect(statusFrom({ ...PROBE, brew: { path: "/opt/homebrew/bin/brew", version: "Homebrew 7.0.12", blocked } }, 5)).toEqual({
+    expect(statusFrom({ ...PROBE, brew: { path: "/opt/homebrew/bin/brew", version: "Homebrew 7.0.12", writable: true, blocked } }, 5)).toEqual({
       state: "degraded",
       detail:
         `Homebrew (/opt/homebrew/bin/brew) won't run: ${blocked}. Point xcode-select at the Command Line Tools ` +
         "(sudo xcode-select -s /Library/Developer/CommandLineTools), or accept the license (sudo xcodebuild -license accept)",
       lastSeenAt: 5,
     });
-    expect(statusFrom({ ...PROBE, brew: { path: "/opt/homebrew/bin/brew", version: "Homebrew 7.0.12" } }, 5)).toEqual({ state: "online", lastSeenAt: 5 });
+    expect(statusFrom({ ...PROBE, brew: { path: "/opt/homebrew/bin/brew", version: "Homebrew 7.0.12", writable: true } }, 5)).toEqual({ state: "online", lastSeenAt: 5 });
   });
 });

@@ -3,7 +3,7 @@
  * whether it runs, as on a Mac whose Xcode's license isn't accepted. POSIX
  * only (the fakes are `#!/bin/sh` scripts); CI runs it on Linux and macOS.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -107,6 +107,7 @@ describe.skipIf(!posix)("checkBrew", () => {
     expect(await checkBrew(env, { developerDir: XCODE }, x.path)).toEqual({
       path: join(b, "brew"),
       version: "Homebrew 7.0.12",
+      writable: true,
       blocked: `Xcode's license isn't accepted (exit 69), and Homebrew ignores DEVELOPER_DIR, so it uses xcode-select's ${XCODE}`,
     });
     // Asked the way brew asks: with no DEVELOPER_DIR.
@@ -117,15 +118,15 @@ describe.skipIf(!posix)("checkBrew", () => {
     const b = bin(BREW, "brew");
     const ok = bin(`echo ${CLT_DEVELOPER_DIR}/usr/bin/clang`, "xcrun");
     const env = { ...process.env, PATH: `${b}:${process.env.PATH}` };
-    expect(await checkBrew(env, { developerDir: CLT_DEVELOPER_DIR }, join(ok, "xcrun"))).toEqual({ path: join(b, "brew"), version: "Homebrew 7.0.12" });
+    expect(await checkBrew(env, { developerDir: CLT_DEVELOPER_DIR }, join(ok, "xcrun"))).toEqual({ path: join(b, "brew"), version: "Homebrew 7.0.12", writable: true });
   });
 
   it("doesn't run xcrun with no developer directory chosen (brew skips it too, and the stub would open a dialog), nor off a Mac", async () => {
     const b = bin(BREW, "brew");
     const x = xcrun();
     const env = { ...process.env, PATH: `${b}:${process.env.PATH}` };
-    expect(await checkBrew(env, { developerDir: null }, x.path)).toEqual({ path: join(b, "brew"), version: "Homebrew 7.0.12" });
-    expect(await checkBrew(env, undefined, x.path)).toEqual({ path: join(b, "brew"), version: "Homebrew 7.0.12" });
+    expect(await checkBrew(env, { developerDir: null }, x.path)).toEqual({ path: join(b, "brew"), version: "Homebrew 7.0.12", writable: true });
+    expect(await checkBrew(env, undefined, x.path)).toEqual({ path: join(b, "brew"), version: "Homebrew 7.0.12", writable: true });
     expect(existsSync(x.ran)).toBe(false);
   });
 
@@ -133,6 +134,23 @@ describe.skipIf(!posix)("checkBrew", () => {
     const empty = mkdtempSync(join(tmpdir(), "dh-probe-"));
     dirs.push(empty);
     expect(await checkBrew({ ...process.env, PATH: empty }, { developerDir: XCODE })).toBeUndefined();
+  });
+
+  // Root writes anywhere, so a read-only prefix proves nothing there.
+  it.skipIf(process.getuid?.() === 0)("says this account can't install with a Homebrew whose prefix another account owns", async () => {
+    const prefix = mkdtempSync(join(tmpdir(), "dh-brew-"));
+    dirs.push(prefix);
+    mkdirSync(join(prefix, "Cellar"));
+    mkdirSync(join(prefix, "bin"));
+    const b = bin(`case "$1" in --prefix) echo '${prefix}';; *) echo "Homebrew 7.0.12";; esac`, "brew");
+    const env = { ...process.env, PATH: `${b}:${process.env.PATH}` };
+    expect(await checkBrew(env, undefined)).toEqual({ path: join(b, "brew"), version: "Homebrew 7.0.12", writable: true });
+    chmodSync(join(prefix, "Cellar"), 0o555);
+    try {
+      expect(await checkBrew(env, undefined)).toMatchObject({ writable: false });
+    } finally {
+      chmodSync(join(prefix, "Cellar"), 0o755);
+    }
   });
 });
 

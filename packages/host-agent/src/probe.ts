@@ -38,6 +38,12 @@ export interface BrewCheck {
   version: string | null;
   /** Why every other brew command stops at once; absent when brew runs. */
   blocked?: string;
+  /**
+   * This account can install with it: Homebrew's prefix (its Cellar, and its
+   * bin) is writable. False for a Homebrew another account owns, shared
+   * through /etc/paths.d: usable, but every `brew install` fails.
+   */
+  writable: boolean;
 }
 
 export interface ProbeResult {
@@ -165,8 +171,12 @@ export async function checkBrew(
 ): Promise<BrewCheck | undefined> {
   const path = which("brew", env.PATH);
   if (!path) return undefined;
-  const v = await out(path, ["--version"], env);
+  // Both answer before brew's check, so even a blocked brew says where it lives.
+  const [v, p] = await Promise.all([out(path, ["--version"], env), out(path, ["--prefix"], env)]);
   const version = v.code === 0 && v.stdout ? v.stdout.split("\n")[0]!.trim() : null;
+  const said = p.code === 0 ? p.stdout.split("\n")[0]!.trim() : "";
+  const prefix = said.startsWith("/") && isDir(said) ? said : posix.dirname(posix.dirname(path));
+  const writable = brewWritable(prefix);
   let blocked: string | undefined;
   if (mac?.developerDir) {
     const r = await out(xcrun, ["--find", "clang"], { HOME: env.HOME, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });
@@ -174,7 +184,34 @@ export async function checkBrew(
       blocked = `Xcode's license isn't accepted (exit ${r.code}), and Homebrew ignores DEVELOPER_DIR, so it uses xcode-select's ${mac.developerDir}`;
     }
   }
-  return { path, version, ...(blocked ? { blocked } : {}) };
+  return { path, version, ...(blocked ? { blocked } : {}), writable };
+}
+
+function isDir(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `brew install` can write where it installs: the Cellar (the prefix
+ * itself before the first install made one) and bin, where it links. Not the
+ * prefix alone: an Intel Mac's /usr/local is root's, its Homebrew directories
+ * the user's.
+ */
+function brewWritable(prefix: string): boolean {
+  const cellar = posix.join(prefix, "Cellar");
+  const bin = posix.join(prefix, "bin");
+  return [isDir(cellar) ? cellar : prefix, ...(isDir(bin) ? [bin] : [])].every((d) => {
+    try {
+      accessSync(d, constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function osRelease(): ProbeResult["os"] {

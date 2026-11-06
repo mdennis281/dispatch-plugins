@@ -198,15 +198,18 @@ the second option.
      sudo -u dispatch -H /bin/sh -c 'curl -fsSL https://github.com/Homebrew/brew/tarball/main | tar xz --strip-components 1 -C /opt/homebrew'
      ```
 
-3. Put it on `dispatch`'s login `PATH`, once, as `dispatch`:
+3. Put it on `dispatch`'s login `PATH`, once, as `dispatch`. The `.zprofile` line counts from the next login
+   shell, so the `eval` line puts brew on this shell's `PATH` too:
 
    ```sh
    grep -q 'brew shellenv' ~/.zprofile 2>/dev/null || echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+   eval "$(/opt/homebrew/bin/brew shellenv)"
    brew install node pnpm
    ```
 
 **Or** keep Homebrew in your own admin account and make it visible to every user. Chats can then use what you
-install, but not install anything themselves:
+install, but not install anything themselves (Dispatch sees that `dispatch` can't write to it, and tells the agent
+so):
 
 ```sh
 # Skip the first line if `brew --version` already works in your account.
