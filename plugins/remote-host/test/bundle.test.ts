@@ -79,7 +79,7 @@ describe("the manifest", () => {
   it("asks for what the plugin uses and no more", () => {
     expect(capabilities).toEqual(["terminals", "secrets", "secrets:write", "kv", "routes", "ui"]);
     // Used where the host has them; an older Dispatch loads the plugin without them.
-    expect(optionalCapabilities).toEqual(["approvals", "runner"]);
+    expect(optionalCapabilities).toEqual(["approvals", "runner", "tools"]);
     expect(manifestSecrets).toEqual(["REMOTE_HOST_KEY_*", "REMOTE_HOST_ELEVATE_KEY_*"]);
     expect(manifest).toMatch(/^id: remote-host$/m);
     const pkg = JSON.parse(readFileSync(`${dir}/package.json`, "utf8")) as { version: string };
@@ -271,5 +271,20 @@ describe("routes", () => {
     // The agent is told root needs a newer Dispatch.
     const note = t.terminalBackends.get("remote-host/lab")!.agentNote?.({ chatId: "chat-1" } as never) ?? "";
     expect(note).toMatch(/Root: nothing can run as root on LAB: .*needs a newer Dispatch/);
+    // No ctx.tools: no agent tools, and the note doesn't offer them.
+    expect((t.ctx as { tools?: unknown }).tools).toBeUndefined();
+    expect(t.tools.list()).toEqual([]);
+    expect(note).not.toContain("remote_fetch");
+  });
+
+  it("gives the agent remote_fetch and machine_status where this Dispatch has ctx.tools, and its note names them", async () => {
+    const port = await closedPort();
+    const t = await activate({ settings: { hosts: [host("lab", port)] }, secrets: { REMOTE_HOST_KEY_LAB: "k" } });
+    expect(t.tools.list()).toEqual(["machine_status", "remote_fetch"]);
+    const note = t.terminalBackends.get("remote-host/lab")!.agentNote?.({ chatId: "chat-1" } as never) ?? "";
+    expect(note).toContain("call remote-host's `remote_fetch` tool");
+    // Nothing reachable: the tool says why instead of hanging.
+    const r = await t.tools.call("machine_status", {}, { chatId: "chat-1" });
+    expect(r.content[0]).toMatchObject({ type: "text", text: expect.stringMatching(/^LAB \(terminal location remote-host\/lab\): /) });
   });
 });

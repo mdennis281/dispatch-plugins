@@ -25,7 +25,7 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
   const max = opts.maxBytes ?? MAX_COPY_BYTES;
   const ms = opts.timeoutMs ?? COPY_MS;
   return {
-    async fetch(from, to) {
+    async fetch(from, to, signal) {
       await mkdir(dirname(to), { recursive: true });
       const part = `${to}.part-${process.pid}`;
       const out = createWriteStream(part);
@@ -39,7 +39,8 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
       ].join("\n");
       let r: { code: number | null; stderr: string };
       try {
-        r = await remote.stream(script, { output: out }, AbortSignal.timeout(ms));
+        const stop = signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
+        r = await remote.stream(script, { output: out }, stop);
       } catch (err) {
         // No channel (the machine is offline): nothing was piped, so close and drop the temporary here.
         out.destroy();
@@ -48,6 +49,10 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
         throw err;
       }
       await closed;
+      if (signal?.aborted) {
+        await rm(part, { force: true });
+        throw new Error("cancelled");
+      }
       if (r.code !== 0) {
         await rm(part, { force: true });
         if (r.code === NO_FILE) return false;

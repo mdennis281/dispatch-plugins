@@ -38,8 +38,11 @@ export interface BridgeInner {
 }
 
 export interface BridgeFiles {
-  /** Copy a file there to `local`. False when there is no such file there. Rejects when it can't (too big, no link). */
-  fetch(remote: string, local: string): Promise<boolean>;
+  /**
+   * Copy a file there to `local`. False when there is no such file there.
+   * Rejects when it can't (too big, no link), or when `signal` aborts.
+   */
+  fetch(remote: string, local: string, signal?: AbortSignal): Promise<boolean>;
   /** Copy a local file to `remote` there. */
   upload(local: string, remote: string): Promise<void>;
 }

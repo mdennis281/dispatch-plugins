@@ -22,11 +22,11 @@ import require$$1$2 from "zlib";
 import { StringDecoder } from "node:string_decoder";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { stat, copyFile, utimes, mkdir, readFile, rename, rm, lstat, readdir, writeFile, chmod, mkdtemp, rmdir, access, realpath } from "node:fs/promises";
+import { stat, copyFile, utimes, mkdir, readFile, rename, rm, lstat, readdir, writeFile, chmod, mkdtemp, rmdir, access, realpath, open } from "node:fs/promises";
 import { tmpdir, hostname, networkInterfaces } from "node:os";
-import { posix, join, dirname, basename, relative, isAbsolute, sep, resolve } from "node:path";
-import { createWriteStream, createReadStream } from "node:fs";
-import { Readable, PassThrough } from "node:stream";
+import { posix, join, dirname, basename, relative, isAbsolute, sep, resolve, extname } from "node:path";
+import { createWriteStream, createReadStream, existsSync } from "node:fs";
+import { Readable, PassThrough, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -13451,15 +13451,15 @@ function requireSFTP() {
     writeData(handle, buf, off, len, position, cb) {
       this.write(handle, buf, off, len, position, cb);
     }
-    fastGet(remotePath, localPath, opts, cb) {
+    fastGet(remotePath2, localPath, opts, cb) {
       if (this.server)
         throw new Error("Client-only method called in server mode");
-      fastXfer(this, fs, remotePath, localPath, opts, cb);
+      fastXfer(this, fs, remotePath2, localPath, opts, cb);
     }
-    fastPut(localPath, remotePath, opts, cb) {
+    fastPut(localPath, remotePath2, opts, cb) {
       if (this.server)
         throw new Error("Client-only method called in server mode");
-      fastXfer(fs, this, localPath, remotePath, opts, cb);
+      fastXfer(fs, this, localPath, remotePath2, opts, cb);
     }
     readFile(path, options, callback_) {
       if (this.server)
@@ -20179,16 +20179,16 @@ class RemoteShell extends EventEmitter {
    */
   outText = new StringDecoder("utf8");
   errText = new StringDecoder("utf8");
-  onStderr(text) {
-    if (text) this.stderr.emit("data", text);
+  onStderr(text2) {
+    if (text2) this.stderr.emit("data", text2);
   }
-  onStdout(text) {
-    if (!text) return;
+  onStdout(text2) {
+    if (!text2) return;
     if (this.pid !== void 0) {
-      this.stdout.emit("data", text);
+      this.stdout.emit("data", text2);
       return;
     }
-    this.head += text;
+    this.head += text2;
     const nl = this.head.indexOf("\n");
     if (nl < 0) return;
     const first = this.head.slice(0, nl);
@@ -20935,6 +20935,437 @@ function nodejsOrgRuntime(opts = {}) {
     }
   };
 }
+const KEY_LINE = 2;
+const PLUGIN_ID = "remote-host";
+const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/;
+function backendId(slug) {
+  return `${PLUGIN_ID}/${slug}`;
+}
+function keySecretName(slug) {
+  return `REMOTE_HOST_KEY_${slug.toUpperCase().replace(/-/g, "_")}`;
+}
+function elevateSecretName(slug) {
+  return `REMOTE_HOST_ELEVATE_KEY_${slug.toUpperCase().replace(/-/g, "_")}`;
+}
+const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
+const ADDRESS = /^[A-Za-z0-9._:%-]{1,253}$/;
+const USER = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
+function readHosts(raw, warn = () => {
+}) {
+  if (raw === void 0 || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    warn("settings.hosts is not a list; no machines are configured");
+    return [];
+  }
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const [i, h] of raw.entries()) {
+    const why = invalid(h);
+    if (why) {
+      warn(`settings.hosts[${i}] skipped: ${why}`);
+      continue;
+    }
+    const host = h;
+    if (seen.has(host.slug)) {
+      warn(`settings.hosts[${i}] skipped: ${host.slug} is listed twice`);
+      continue;
+    }
+    seen.add(host.slug);
+    out.push({
+      slug: host.slug,
+      label: host.label,
+      user: host.user,
+      addresses: [...host.addresses],
+      port: typeof host.port === "number" ? host.port : 22,
+      hostKey: host.hostKey,
+      hostKeyType: host.hostKeyType,
+      keyFingerprint: host.keyFingerprint,
+      allowFrom: [...host.allowFrom],
+      pairedAt: host.pairedAt,
+      ...Number.isInteger(host.keyLine) && host.keyLine > 0 ? { keyLine: host.keyLine } : {}
+    });
+  }
+  return out;
+}
+function invalid(h) {
+  if (!h || typeof h !== "object") return "not an object";
+  const o = h;
+  if (typeof o.slug !== "string" || !SLUG_PATTERN.test(o.slug)) return "no valid slug";
+  if (typeof o.label !== "string" || !o.label.trim()) return `${o.slug}: no label`;
+  if (typeof o.user !== "string" || !USER.test(o.user)) return `${o.slug}: no valid user`;
+  if (!Array.isArray(o.addresses) || !o.addresses.length || !o.addresses.every((a) => typeof a === "string" && ADDRESS.test(a))) {
+    return `${o.slug}: no valid addresses`;
+  }
+  if (o.port !== void 0 && !(Number.isInteger(o.port) && o.port > 0 && o.port < 65536)) return `${o.slug}: bad port`;
+  if (typeof o.hostKey !== "string" || !FINGERPRINT.test(o.hostKey)) return `${o.slug}: no pinned host key`;
+  if (typeof o.hostKeyType !== "string" || !HOST_KEY_TYPES.includes(o.hostKeyType)) {
+    return `${o.slug}: no usable host key type`;
+  }
+  if (typeof o.keyFingerprint !== "string" || !FINGERPRINT.test(o.keyFingerprint)) return `${o.slug}: no client key fingerprint`;
+  if (!Array.isArray(o.allowFrom) || !o.allowFrom.length || !o.allowFrom.every((a) => typeof a === "string" && validFrom(a))) {
+    return `${o.slug}: no valid allowFrom`;
+  }
+  if (typeof o.pairedAt !== "string") return `${o.slug}: no pairedAt`;
+  return void 0;
+}
+function validAddress(a) {
+  return ADDRESS.test(a);
+}
+function validFrom(a) {
+  const m = a.match(/^([0-9a-fA-F:.]+)(?:\/(\d{1,3}))?$/);
+  if (!m) return false;
+  const ip = m[1];
+  const v = isIP(ip);
+  if (!v) return false;
+  if (m[2] === void 0) return true;
+  const bits = Number(m[2]);
+  return v === 4 ? bits >= 8 && bits <= 32 : bits >= 32 && bits <= 128;
+}
+function dialFamily(address, allowFrom) {
+  if (isIP(address)) return void 0;
+  return allowFrom.length > 0 && allowFrom.every((a) => isIP(a.split("/")[0]) === 4) ? 4 : void 0;
+}
+const HOST_KEY_TYPES = ["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa"];
+function hostKeyAlgorithms(type) {
+  return type === "ssh-rsa" ? ["rsa-sha2-512", "rsa-sha2-256"] : [type];
+}
+function validUser(u) {
+  return USER.test(u);
+}
+function connectionChanged(a, b) {
+  return a.user !== b.user || a.port !== b.port || a.hostKey !== b.hostKey || a.hostKeyType !== b.hostKeyType || a.keyFingerprint !== b.keyFingerprint || a.addresses.join("\n") !== b.addresses.join("\n");
+}
+const ELEVATE_USER = "_dispatchelevate";
+const HELPER_PATH = "/usr/local/libexec/dispatch-elevate";
+function runCommand(id, cwd, argv) {
+  if (!ELEVATE_ID.test(id)) throw new Error("bad elevation id");
+  const payload = [cwd, ...argv].map((s) => `${s}\0`).join("");
+  return `run ${id} ${Buffer.from(payload, "utf8").toString("base64")}`;
+}
+function displayCommand(argv) {
+  return argv.map((a) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
+}
+function approvalsOf(ctx) {
+  const a = ctx?.approvals;
+  return a && typeof a.request === "function" ? a : void 0;
+}
+class ElevationLoginError extends Error {
+  constructor(message, kind2) {
+    super(message);
+    this.kind = kind2;
+    this.name = "ElevationLoginError";
+  }
+}
+const DONE_KEPT = 256;
+const APPROVAL_COMMAND_MAX = 8e3;
+const APPROVAL_CWD_MAX = 1e3;
+const HELPER_CONNECT_MS = 5e3;
+class Elevation {
+  constructor(deps) {
+    this.deps = deps;
+  }
+  active = /* @__PURE__ */ new Map();
+  /** Recently finished ids: the owner sends open requests again after a reconnect, and one may have just finished. */
+  done = /* @__PURE__ */ new Set();
+  busy = false;
+  waiting = [];
+  stateNow;
+  keyNow = false;
+  /** Whether elevation is set up here (as last seen), for the agent note. Undefined until {@link refresh} ran. */
+  get state() {
+    return this.stateNow;
+  }
+  /** Whether this machine's elevation key is stored (as last seen), whether or not this Dispatch can ask for approval. */
+  get configured() {
+    return this.keyNow;
+  }
+  /** Whether this Dispatch can ask the user to approve (core E31). */
+  get canAsk() {
+    return this.deps.approvals !== void 0;
+  }
+  /** Look again: the key may have been added or removed (the Settings pane, the other instance). */
+  async refresh() {
+    this.keyNow = !!await this.deps.key().catch(() => void 0);
+    const state = !this.deps.approvals ? "unsupported" : this.keyNow ? "on" : "off";
+    this.stateNow = state;
+    return state;
+  }
+  /**
+   * Log in with `key` (default: the stored one) and run one of the helper's
+   * fixed verbs to its end. No approval: `check` only reports who it runs as,
+   * `uninstall` only takes elevation away, and both are the user's own button
+   * in the Settings pane (or Remove machine, or uninstalling the plugin).
+   */
+  async helper(verb, key2, timeoutMs = 3e4) {
+    const k = key2 ?? await this.deps.key();
+    if (!k) throw new Error(`elevation isn't set up on ${this.deps.host().label}`);
+    const conn = await this.login(k, void 0, Math.min(this.deps.connectTimeoutMs ?? HELPER_CONNECT_MS, HELPER_CONNECT_MS));
+    try {
+      const ch = await conn.channel(verb);
+      return await new Promise((resolve2, reject) => {
+        const out = [];
+        const err = [];
+        let code;
+        const timer = setTimeout(() => {
+          try {
+            ch.close();
+          } catch {
+          }
+          reject(new Error(`the helper on ${this.deps.host().label} didn't finish ${verb} within ${Math.round(timeoutMs / 1e3)} s`));
+        }, timeoutMs);
+        ch.on("data", (d) => out.push(d));
+        ch.stderr.on("data", (d) => err.push(d));
+        ch.on("exit", (c) => code = typeof c === "number" ? c : null);
+        ch.on("error", () => {
+        });
+        ch.on("close", () => {
+          clearTimeout(timer);
+          resolve2({
+            code: code !== void 0 ? code : channelExit(ch)?.code ?? null,
+            stdout: Buffer.concat(out).toString("utf8"),
+            stderr: Buffer.concat(err).toString("utf8")
+          });
+        });
+      });
+    } finally {
+      conn.close();
+    }
+  }
+  /** A connection logged in as the helper's account with `key`, or an {@link ElevationLoginError}. */
+  async login(key2, signal, deadlineMs = this.deps.connectTimeoutMs ?? 2e4) {
+    const host = this.deps.host();
+    const address = this.deps.address() ?? host.addresses[0];
+    const family = dialFamily(address, host.allowFrom);
+    const target = {
+      host: address,
+      port: host.port,
+      username: ELEVATE_USER,
+      privateKey: key2,
+      hostVerifier: pinnedHostKey(host.hostKey),
+      algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) },
+      // A dead link is noticed in about 15 s, like the shells'.
+      keepalive: { intervalMs: 5e3, countMax: 3 },
+      ...family ? { family } : {}
+    };
+    const conn = this.deps.connect ? this.deps.connect(target) : new SshConnection(target);
+    try {
+      await conn.connect(deadlineMs, signal);
+      return conn;
+    } catch (err) {
+      conn.close();
+      if (signal?.aborted) throw err;
+      const why = errText$1(err);
+      if (/authentication/i.test(why)) {
+        throw new ElevationLoginError(`${host.label} refused the elevation key`, "refused");
+      }
+      if (/host denied/i.test(why)) throw new ElevationLoginError(`a different host key answered at ${address}`, "host-key");
+      throw new ElevationLoginError(`could not reach ${host.label} (${why})`, "unreachable");
+    }
+  }
+  /** A shell's `dispatch-elevate` asked. Answers it (always, unless the id is unusable), however it ends. */
+  async handle(req, origin, shell) {
+    if (typeof req.id !== "string" || !ELEVATE_ID.test(req.id)) {
+      this.deps.log.warn(`remote-host ${this.deps.host().slug}: an elevation request with an unusable id was ignored`);
+      return;
+    }
+    const id = req.id;
+    if (this.active.has(id) || this.done.has(id)) return;
+    const job = { id, origin, shell, abort: new AbortController() };
+    this.active.set(id, job);
+    let end;
+    try {
+      end = await this.process(job, req);
+    } catch (err) {
+      end = { code: null, error: `elevation failed: ${errText$1(err)}` };
+    } finally {
+      this.active.delete(id);
+      this.done.add(id);
+      if (this.done.size > DONE_KEPT) this.done.delete(this.done.values().next().value);
+      shell.release(id);
+    }
+    shell.elevateEnd({ id, ...end });
+  }
+  /** The asker went away (Ctrl-C): withdraw the card, or stop the command there. */
+  cancel(id) {
+    this.active.get(id)?.abort.abort();
+  }
+  /** The shell ended: everything it asked for is withdrawn. */
+  cancelShell(shell) {
+    for (const job of this.active.values()) if (job.shell === shell) job.abort.abort();
+  }
+  async process(job, req) {
+    const host = this.deps.host();
+    const label = host.label;
+    const { id, shell, abort } = job;
+    const note = (line) => shell.elevateOutput(id, 2, Buffer.from(`dispatch-elevate: ${line}
+`, "utf8"));
+    let msg;
+    try {
+      msg = checkElevate(req);
+    } catch (err) {
+      return { code: null, error: errText$1(err) };
+    }
+    const cmd = displayCommand(msg.argv);
+    if (cmd.length > APPROVAL_COMMAND_MAX) {
+      return {
+        code: null,
+        error: `the command is too long to show the user for approval (${cmd.length} characters, at most ${APPROVAL_COMMAND_MAX}); nothing ran. Put it in a script and run that.`
+      };
+    }
+    if (msg.cwd.length > APPROVAL_CWD_MAX) {
+      return { code: null, error: `this directory's path is too long to show the user for approval; nothing ran. Run it from a shorter one.` };
+    }
+    const approvals = this.deps.approvals;
+    if (!approvals) {
+      return {
+        code: null,
+        error: `nothing can run as root on ${label}: this Dispatch has no way to ask the user for approval (it needs a newer Dispatch). Don't try to work around it; tell the user what needs root, and why.`
+      };
+    }
+    if (!await this.deps.key()) {
+      return {
+        code: null,
+        error: `elevation isn't set up on ${label}, so nothing can run as root there. The user can turn it on in Settings → Remote hosts → ${label}. Don't try to work around it; tell the user what needs root, and why.`
+      };
+    }
+    if (this.busy) {
+      note(`another command is waiting for approval or running as root on ${label}; this one waits its turn`);
+      shell.hold(id, `waiting for another root command on ${label} to finish`);
+    }
+    if (!await this.acquire(abort.signal)) return { code: null, error: "cancelled while it waited its turn; nothing ran" };
+    try {
+      note(`asking the user to approve running this as root on ${label}: ${cmd}`);
+      shell.hold(id, `waiting for the user to approve: sudo ${cmd}`.slice(0, 180));
+      const where = `${job.origin.chatId}/${job.origin.terminal}`;
+      let answer2;
+      try {
+        answer2 = await approvals.request(job.origin.chatId, {
+          title: `Run as root on ${label}`,
+          detail: `A command in this chat's terminal "${job.origin.terminal}" on ${label} asked for root (sudo). Approving runs it once, as root, in that directory, with no input. Nothing else is allowed by it.`,
+          command: cmd,
+          cwd: msg.cwd,
+          machine: label,
+          timeoutSeconds: this.deps.approvalTimeoutSeconds ?? 300,
+          signal: abort.signal
+        });
+      } catch (err) {
+        if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
+        return { code: null, error: `asking the user for approval failed (${errText$1(err)}); nothing ran` };
+      }
+      shell.release(id);
+      const by = answer2.by ? ` by ${answer2.by}` : "";
+      this.deps.log.info(`remote-host ${host.slug}: elevation ${id} from ${where}: ${cmd} → ${answer2.decision}${by}`);
+      if (abort.signal.aborted || answer2.decision === "cancelled") return { code: null, error: "cancelled; nothing ran" };
+      if (answer2.decision === "denied") return { code: null, error: `the user denied running this as root${by}; nothing ran` };
+      if (answer2.decision !== "approved") {
+        return { code: null, error: `no answer from the user within ${this.deps.approvalTimeoutSeconds ?? 300} s; nothing ran` };
+      }
+      note(`approved${by}; running as root on ${label}`);
+      return await this.run(job, msg.cwd, msg.argv);
+    } finally {
+      this.releaseTurn();
+    }
+  }
+  /** Log in as the helper's account with the elevation key, and run it there. */
+  async run(job, cwd, argv) {
+    const host = this.deps.host();
+    const key2 = await this.deps.key();
+    if (!key2) return { code: null, error: `elevation was turned off on ${host.label} meanwhile; nothing ran` };
+    const { abort, shell, id } = job;
+    let conn;
+    try {
+      conn = await this.login(key2, abort.signal);
+    } catch (err) {
+      if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
+      const kind2 = err instanceof ElevationLoginError ? err.kind : "unreachable";
+      return {
+        code: null,
+        error: kind2 === "refused" ? `${host.label} refused the elevation key, so nothing ran. Elevation may have been removed there, or this computer's address changed; the user can set it up again in Settings → Remote hosts.` : `${errText$1(err)}; nothing ran`
+      };
+    }
+    try {
+      let ch;
+      try {
+        ch = await conn.channel(runCommand(id, cwd, argv));
+      } catch (err) {
+        return { code: null, error: `the root helper on ${host.label} did not start (${errText$1(err)}); nothing ran` };
+      }
+      if (abort.signal.aborted) {
+        try {
+          ch.close();
+        } catch {
+        }
+        return { code: null, error: `cancelled as it started; ${host.label} was told to stop it` };
+      }
+      return await new Promise((resolve2) => {
+        let code = null;
+        let signal = null;
+        let exited = false;
+        const onAbort = () => {
+          try {
+            ch.close();
+          } catch {
+          }
+        };
+        abort.signal.addEventListener("abort", onAbort, { once: true });
+        ch.on("data", (d) => shell.elevateOutput(id, 1, d));
+        ch.stderr.on("data", (d) => shell.elevateOutput(id, 2, d));
+        ch.on("exit", (c, s) => {
+          exited = true;
+          code = typeof c === "number" ? c : null;
+          signal = s ?? null;
+        });
+        ch.on("error", () => {
+        });
+        ch.on("close", () => {
+          abort.signal.removeEventListener("abort", onAbort);
+          if (abort.signal.aborted) return resolve2({ code: null, error: `cancelled while it ran; ${host.label} was told to stop it` });
+          const early = exited ? void 0 : channelExit(ch);
+          if (early) {
+            exited = true;
+            code = early.code;
+            signal = early.signal ?? null;
+          }
+          if (!exited) {
+            return resolve2({
+              code: null,
+              error: `the connection to ${host.label} ended while it ran; it was stopped there, or it may have finished`
+            });
+          }
+          resolve2({ code, ...signal ? { signal } : {} });
+        });
+      });
+    } finally {
+      conn.close();
+    }
+  }
+  /** Wait for this machine's turn. False if cancelled meanwhile. */
+  acquire(signal) {
+    if (signal.aborted) return Promise.resolve(false);
+    if (!this.busy) {
+      this.busy = true;
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve2) => {
+      const go = () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve2(true);
+      };
+      const onAbort = () => {
+        const at = this.waiting.indexOf(go);
+        if (at >= 0) this.waiting.splice(at, 1);
+        resolve2(false);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.waiting.push(go);
+    });
+  }
+  releaseTurn() {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.busy = false;
+  }
+}
 const helperTemplate = `#!/bin/bash
 # dispatch-elevate: runs one command as root for Dispatch's remote-host
 # plugin, after the user approved that exact command in the chat that asked.
@@ -21261,437 +21692,6 @@ safe_dir() {
 
 main
 `;
-const KEY_LINE = 2;
-const PLUGIN_ID = "remote-host";
-const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/;
-function backendId(slug) {
-  return `${PLUGIN_ID}/${slug}`;
-}
-function keySecretName(slug) {
-  return `REMOTE_HOST_KEY_${slug.toUpperCase().replace(/-/g, "_")}`;
-}
-function elevateSecretName(slug) {
-  return `REMOTE_HOST_ELEVATE_KEY_${slug.toUpperCase().replace(/-/g, "_")}`;
-}
-const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
-const ADDRESS = /^[A-Za-z0-9._:%-]{1,253}$/;
-const USER = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
-function readHosts(raw, warn = () => {
-}) {
-  if (raw === void 0 || raw === null) return [];
-  if (!Array.isArray(raw)) {
-    warn("settings.hosts is not a list; no machines are configured");
-    return [];
-  }
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const [i, h] of raw.entries()) {
-    const why = invalid(h);
-    if (why) {
-      warn(`settings.hosts[${i}] skipped: ${why}`);
-      continue;
-    }
-    const host = h;
-    if (seen.has(host.slug)) {
-      warn(`settings.hosts[${i}] skipped: ${host.slug} is listed twice`);
-      continue;
-    }
-    seen.add(host.slug);
-    out.push({
-      slug: host.slug,
-      label: host.label,
-      user: host.user,
-      addresses: [...host.addresses],
-      port: typeof host.port === "number" ? host.port : 22,
-      hostKey: host.hostKey,
-      hostKeyType: host.hostKeyType,
-      keyFingerprint: host.keyFingerprint,
-      allowFrom: [...host.allowFrom],
-      pairedAt: host.pairedAt,
-      ...Number.isInteger(host.keyLine) && host.keyLine > 0 ? { keyLine: host.keyLine } : {}
-    });
-  }
-  return out;
-}
-function invalid(h) {
-  if (!h || typeof h !== "object") return "not an object";
-  const o = h;
-  if (typeof o.slug !== "string" || !SLUG_PATTERN.test(o.slug)) return "no valid slug";
-  if (typeof o.label !== "string" || !o.label.trim()) return `${o.slug}: no label`;
-  if (typeof o.user !== "string" || !USER.test(o.user)) return `${o.slug}: no valid user`;
-  if (!Array.isArray(o.addresses) || !o.addresses.length || !o.addresses.every((a) => typeof a === "string" && ADDRESS.test(a))) {
-    return `${o.slug}: no valid addresses`;
-  }
-  if (o.port !== void 0 && !(Number.isInteger(o.port) && o.port > 0 && o.port < 65536)) return `${o.slug}: bad port`;
-  if (typeof o.hostKey !== "string" || !FINGERPRINT.test(o.hostKey)) return `${o.slug}: no pinned host key`;
-  if (typeof o.hostKeyType !== "string" || !HOST_KEY_TYPES.includes(o.hostKeyType)) {
-    return `${o.slug}: no usable host key type`;
-  }
-  if (typeof o.keyFingerprint !== "string" || !FINGERPRINT.test(o.keyFingerprint)) return `${o.slug}: no client key fingerprint`;
-  if (!Array.isArray(o.allowFrom) || !o.allowFrom.length || !o.allowFrom.every((a) => typeof a === "string" && validFrom(a))) {
-    return `${o.slug}: no valid allowFrom`;
-  }
-  if (typeof o.pairedAt !== "string") return `${o.slug}: no pairedAt`;
-  return void 0;
-}
-function validAddress(a) {
-  return ADDRESS.test(a);
-}
-function validFrom(a) {
-  const m = a.match(/^([0-9a-fA-F:.]+)(?:\/(\d{1,3}))?$/);
-  if (!m) return false;
-  const ip = m[1];
-  const v = isIP(ip);
-  if (!v) return false;
-  if (m[2] === void 0) return true;
-  const bits = Number(m[2]);
-  return v === 4 ? bits >= 8 && bits <= 32 : bits >= 32 && bits <= 128;
-}
-function dialFamily(address, allowFrom) {
-  if (isIP(address)) return void 0;
-  return allowFrom.length > 0 && allowFrom.every((a) => isIP(a.split("/")[0]) === 4) ? 4 : void 0;
-}
-const HOST_KEY_TYPES = ["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa"];
-function hostKeyAlgorithms(type) {
-  return type === "ssh-rsa" ? ["rsa-sha2-512", "rsa-sha2-256"] : [type];
-}
-function validUser(u) {
-  return USER.test(u);
-}
-function connectionChanged(a, b) {
-  return a.user !== b.user || a.port !== b.port || a.hostKey !== b.hostKey || a.hostKeyType !== b.hostKeyType || a.keyFingerprint !== b.keyFingerprint || a.addresses.join("\n") !== b.addresses.join("\n");
-}
-const ELEVATE_USER = "_dispatchelevate";
-const HELPER_PATH = "/usr/local/libexec/dispatch-elevate";
-function runCommand(id, cwd, argv) {
-  if (!ELEVATE_ID.test(id)) throw new Error("bad elevation id");
-  const payload = [cwd, ...argv].map((s) => `${s}\0`).join("");
-  return `run ${id} ${Buffer.from(payload, "utf8").toString("base64")}`;
-}
-function displayCommand(argv) {
-  return argv.map((a) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
-}
-function approvalsOf(ctx) {
-  const a = ctx?.approvals;
-  return a && typeof a.request === "function" ? a : void 0;
-}
-class ElevationLoginError extends Error {
-  constructor(message, kind2) {
-    super(message);
-    this.kind = kind2;
-    this.name = "ElevationLoginError";
-  }
-}
-const DONE_KEPT = 256;
-const APPROVAL_COMMAND_MAX = 8e3;
-const APPROVAL_CWD_MAX = 1e3;
-const HELPER_CONNECT_MS = 5e3;
-class Elevation {
-  constructor(deps) {
-    this.deps = deps;
-  }
-  active = /* @__PURE__ */ new Map();
-  /** Recently finished ids: the owner sends open requests again after a reconnect, and one may have just finished. */
-  done = /* @__PURE__ */ new Set();
-  busy = false;
-  waiting = [];
-  stateNow;
-  keyNow = false;
-  /** Whether elevation is set up here (as last seen), for the agent note. Undefined until {@link refresh} ran. */
-  get state() {
-    return this.stateNow;
-  }
-  /** Whether this machine's elevation key is stored (as last seen), whether or not this Dispatch can ask for approval. */
-  get configured() {
-    return this.keyNow;
-  }
-  /** Whether this Dispatch can ask the user to approve (core E31). */
-  get canAsk() {
-    return this.deps.approvals !== void 0;
-  }
-  /** Look again: the key may have been added or removed (the Settings pane, the other instance). */
-  async refresh() {
-    this.keyNow = !!await this.deps.key().catch(() => void 0);
-    const state = !this.deps.approvals ? "unsupported" : this.keyNow ? "on" : "off";
-    this.stateNow = state;
-    return state;
-  }
-  /**
-   * Log in with `key` (default: the stored one) and run one of the helper's
-   * fixed verbs to its end. No approval: `check` only reports who it runs as,
-   * `uninstall` only takes elevation away, and both are the user's own button
-   * in the Settings pane (or Remove machine, or uninstalling the plugin).
-   */
-  async helper(verb, key2, timeoutMs = 3e4) {
-    const k = key2 ?? await this.deps.key();
-    if (!k) throw new Error(`elevation isn't set up on ${this.deps.host().label}`);
-    const conn = await this.login(k, void 0, Math.min(this.deps.connectTimeoutMs ?? HELPER_CONNECT_MS, HELPER_CONNECT_MS));
-    try {
-      const ch = await conn.channel(verb);
-      return await new Promise((resolve2, reject) => {
-        const out = [];
-        const err = [];
-        let code;
-        const timer = setTimeout(() => {
-          try {
-            ch.close();
-          } catch {
-          }
-          reject(new Error(`the helper on ${this.deps.host().label} didn't finish ${verb} within ${Math.round(timeoutMs / 1e3)} s`));
-        }, timeoutMs);
-        ch.on("data", (d) => out.push(d));
-        ch.stderr.on("data", (d) => err.push(d));
-        ch.on("exit", (c) => code = typeof c === "number" ? c : null);
-        ch.on("error", () => {
-        });
-        ch.on("close", () => {
-          clearTimeout(timer);
-          resolve2({
-            code: code !== void 0 ? code : channelExit(ch)?.code ?? null,
-            stdout: Buffer.concat(out).toString("utf8"),
-            stderr: Buffer.concat(err).toString("utf8")
-          });
-        });
-      });
-    } finally {
-      conn.close();
-    }
-  }
-  /** A connection logged in as the helper's account with `key`, or an {@link ElevationLoginError}. */
-  async login(key2, signal, deadlineMs = this.deps.connectTimeoutMs ?? 2e4) {
-    const host = this.deps.host();
-    const address = this.deps.address() ?? host.addresses[0];
-    const family = dialFamily(address, host.allowFrom);
-    const target = {
-      host: address,
-      port: host.port,
-      username: ELEVATE_USER,
-      privateKey: key2,
-      hostVerifier: pinnedHostKey(host.hostKey),
-      algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) },
-      // A dead link is noticed in about 15 s, like the shells'.
-      keepalive: { intervalMs: 5e3, countMax: 3 },
-      ...family ? { family } : {}
-    };
-    const conn = this.deps.connect ? this.deps.connect(target) : new SshConnection(target);
-    try {
-      await conn.connect(deadlineMs, signal);
-      return conn;
-    } catch (err) {
-      conn.close();
-      if (signal?.aborted) throw err;
-      const why = errText$1(err);
-      if (/authentication/i.test(why)) {
-        throw new ElevationLoginError(`${host.label} refused the elevation key`, "refused");
-      }
-      if (/host denied/i.test(why)) throw new ElevationLoginError(`a different host key answered at ${address}`, "host-key");
-      throw new ElevationLoginError(`could not reach ${host.label} (${why})`, "unreachable");
-    }
-  }
-  /** A shell's `dispatch-elevate` asked. Answers it (always, unless the id is unusable), however it ends. */
-  async handle(req, origin, shell) {
-    if (typeof req.id !== "string" || !ELEVATE_ID.test(req.id)) {
-      this.deps.log.warn(`remote-host ${this.deps.host().slug}: an elevation request with an unusable id was ignored`);
-      return;
-    }
-    const id = req.id;
-    if (this.active.has(id) || this.done.has(id)) return;
-    const job = { id, origin, shell, abort: new AbortController() };
-    this.active.set(id, job);
-    let end;
-    try {
-      end = await this.process(job, req);
-    } catch (err) {
-      end = { code: null, error: `elevation failed: ${errText$1(err)}` };
-    } finally {
-      this.active.delete(id);
-      this.done.add(id);
-      if (this.done.size > DONE_KEPT) this.done.delete(this.done.values().next().value);
-      shell.release(id);
-    }
-    shell.elevateEnd({ id, ...end });
-  }
-  /** The asker went away (Ctrl-C): withdraw the card, or stop the command there. */
-  cancel(id) {
-    this.active.get(id)?.abort.abort();
-  }
-  /** The shell ended: everything it asked for is withdrawn. */
-  cancelShell(shell) {
-    for (const job of this.active.values()) if (job.shell === shell) job.abort.abort();
-  }
-  async process(job, req) {
-    const host = this.deps.host();
-    const label = host.label;
-    const { id, shell, abort } = job;
-    const note = (line) => shell.elevateOutput(id, 2, Buffer.from(`dispatch-elevate: ${line}
-`, "utf8"));
-    let msg;
-    try {
-      msg = checkElevate(req);
-    } catch (err) {
-      return { code: null, error: errText$1(err) };
-    }
-    const cmd = displayCommand(msg.argv);
-    if (cmd.length > APPROVAL_COMMAND_MAX) {
-      return {
-        code: null,
-        error: `the command is too long to show the user for approval (${cmd.length} characters, at most ${APPROVAL_COMMAND_MAX}); nothing ran. Put it in a script and run that.`
-      };
-    }
-    if (msg.cwd.length > APPROVAL_CWD_MAX) {
-      return { code: null, error: `this directory's path is too long to show the user for approval; nothing ran. Run it from a shorter one.` };
-    }
-    const approvals = this.deps.approvals;
-    if (!approvals) {
-      return {
-        code: null,
-        error: `nothing can run as root on ${label}: this Dispatch has no way to ask the user for approval (it needs a newer Dispatch). Don't try to work around it; tell the user what needs root, and why.`
-      };
-    }
-    if (!await this.deps.key()) {
-      return {
-        code: null,
-        error: `elevation isn't set up on ${label}, so nothing can run as root there. The user can turn it on in Settings → Remote hosts → ${label}. Don't try to work around it; tell the user what needs root, and why.`
-      };
-    }
-    if (this.busy) {
-      note(`another command is waiting for approval or running as root on ${label}; this one waits its turn`);
-      shell.hold(id, `waiting for another root command on ${label} to finish`);
-    }
-    if (!await this.acquire(abort.signal)) return { code: null, error: "cancelled while it waited its turn; nothing ran" };
-    try {
-      note(`asking the user to approve running this as root on ${label}: ${cmd}`);
-      shell.hold(id, `waiting for the user to approve: sudo ${cmd}`.slice(0, 180));
-      const where = `${job.origin.chatId}/${job.origin.terminal}`;
-      let answer;
-      try {
-        answer = await approvals.request(job.origin.chatId, {
-          title: `Run as root on ${label}`,
-          detail: `A command in this chat's terminal "${job.origin.terminal}" on ${label} asked for root (sudo). Approving runs it once, as root, in that directory, with no input. Nothing else is allowed by it.`,
-          command: cmd,
-          cwd: msg.cwd,
-          machine: label,
-          timeoutSeconds: this.deps.approvalTimeoutSeconds ?? 300,
-          signal: abort.signal
-        });
-      } catch (err) {
-        if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
-        return { code: null, error: `asking the user for approval failed (${errText$1(err)}); nothing ran` };
-      }
-      shell.release(id);
-      const by = answer.by ? ` by ${answer.by}` : "";
-      this.deps.log.info(`remote-host ${host.slug}: elevation ${id} from ${where}: ${cmd} → ${answer.decision}${by}`);
-      if (abort.signal.aborted || answer.decision === "cancelled") return { code: null, error: "cancelled; nothing ran" };
-      if (answer.decision === "denied") return { code: null, error: `the user denied running this as root${by}; nothing ran` };
-      if (answer.decision !== "approved") {
-        return { code: null, error: `no answer from the user within ${this.deps.approvalTimeoutSeconds ?? 300} s; nothing ran` };
-      }
-      note(`approved${by}; running as root on ${label}`);
-      return await this.run(job, msg.cwd, msg.argv);
-    } finally {
-      this.releaseTurn();
-    }
-  }
-  /** Log in as the helper's account with the elevation key, and run it there. */
-  async run(job, cwd, argv) {
-    const host = this.deps.host();
-    const key2 = await this.deps.key();
-    if (!key2) return { code: null, error: `elevation was turned off on ${host.label} meanwhile; nothing ran` };
-    const { abort, shell, id } = job;
-    let conn;
-    try {
-      conn = await this.login(key2, abort.signal);
-    } catch (err) {
-      if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
-      const kind2 = err instanceof ElevationLoginError ? err.kind : "unreachable";
-      return {
-        code: null,
-        error: kind2 === "refused" ? `${host.label} refused the elevation key, so nothing ran. Elevation may have been removed there, or this computer's address changed; the user can set it up again in Settings → Remote hosts.` : `${errText$1(err)}; nothing ran`
-      };
-    }
-    try {
-      let ch;
-      try {
-        ch = await conn.channel(runCommand(id, cwd, argv));
-      } catch (err) {
-        return { code: null, error: `the root helper on ${host.label} did not start (${errText$1(err)}); nothing ran` };
-      }
-      if (abort.signal.aborted) {
-        try {
-          ch.close();
-        } catch {
-        }
-        return { code: null, error: `cancelled as it started; ${host.label} was told to stop it` };
-      }
-      return await new Promise((resolve2) => {
-        let code = null;
-        let signal = null;
-        let exited = false;
-        const onAbort = () => {
-          try {
-            ch.close();
-          } catch {
-          }
-        };
-        abort.signal.addEventListener("abort", onAbort, { once: true });
-        ch.on("data", (d) => shell.elevateOutput(id, 1, d));
-        ch.stderr.on("data", (d) => shell.elevateOutput(id, 2, d));
-        ch.on("exit", (c, s) => {
-          exited = true;
-          code = typeof c === "number" ? c : null;
-          signal = s ?? null;
-        });
-        ch.on("error", () => {
-        });
-        ch.on("close", () => {
-          abort.signal.removeEventListener("abort", onAbort);
-          if (abort.signal.aborted) return resolve2({ code: null, error: `cancelled while it ran; ${host.label} was told to stop it` });
-          const early = exited ? void 0 : channelExit(ch);
-          if (early) {
-            exited = true;
-            code = early.code;
-            signal = early.signal ?? null;
-          }
-          if (!exited) {
-            return resolve2({
-              code: null,
-              error: `the connection to ${host.label} ended while it ran; it was stopped there, or it may have finished`
-            });
-          }
-          resolve2({ code, ...signal ? { signal } : {} });
-        });
-      });
-    } finally {
-      conn.close();
-    }
-  }
-  /** Wait for this machine's turn. False if cancelled meanwhile. */
-  acquire(signal) {
-    if (signal.aborted) return Promise.resolve(false);
-    if (!this.busy) {
-      this.busy = true;
-      return Promise.resolve(true);
-    }
-    return new Promise((resolve2) => {
-      const go = () => {
-        signal.removeEventListener("abort", onAbort);
-        resolve2(true);
-      };
-      const onAbort = () => {
-        const at = this.waiting.indexOf(go);
-        if (at >= 0) this.waiting.splice(at, 1);
-        resolve2(false);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      this.waiting.push(go);
-    });
-  }
-  releaseTurn() {
-    const next = this.waiting.shift();
-    if (next) next();
-    else this.busy = false;
-  }
-}
 function authorizedKeysLine(publicKey, allowFrom) {
   const parts = publicKey.trim().split(/\s+/);
   if (parts.length < 2 || !/^ssh-[a-z0-9-]+$/.test(parts[0]) || !/^[A-Za-z0-9+/=]+$/.test(parts[1])) {
@@ -21743,7 +21743,7 @@ const RUNTIME_UPLOAD_MS = 10 * 6e4;
 async function ensureAgent(conn, deps) {
   const build = agentBuildId(deps.agent.version, deps.agent.sha256);
   const rel = `agent/${build}/dispatch-host.mjs`;
-  const look = await conn.exec(
+  const look2 = await conn.exec(
     shCommand(
       [
         `printf '%s\\n' "$HOME"`,
@@ -21758,10 +21758,10 @@ async function ensureAgent(conn, deps) {
     ),
     { timeoutMs: 3e4 }
   );
-  const lines = look.stdout.split("\n").map((l) => l.trim());
+  const lines = look2.stdout.split("\n").map((l) => l.trim());
   const [home, platform, arch, nodeVersion, agentVersion] = lines;
-  if (look.code !== 0 || !home?.startsWith("/") || !platform || !arch) {
-    throw new Error(`could not read the machine's layout (exit ${look.code}): ${look.stderr.trim() || look.stdout.trim() || "no output"}`);
+  if (look2.code !== 0 || !home?.startsWith("/") || !platform || !arch) {
+    throw new Error(`could not read the machine's layout (exit ${look2.code}): ${look2.stderr.trim() || look2.stdout.trim() || "no output"}`);
   }
   const root = rootDir(home);
   const paths = {
@@ -22385,8 +22385,8 @@ class Pairing {
     this.expire();
     const slug = str(body2.slug, "slug").toLowerCase();
     if (!SLUG_PATTERN.test(slug)) throw new UserError("the name must be lowercase letters, digits and dashes, starting with a letter or digit (48 at most)");
-    const replace = body2.replace === true;
-    if (!replace && this.deps.hosts().some((h) => h.slug === slug)) {
+    const replace2 = body2.replace === true;
+    if (!replace2 && this.deps.hosts().some((h) => h.slug === slug)) {
       throw new UserError(`${slug} is already paired. Pair it again only to replace its key or host key.`, 409);
     }
     const address = str(body2.address, "address");
@@ -22413,7 +22413,7 @@ class Pairing {
     const id = randomUUID();
     const p = {
       id,
-      req: { slug, label, address, addresses, port: portOf(body2.port), user, hostKey, hostKeyType, allowFrom, replace },
+      req: { slug, label, address, addresses, port: portOf(body2.port), user, hostKey, hostKeyType, allowFrom, replace: replace2 },
       privateKey: kp.privateKey,
       publicKey: kp.publicKey,
       line,
@@ -23092,7 +23092,7 @@ function remoteFiles(remote, opts = {}) {
   const max = opts.maxBytes ?? MAX_COPY_BYTES;
   const ms = opts.timeoutMs ?? COPY_MS;
   return {
-    async fetch(from, to) {
+    async fetch(from, to, signal) {
       await mkdir(dirname(to), { recursive: true });
       const part = `${to}.part-${process.pid}`;
       const out = createWriteStream(part);
@@ -23106,7 +23106,8 @@ function remoteFiles(remote, opts = {}) {
       ].join("\n");
       let r;
       try {
-        r = await remote.stream(script, { output: out }, AbortSignal.timeout(ms));
+        const stop = signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
+        r = await remote.stream(script, { output: out }, stop);
       } catch (err) {
         out.destroy();
         await closed;
@@ -23114,6 +23115,10 @@ function remoteFiles(remote, opts = {}) {
         throw err;
       }
       await closed;
+      if (signal?.aborted) {
+        await rm(part, { force: true });
+        throw new Error("cancelled");
+      }
       if (r.code !== 0) {
         await rm(part, { force: true });
         if (r.code === NO_FILE) return false;
@@ -23482,9 +23487,9 @@ class HostShell extends EventEmitter {
       on: () => void 0
       // input never errors here: a dead link is a stall, then an exit
     };
-    const look = () => queueMicrotask(() => this.openGate());
-    this.on("newListener", look);
-    this.stdout.on("newListener", look);
+    const look2 = () => queueMicrotask(() => this.openGate());
+    this.on("newListener", look2);
+    this.stdout.on("newListener", look2);
   }
   stdout = new EventEmitter();
   stderr = new EventEmitter();
@@ -23772,8 +23777,8 @@ class HostShell extends EventEmitter {
       this.notice(`${offset - have} bytes of output were lost while Dispatch was disconnected.`);
     }
     this.got[stream] = offset + data.length;
-    const text = this.text[stream].write(data.subarray(from - offset));
-    if (text) this.deliver(() => (stream === "out" ? this.stdout : this.stderr).emit("data", text));
+    const text2 = this.text[stream].write(data.subarray(from - offset));
+    if (text2) this.deliver(() => (stream === "out" ? this.stdout : this.stderr).emit("data", text2));
   }
   notice(line) {
     this.deliver(() => this.stderr.emit("data", `
@@ -24809,7 +24814,7 @@ class ChatSync {
       } else if (sameEntry(mine, c.from)) {
         if (disk === "dir" && !isAbsent(c.to)) inTheWay.push(c);
         else if (!isAbsent(c.from) && disk === "none") aside.push({ c, why: "it isn't checked out here (a sparse checkout?)" });
-        else if (big(c)) aside.push({ c, why: `too big to bring back, ${mb(st.sizes.get(c.to.sha) ?? 0)}` });
+        else if (big(c)) aside.push({ c, why: `too big to bring back, ${mb$1(st.sizes.get(c.to.sha) ?? 0)}` });
         else take(c, disk);
       } else if (sameEntry(mine, c.to)) {
         accept.push(c);
@@ -24965,7 +24970,7 @@ class ChatSync {
     this.rec.skippedLocal = Object.fromEntries(snap.tooBig.map((b) => [b.path, b.size]));
     if (big.length) {
       notices.push(
-        `[${this.d.label}] Not sent, over ${mb(this.cap)} and untracked: ${list(big.map((b) => `${b.path} (${mb(b.size)})`))}. Commands there won't see them.`
+        `[${this.d.label}] Not sent, over ${mb$1(this.cap)} and untracked: ${list(big.map((b) => `${b.path} (${mb$1(b.size)})`))}. Commands there won't see them.`
       );
     }
     const base = this.rec.base;
@@ -25005,7 +25010,7 @@ class ChatSync {
     await this.save();
     if (first) {
       notices.push(
-        `[${this.d.label}] Set up this chat's files there (${p.work}): ${sent.objects} objects, ${mb(sent.bytes)}, in ${((Date.now() - started) / 1e3).toFixed(1)} s.`
+        `[${this.d.label}] Set up this chat's files there (${p.work}): ${sent.objects} objects, ${mb$1(sent.bytes)}, in ${((Date.now() - started) / 1e3).toFixed(1)} s.`
       );
     }
   }
@@ -25036,7 +25041,7 @@ class ChatSync {
         continue;
       }
       if (t.size > this.cap) {
-        blocked.push(`${path} (${mb(t.size)} there, too big to bring back)`);
+        blocked.push(`${path} (${mb$1(t.size)} there, too big to bring back)`);
         continue;
       }
       const copy = `${path}.from-${this.d.slug}`;
@@ -25195,7 +25200,7 @@ function short$1(cmd) {
   const one = cmd.replace(/\s+/g, " ").trim();
   return one.length > 80 ? `${one.slice(0, 77)}...` : one;
 }
-function mb(n) {
+function mb$1(n) {
   return n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(n >= 100 * 1024 ** 2 ? 0 : 1)} MB` : `${Math.ceil(n / 1024)} KB`;
 }
 async function exists(p) {
@@ -25476,6 +25481,48 @@ class HostBackend {
     sh.on("runEnd", (m) => this.syncs.get(chatId)?.runEnded(m.runId));
     return sh;
   }
+  /** {@link place}'s paths, with nothing made or set up: where `localCwd` is there. */
+  async locate(chatId, repoDir, localCwd, paths) {
+    const root = await repoTop(repoDir);
+    const local = root ? await realpath(localCwd).catch(() => localCwd) : localCwd;
+    const checkout = root ? chatWorktreePath(paths.root, this.deps.instanceId, chatId, repoName(root)) : void 0;
+    const cwd = checkout ? posix.join(checkout, within(root, local)) : chatDir(paths, this.deps.instanceId, chatId);
+    return { ...root ? { root } : {}, local, cwd, ...checkout ? { checkout } : {} };
+  }
+  /**
+   * For the agent tools (tools/): where a chat's local `cwd` is on this
+   * machine (its checkout, or its directory there), and the machine's home.
+   * Waits for the link like a spawn does.
+   */
+  async whereThere(chatId, localCwd, signal) {
+    const linked = await this.deps.link.ready(signal);
+    const at = localCwd ? await this.locate(chatId, localCwd, localCwd, linked.paths) : { cwd: chatDir(linked.paths, this.deps.instanceId, chatId) };
+    const home = this.deps.link.probe?.home;
+    return { cwd: at.cwd, ...at.checkout ? { checkout: at.checkout } : {}, ...home ? { home } : {} };
+  }
+  /** The sync's view of this machine, for copies the tools make. */
+  remoteSide() {
+    return this.remote ??= linkRemote(this.deps.link);
+  }
+  /** Whether this chat has had a terminal (or an MCP server) on this machine. */
+  async knowsChat(chatId) {
+    if (this.chatsWithShells().has(chatId)) return true;
+    for (const k of this.processes.keys()) if (k.startsWith(`${chatId}\0`)) return true;
+    return this.served.has(chatId) || (await this.deps.kv?.get(this.servedKey(chatId)).catch(() => void 0) ?? void 0) !== void 0;
+  }
+  /** What this chat has running here: shells, MCP servers, forwarded ports. */
+  chatActivity(chatId) {
+    const names = (m) => [...m.keys()].filter((k) => k.startsWith(`${chatId}\0`)).map((k) => k.slice(chatId.length + 1));
+    return {
+      shells: names(this.shells),
+      servers: names(this.processes),
+      ports: this.ports.list(chatId).map((f) => ({ remotePort: f.remotePort, url: f.url }))
+    };
+  }
+  /** Where `remote_fetch` puts a copy when the agent names no place: this chat's own folder here, gone with the chat. */
+  fetchedDir(chatId) {
+    return join(this.mcpLocalDir(chatId), "fetched");
+  }
   /**
    * Where a chat's work happens there. In a repository, the same place in the
    * chat's checkout; the checkout itself is filled by the first command's
@@ -25483,10 +25530,7 @@ class HostBackend {
    * `ensure` makes it (a shell starts in it); without it only the paths are worked out.
    */
   async place(chatId, repoDir, localCwd, paths, ensure) {
-    const root = await repoTop(repoDir);
-    const local = root ? await realpath(localCwd).catch(() => localCwd) : localCwd;
-    const checkout = root ? chatWorktreePath(paths.root, this.deps.instanceId, chatId, repoName(root)) : void 0;
-    const cwd = checkout ? posix.join(checkout, within(root, local)) : chatDir(paths, this.deps.instanceId, chatId);
+    const { root, local, cwd, checkout } = await this.locate(chatId, repoDir, localCwd, paths);
     if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
     if (ensure && root) {
       await this.syncs.get(chatId).ensureCheckout(within(root, local));
@@ -25841,7 +25885,7 @@ class HostBackend {
     const paths = this.deps.link.paths;
     const where = paths ? chatDir(paths, this.deps.instanceId, info.chatId) : `~/.dispatch-host/…/chats/${info.chatId}`;
     return [
-      `- This terminal runs on ${host.label}${describe(probe)}, over SSH as \`${host.user}\`, under dispatch-host. A dropped connection pauses the command and picks it up again; it is not restarted.`,
+      `- This terminal runs on ${host.label}${describe$1(probe)}, over SSH as \`${host.user}\`, under dispatch-host. A dropped connection pauses the command and picks it up again; it is not restarted.`,
       `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, with PATH and locale from the login shell. On it: ${tools(probe)}.`,
       ...probe?.platform === "darwin" ? [xcodeNote(probe)] : [],
       ...probe?.brew ? [brewNote(probe.brew)] : [],
@@ -25850,6 +25894,9 @@ class HostBackend {
       `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command; one that timed out holds every terminal until it ends (Ctrl-C it). Likewise while a terminal on this computer (or this chat's terminal on another machine) runs a command in the same files: a command in this terminal is refused, so run them one after the other, not side by side. Outside a git repository nothing is synced.`,
       `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started from this chat's terminals; nothing else on the machine is.`,
       mcpNote(host.label, this.mcpLocalDir(info.chatId)),
+      ...this.deps.agentTools ? [
+        `- To bring here what the sync doesn't (build output, an .xcresult, a screenshot, a test report, a file outside the checkout), call remote-host's \`remote_fetch\` tool with its path there; it says where the copy is. Its \`machine_status\` tool says what ${host.label} is and what this chat has there, without running a command.`
+      ] : [],
       `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its checkout there.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you started (Ctrl-C the terminal, \`kill %1\`).`
@@ -25906,7 +25953,7 @@ function token(v, max = 32) {
   const m = (v ?? "").match(/[A-Za-z0-9][A-Za-z0-9._+-]*/);
   return m ? m[0].slice(0, max) : void 0;
 }
-function describe(probe) {
+function describe$1(probe) {
   if (!probe) return "";
   const name = (probe.os.name ?? "").match(/^[A-Za-z][A-Za-z ]{0,20}$/)?.[0];
   const os = [name, token(probe.os.version, 16)].filter(Boolean).join(" ") || token(probe.platform, 16) || "unknown OS";
@@ -25955,6 +26002,490 @@ function tools(probe) {
   const list2 = [has("git", t.git), has("node", t.node), has("pnpm", t.pnpm)];
   if (probe.platform === "darwin") list2.push(has("Xcode", t.xcodebuild));
   return list2.join(", ");
+}
+const BLOCK = 512;
+async function extractTar(archive, dest, signal) {
+  const out = { files: 0, dirs: 0, bytes: 0, skipped: [] };
+  const root = resolve(dest);
+  await mkdir(root, { recursive: true });
+  const fh = await open(archive, "r");
+  try {
+    let pos = 0;
+    let nextPath;
+    let nextSize;
+    for (; ; ) {
+      if (signal?.aborted) throw new Error("cancelled");
+      const h = await readExact(fh, pos, BLOCK);
+      if (!h) break;
+      if (h.every((b) => b === 0)) break;
+      pos += BLOCK;
+      if (!checksumOk(h)) throw new Error(`not a tar archive (a bad header at byte ${pos - BLOCK})`);
+      const type = String.fromCharCode(h[156] || 48);
+      const size = nextSize ?? octal(h, 124, 12);
+      const dataAt = pos;
+      pos += Math.ceil(size / BLOCK) * BLOCK;
+      if (type === "g") continue;
+      if (type === "x") {
+        const rec = pax(await readExact(fh, dataAt, size) ?? Buffer.alloc(0));
+        if (rec.path !== void 0) nextPath = rec.path;
+        if (rec.size !== void 0 && /^\d+$/.test(rec.size)) {
+          nextSize = Number(rec.size);
+        }
+        continue;
+      }
+      if (type === "L") {
+        nextPath = cstr(await readExact(fh, dataAt, size) ?? Buffer.alloc(0), 0, size);
+        continue;
+      }
+      if (type === "K") continue;
+      const prefix = cstr(h, 345, 155);
+      const name = nextPath ?? (prefix ? `${prefix}/${cstr(h, 0, 100)}` : cstr(h, 0, 100));
+      nextPath = void 0;
+      nextSize = void 0;
+      const shown = name.replace(/^(\.\/)+/, "");
+      const target = safeTarget(root, name);
+      if (!target) {
+        out.skipped.push(`${shown} (outside the folder)`);
+        continue;
+      }
+      if (type === "5") {
+        if (target !== root) {
+          await mkdir(target, { recursive: true });
+          out.dirs++;
+        }
+        continue;
+      }
+      if (type !== "0" && type !== "7") {
+        out.skipped.push(`${shown} (${KINDS[type] ?? `type ${type}`})`);
+        continue;
+      }
+      if (target === root) {
+        out.skipped.push(`${shown || name} (no name)`);
+        continue;
+      }
+      await mkdir(resolve(target, ".."), { recursive: true });
+      await copyRange(fh, dataAt, size, target);
+      out.files++;
+      out.bytes += size;
+    }
+  } finally {
+    await fh.close();
+  }
+  return out;
+}
+const KINDS = { "1": "a hard link", "2": "a symbolic link", "3": "a device", "4": "a device", "6": "a pipe" };
+function safeTarget(root, name) {
+  const clean = name.replace(/\\/g, "/");
+  if (clean.startsWith("/") || /^[A-Za-z]:/.test(clean)) return void 0;
+  const parts = clean.split("/").filter((p) => p && p !== ".");
+  if (parts.some((p) => p === "..")) return void 0;
+  const target = resolve(join(root, ...parts));
+  return target === root || target.startsWith(root + sep) ? target : void 0;
+}
+async function readExact(fh, at, n) {
+  const buf = Buffer.alloc(n);
+  let got = 0;
+  while (got < n) {
+    const { bytesRead } = await fh.read(buf, got, n - got, at + got);
+    if (bytesRead === 0) return void 0;
+    got += bytesRead;
+  }
+  return buf;
+}
+async function copyRange(fh, at, size, to) {
+  const w = await open(to, "w");
+  try {
+    const chunk = Buffer.alloc(Math.min(size, 1 << 20) || 1);
+    let done = 0;
+    while (done < size) {
+      const n = Math.min(chunk.length, size - done);
+      const { bytesRead } = await fh.read(chunk, 0, n, at + done);
+      if (bytesRead === 0) throw new Error(`the archive ends inside ${to}`);
+      await w.write(chunk, 0, bytesRead);
+      done += bytesRead;
+    }
+  } finally {
+    await w.close();
+  }
+}
+function cstr(b, at, len) {
+  const s = b.subarray(at, at + len);
+  const z = s.indexOf(0);
+  return s.subarray(0, z === -1 ? s.length : z).toString("utf8");
+}
+function octal(b, at, len) {
+  if (b[at] & 128) {
+    let n = 0;
+    for (let i = at + 1; i < at + len; i++) n = n * 256 + b[i];
+    return n;
+  }
+  const s = cstr(b, at, len).trim();
+  return s ? parseInt(s, 8) : 0;
+}
+function checksumOk(h) {
+  const want = octal(h, 148, 8);
+  let sum = 0;
+  for (let i = 0; i < BLOCK; i++) sum += i >= 148 && i < 156 ? 32 : h[i];
+  return sum === want;
+}
+function pax(data) {
+  const out = {};
+  let i = 0;
+  while (i < data.length) {
+    const sp = data.indexOf(32, i);
+    if (sp === -1) break;
+    const len = Number(data.subarray(i, sp).toString("ascii"));
+    if (!Number.isInteger(len) || len <= 0 || i + len > data.length) break;
+    const rec = data.subarray(sp + 1, i + len - 1).toString("utf8");
+    const eq = rec.indexOf("=");
+    if (eq > 0) out[rec.slice(0, eq)] = rec.slice(eq + 1);
+    i += len;
+  }
+  return out;
+}
+const MAX_PULL_BYTES = 1024 * 1024 * 1024;
+const PULL_MS = 20 * 6e4;
+async function look(remote, path) {
+  const r = await remote.run(
+    [
+      `p=${sq(path)}`,
+      `if [ -d "$p" ]; then printf 'd %s\\n' "$(du -sk "$p" | cut -f1)"`,
+      `elif [ -f "$p" ]; then printf 'f %s\\n' "$(wc -c < "$p" | tr -d ' ')"`,
+      `elif [ -e "$p" ] || [ -L "$p" ]; then echo o`,
+      `else echo n; fi`
+    ].join("\n"),
+    { timeoutMs: 6e4 }
+  );
+  if (r.code !== 0) throw new Error(r.stderr.trim() || `exit ${r.code}`);
+  const m = /^([dfon])(?: (\d+))?/.exec(r.stdout.trim());
+  if (!m) throw new Error(`unexpected answer: ${r.stdout.trim().slice(0, 80)}`);
+  if (m[1] === "d") return { kind: "dir", bytes: Number(m[2] ?? 0) * 1024 };
+  if (m[1] === "f") return { kind: "file", bytes: Number(m[2] ?? 0) };
+  return { kind: m[1] === "o" ? "other" : "missing" };
+}
+async function pull(remote, from, found, to, opts = {}) {
+  const max = opts.maxBytes ?? MAX_PULL_BYTES;
+  if (found.kind === "missing") throw new Error(`there is nothing at ${from}`);
+  if (found.kind === "other") throw new Error(`${from} is neither a file nor a folder`);
+  if (found.bytes > max) throw new Error(`it is ${mb(found.bytes)}, over the ${mb(max)} one copy may be`);
+  await mkdir(dirname(to), { recursive: true });
+  const part = `${to}.part-${process.pid}-${Date.now().toString(36)}`;
+  try {
+    if (found.kind === "file") {
+      const files = remoteFiles(remote, { maxBytes: max, timeoutMs: PULL_MS });
+      if (!await files.fetch(from, part, opts.signal)) throw new Error(`${from} went away while it was being copied`);
+      cancelled(opts.signal);
+      await replace(part, to);
+      return { kind: "file", bytes: (await stat(to)).size };
+    }
+    const archive = `${part}.tar`;
+    try {
+      await streamTar(remote, from, archive, max, opts.signal);
+      const unpacked = await extractTar(archive, part, opts.signal);
+      cancelled(opts.signal);
+      await replace(part, to);
+      return { kind: "dir", bytes: unpacked.bytes, unpacked };
+    } finally {
+      await rm(archive, { force: true });
+    }
+  } finally {
+    await rm(part, { recursive: true, force: true });
+  }
+}
+async function streamTar(remote, from, archive, max, signal) {
+  const out = createWriteStream(archive);
+  const closed = once(out, "close").catch(() => void 0);
+  let seen = 0;
+  const abort = new AbortController();
+  const stop = () => abort.abort();
+  signal?.addEventListener("abort", stop, { once: true });
+  const timer = setTimeout(stop, PULL_MS);
+  const counter = new Transform({
+    transform(c, _enc, cb) {
+      seen += c.length;
+      if (seen > max + 1024 * 1024) stop();
+      cb(null, c);
+    }
+  });
+  counter.pipe(out);
+  const script = `cd ${sq(from)} && COPYFILE_DISABLE=1 exec tar -cf - .`;
+  let r;
+  try {
+    r = await remote.stream(script, { output: counter }, abort.signal);
+  } catch (err) {
+    counter.destroy();
+    out.destroy();
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", stop);
+    await closed;
+  }
+  if (seen > max + 1024 * 1024) throw new Error(`it grew past the ${mb(max)} one copy may be while it was copied`);
+  if (signal?.aborted) throw new Error("cancelled");
+  if (r.code !== 0) throw new Error(r.stderr.trim().split("\n").slice(-3).join("; ") || `tar exited ${r.code ?? "without a status"}`);
+}
+function cancelled(signal) {
+  if (signal?.aborted) throw new Error("cancelled; nothing was replaced");
+}
+async function replace(part, to) {
+  await rm(to, { recursive: true, force: true });
+  await rename(part, to);
+}
+function mb(bytes) {
+  return bytes >= 1024 * 1024 ? `${(bytes / 1048576).toFixed(bytes >= 100 * 1048576 ? 0 : 1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+function localName(from) {
+  return basename(from.replace(/\/+$/, "")) || "fetched";
+}
+function toolsOf(ctx) {
+  const t = ctx?.tools;
+  return t && typeof t.register === "function" ? t : void 0;
+}
+function registerTools(tools2, deps) {
+  if (!tools2) return () => {
+  };
+  const off = [
+    tools2.register({
+      name: "remote_fetch",
+      description: FETCH_DESCRIPTION,
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "The file or folder on the machine. Relative: in the chat's checkout there, at the same place as your working directory. Absolute, or ~/… for the machine's home, also work."
+          },
+          to: {
+            type: "string",
+            description: "Where to put the copy on this computer (absolute, or relative to your working directory). Omit it to use this chat's own folder for copies, which is outside the worktree."
+          },
+          host: { type: "string", description: "The machine, by name: only needed when this chat uses more than one." },
+          show: { type: "boolean", description: "For an image (PNG, JPEG, GIF, WebP) up to about 3.7 MB: also return it, to look at." }
+        },
+        required: ["path"],
+        additionalProperties: false
+      },
+      handler: (args, call) => remoteFetch(deps, args, call)
+    }),
+    tools2.register({
+      name: "machine_status",
+      description: STATUS_DESCRIPTION,
+      inputSchema: {
+        type: "object",
+        properties: { host: { type: "string", description: "One machine, by name. Omit it for this chat's machine, or every paired one." } },
+        additionalProperties: false
+      },
+      handler: (args, call) => machineStatus(deps, args, call)
+    })
+  ];
+  return () => off.forEach((f) => f());
+}
+const FETCH_DESCRIPTION = "Copy a file or a whole folder from the remote machine this chat's terminals run on (remote-host) to this computer, and say where the copy is. Use it for what the terminal's sync doesn't bring back: build outputs and anything git ignores, an .xcresult bundle, a screenshot, a test or coverage report, a crash log, or a file outside the checkout. Files the chat's checkout tracks come back by themselves after each terminal command; don't fetch those. A folder comes whole (files and folders; links are skipped). Up to 1 GB. By default the copy goes in this chat's own folder for copies on this computer, outside the worktree, and is deleted with the chat; a later fetch of the same name replaces it. With `to`, a path that already exists is replaced only if the user approves.";
+const STATUS_DESCRIPTION = "Report the remote machines this chat's terminals run on (remote-host): whether each can be reached and why not, what it is (OS, CPU architecture, free disk, git, Xcode, Homebrew), whether root with approval is set up, and what this chat has there now (terminals, MCP servers, forwarded ports, its checkout's path). Read-only and quick. Use it when a remote command fails in a way that looks like the machine, before a long build, or to learn its paths.";
+class ToolRefusal extends Error {
+}
+async function remoteFetch(deps, args, call) {
+  try {
+    const path = text(args.path, "path");
+    if (!path) throw new ToolRefusal("`path` is required: the file or folder on the machine to copy.");
+    const to = args.to === void 0 ? void 0 : text(args.to, "to");
+    const e = await pickOne(deps.registry, call.chatId, args.host === void 0 ? void 0 : text(args.host, "host"));
+    const label = e.host.label;
+    const signal = call.signal;
+    const there = await e.backend.whereThere(call.chatId, call.cwd, signal);
+    const from = remotePath(path, there);
+    const remote = e.backend.remoteSide();
+    const found = await look(remote, from);
+    if (found.kind === "missing") {
+      const rel = path.startsWith("/") || path.startsWith("~") ? "" : ` (a relative path is taken in ${there.cwd})`;
+      throw new ToolRefusal(`There is nothing at ${from} on ${label}${rel}.`);
+    }
+    if (found.kind === "other") throw new ToolRefusal(`${from} on ${label} is neither a file nor a folder.`);
+    let dest;
+    if (to) {
+      if (!isAbsolute(to) && !call.cwd) throw new ToolRefusal("`to` is relative, and this chat has no working directory to take it in; give an absolute path.");
+      dest = isAbsolute(to) ? resolve(to) : resolve(call.cwd, to);
+      if (existsSync(dest)) await mayReplace(deps, call, dest, `${label}:${from}`, label);
+    } else {
+      dest = resolve(e.backend.fetchedDir(call.chatId), localName(from));
+    }
+    const got = await pull(remote, from, found, dest, { signal });
+    deps.log.info(`remote-host ${e.host.slug}: remote_fetch for ${call.chatId}: ${from} → ${dest} (${mb(got.bytes)})`);
+    return await answer(got, from, dest, label, call, args.show === true);
+  } catch (err) {
+    if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
+    throw new Error(`remote_fetch failed: ${errText$1(err)}`);
+  }
+}
+async function mayReplace(deps, call, dest, source, label) {
+  if (!deps.approvals) {
+    throw new ToolRefusal(
+      `${dest} already exists, and this Dispatch can't ask the user whether to replace it. Give a path that doesn't exist yet, or omit \`to\`.`
+    );
+  }
+  const res = await deps.approvals.request(call.chatId, {
+    title: `Replace a local file with a copy from ${label}`,
+    detail: `The agent's remote_fetch would delete what is at this path on this computer and put a copy of ${source} there instead.`,
+    command: `remote_fetch ${source} → ${dest}`,
+    ...call.cwd ? { cwd: call.cwd } : {},
+    machine: label,
+    timeoutSeconds: 300,
+    signal: call.signal
+  });
+  if (res.decision === "approved") return;
+  const why = res.decision === "denied" ? "The user said no" : res.decision === "timeout" ? "Nobody answered in 5 minutes" : "It was cancelled";
+  throw new ToolRefusal(`${why}, so ${dest} was left as it was and nothing was copied. Give a path that doesn't exist yet, or omit \`to\`.`);
+}
+const IMAGE_TYPES = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp"
+};
+const MAX_IMAGE_BYTES = 37e5;
+async function answer(got, from, dest, label, call, show) {
+  const lines = [];
+  if (got.kind === "file") {
+    lines.push(`Copied ${from} from ${label} to ${dest} (${mb(got.bytes)}).`);
+  } else {
+    const u = got.unpacked;
+    lines.push(`Copied the folder ${from} from ${label} to ${dest}: ${u.files} files in ${u.dirs + 1} folders, ${mb(got.bytes)}.`);
+    if (u.skipped.length) {
+      const list2 = u.skipped.slice(0, 10).join("; ");
+      lines.push(`Not copied (${u.skipped.length}): ${list2}${u.skipped.length > 10 ? "; …" : ""}.`);
+    }
+  }
+  if (call.cwd) {
+    const rel = relative(resolve(call.cwd), dest);
+    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+      lines.push("It is inside your working directory, so git sees it, and the next terminal command's sync takes it to the machine too.");
+    }
+  }
+  const content = [
+    { type: "text", text: lines.join("\n") }
+  ];
+  if (show) {
+    const mime = IMAGE_TYPES[extname(dest).toLowerCase()];
+    if (got.kind !== "file" || !mime) content.push({ type: "text", text: "(show: only a PNG, JPEG, GIF or WebP file can be shown.)" });
+    else if (got.bytes > MAX_IMAGE_BYTES) content.push({ type: "text", text: `(show: it is ${mb(got.bytes)}, too big to show; open the copy instead.)` });
+    else content.push({ type: "image", data: (await readFile(dest)).toString("base64"), mimeType: mime });
+  }
+  return { content };
+}
+function remotePath(path, there) {
+  if (/[\0\n\r]/.test(path)) throw new ToolRefusal("`path` has a control character in it.");
+  if (path === "~" || path.startsWith("~/")) {
+    if (!there.home) throw new ToolRefusal("The machine's home isn't known yet; give an absolute path.");
+    return posix.normalize(posix.join(there.home, path.slice(1)));
+  }
+  if (path.startsWith("~")) throw new ToolRefusal("Only your own home (~/…) can be named with ~; give an absolute path.");
+  return posix.normalize(path.startsWith("/") ? path : posix.join(there.cwd, path));
+}
+async function machineStatus(deps, args, call) {
+  try {
+    const name = args.host === void 0 ? void 0 : text(args.host, "host");
+    const all = deps.registry.all();
+    if (!all.length) return "No machines are paired. The user pairs one in Settings → Remote hosts.";
+    let chosen;
+    if (name) chosen = [byName(all, name)];
+    else {
+      const mine = await chatsMachines(all, call.chatId);
+      chosen = mine.length ? mine : all;
+    }
+    const views = new Map(deps.registry.list().map((v) => [v.slug, v]));
+    const blocks = [];
+    for (const e of chosen) {
+      const v = views.get(e.host.slug);
+      if (v) blocks.push(await describe(e, v, call));
+    }
+    return blocks.join("\n\n");
+  } catch (err) {
+    if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
+    throw err;
+  }
+}
+async function describe(e, v, call) {
+  const p = v.probe;
+  const lines = [`${v.label} (terminal location ${v.id}): ${v.status.state}${v.status.detail ? `, ${v.status.detail}` : ""}`];
+  const facts = [];
+  if (v.address) facts.push(`at ${v.address}`);
+  if (p) {
+    const os = [p.os.name, p.os.version].filter(Boolean).join(" ") || p.platform;
+    facts.push(`${os} on ${p.arch}`, `user ${p.user}, home ${p.home}`);
+    if (p.freeDiskBytes !== null) facts.push(`${gb(p.freeDiskBytes)} free`);
+    facts.push(`dispatch-host ${p.agentVersion}`);
+  } else {
+    facts.push("not reached yet this run, so nothing more is known");
+  }
+  lines.push(`  ${facts.join(" · ")}`);
+  if (p) {
+    const tools2 = [];
+    tools2.push(p.tools.git ? "git" : "no git");
+    if (p.tools.xcodebuild) tools2.push(p.tools.xcodeFirstLaunchDone === false ? "Xcode (license not accepted; xcodebuild won't run)" : "Xcode");
+    if (p.brew) {
+      const brew = p.brew.blocked ? `Homebrew, blocked: ${p.brew.blocked}` : p.brew.writable ? "Homebrew" : "Homebrew (another account's: usable, not installable into)";
+      tools2.push(brew);
+    }
+    if (p.tools.node) tools2.push("node");
+    if (p.tools.pnpm) tools2.push("pnpm");
+    lines.push(`  tools: ${tools2.join(", ")}`);
+    if (p.consoleUser === "root") lines.push("  nobody is logged in at its screen (no desktop session)");
+  }
+  lines.push(`  root with approval: ${v.elevation.on ? v.elevation.canAsk ? "on (sudo asks the user)" : "set up, but this Dispatch can't ask the user" : "off (sudo is refused)"}`);
+  const act = e.backend.chatActivity(call.chatId);
+  const mine = [];
+  if (act.shells.length) mine.push(`terminals ${act.shells.join(", ")}`);
+  if (act.servers.length) mine.push(`MCP servers ${act.servers.join(", ")}`);
+  if (act.ports.length) mine.push(`forwarded ports ${act.ports.map((f) => `${f.remotePort} → ${f.url}`).join(", ")}`);
+  lines.push(`  this chat there: ${mine.length ? mine.join("; ") : "nothing running"}`);
+  if (v.status.state !== "offline") {
+    try {
+      const there = await withTimeout(e.backend.whereThere(call.chatId, call.cwd, call.signal), 5e3);
+      lines.push(`  this chat's ${there.checkout ? `checkout there: ${there.checkout} (your working directory is ${there.cwd})` : `directory there: ${there.cwd}`}`);
+    } catch {
+    }
+  }
+  return lines.join("\n");
+}
+async function pickOne(registry, chatId, name) {
+  const all = registry.all();
+  if (!all.length) throw new ToolRefusal("No machines are paired. The user pairs one in Settings → Remote hosts.");
+  if (name) return byName(all, name);
+  const mine = await chatsMachines(all, chatId);
+  if (mine.length === 1) return mine[0];
+  if (!mine.length && all.length === 1) return all[0];
+  const among = (mine.length ? mine : all).map((e) => e.host.label).join(", ");
+  throw new ToolRefusal(
+    mine.length ? `This chat uses more than one machine (${among}); say which with \`host\`.` : `This chat hasn't used a machine yet, and more than one is paired (${among}); say which with \`host\`.`
+  );
+}
+async function chatsMachines(all, chatId) {
+  const known = await Promise.all(all.map((e) => e.backend.knowsChat(chatId).catch(() => false)));
+  return all.filter((_, i) => known[i]);
+}
+function byName(all, name) {
+  const n = name.trim().toLowerCase();
+  const e = all.find((x) => x.host.slug === n || x.host.label.toLowerCase() === n || backendId(x.host.slug) === n);
+  if (!e) throw new ToolRefusal(`No paired machine is called ${name}. Paired: ${all.map((x) => x.host.label).join(", ")}.`);
+  return e;
+}
+function text(v, field) {
+  if (typeof v !== "string") throw new ToolRefusal(`\`${field}\` must be a string.`);
+  return v.trim();
+}
+function gb(bytes) {
+  return `${(bytes / 1024 ** 3).toFixed(bytes >= 100 * 1024 ** 3 ? 0 : 1)} GB`;
+}
+function withTimeout(p, ms) {
+  let t;
+  return Promise.race([
+    p.finally(() => clearTimeout(t)),
+    new Promise((_, rej) => {
+      t = setTimeout(() => rej(new Error("timeout")), ms);
+    })
+  ]);
 }
 class HostRegistry {
   constructor(deps) {
@@ -26032,6 +26563,7 @@ class HostRegistry {
       ...runs ? { runs, where: (backend) => this.labelOf(backend) } : {},
       ...this.deps.lockWaitMs !== void 0 ? { lockWaitMs: this.deps.lockWaitMs } : {},
       ...approvals ? { approvals } : {},
+      ...toolsOf(ctx) ? { agentTools: true } : {},
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || void 0,
       ...this.deps.elevationConnect ? { elevationConnect: this.deps.elevationConnect } : {}
     });
@@ -26052,6 +26584,10 @@ class HostRegistry {
   }
   get(slug) {
     return this.entries.get(slug);
+  }
+  /** Every paired machine's entry. */
+  all() {
+    return [...this.entries.values()];
   }
   list() {
     const prev = this.deps.previousInstanceId;
@@ -26312,7 +26848,17 @@ const server = definePlugin({
     });
     const setups = new ElevationSetups();
     ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, setups, hosts, saveHosts }));
-    live = { registry, pairing, setups, off };
+    const approvals = approvalsOf(ctx);
+    const offTools = registerTools(toolsOf(ctx), { registry, log: ctx.log, ...approvals ? { approvals } : {} });
+    live = {
+      registry,
+      pairing,
+      setups,
+      off: () => {
+        offTools();
+        off();
+      }
+    };
   },
   /**
    * After every activation Dispatch lists the chats that exist; whatever a

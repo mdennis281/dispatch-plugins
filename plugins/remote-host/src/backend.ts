@@ -84,6 +84,8 @@ export interface HostBackendDeps {
   lockWaitMs?: number;
   /** `ctx.approvals`, when this Dispatch has it. Without it nothing is ever elevated. */
   approvals?: Approvals;
+  /** The agent has remote-host's own tools (tools/, `ctx.tools`), so its note names them. */
+  agentTools?: boolean;
   /** The machine's elevation key (`REMOTE_HOST_ELEVATE_KEY_<SLUG>`), if elevation is set up there. */
   elevateKey?: () => Promise<string | undefined>;
   /** Tests: the elevation login. */
@@ -206,6 +208,63 @@ export class HostBackend implements TerminalBackend {
     return sh;
   }
 
+  /** {@link place}'s paths, with nothing made or set up: where `localCwd` is there. */
+  private async locate(
+    chatId: string,
+    repoDir: string | undefined,
+    localCwd: string,
+    paths: HostPaths,
+  ): Promise<{ root?: string; local: string; cwd: string; checkout?: string }> {
+    const root = await repoTop(repoDir);
+    // git reports the top as a real path (macOS's /var is /private/var): compare like with like.
+    const local = root ? await realpath(localCwd).catch(() => localCwd) : localCwd;
+    const checkout = root ? chatWorktreePath(paths.root, this.deps.instanceId, chatId, repoName(root)) : undefined;
+    const cwd = checkout ? posix.join(checkout, within(root!, local)) : chatDir(paths, this.deps.instanceId, chatId);
+    return { ...(root ? { root } : {}), local, cwd, ...(checkout ? { checkout } : {}) };
+  }
+
+  /**
+   * For the agent tools (tools/): where a chat's local `cwd` is on this
+   * machine (its checkout, or its directory there), and the machine's home.
+   * Waits for the link like a spawn does.
+   */
+  async whereThere(chatId: string, localCwd: string | undefined, signal?: AbortSignal): Promise<{ cwd: string; checkout?: string; home?: string }> {
+    const linked = await this.deps.link.ready(signal);
+    const at: { cwd: string; checkout?: string } = localCwd
+      ? await this.locate(chatId, localCwd, localCwd, linked.paths)
+      : { cwd: chatDir(linked.paths, this.deps.instanceId, chatId) };
+    const home = this.deps.link.probe?.home;
+    return { cwd: at.cwd, ...(at.checkout ? { checkout: at.checkout } : {}), ...(home ? { home } : {}) };
+  }
+
+  /** The sync's view of this machine, for copies the tools make. */
+  remoteSide(): RemoteSide {
+    return (this.remote ??= linkRemote(this.deps.link));
+  }
+
+  /** Whether this chat has had a terminal (or an MCP server) on this machine. */
+  async knowsChat(chatId: string): Promise<boolean> {
+    if (this.chatsWithShells().has(chatId)) return true;
+    for (const k of this.processes.keys()) if (k.startsWith(`${chatId}\u0000`)) return true;
+    return this.served.has(chatId) || ((await this.deps.kv?.get(this.servedKey(chatId)).catch(() => undefined)) ?? undefined) !== undefined;
+  }
+
+  /** What this chat has running here: shells, MCP servers, forwarded ports. */
+  chatActivity(chatId: string): { shells: string[]; servers: string[]; ports: Array<{ remotePort: number; url: string }> } {
+    const names = (m: Map<string, unknown>) =>
+      [...m.keys()].filter((k) => k.startsWith(`${chatId}\u0000`)).map((k) => k.slice(chatId.length + 1));
+    return {
+      shells: names(this.shells),
+      servers: names(this.processes),
+      ports: this.ports.list(chatId).map((f) => ({ remotePort: f.remotePort, url: f.url })),
+    };
+  }
+
+  /** Where `remote_fetch` puts a copy when the agent names no place: this chat's own folder here, gone with the chat. */
+  fetchedDir(chatId: string): string {
+    return join(this.mcpLocalDir(chatId), "fetched");
+  }
+
   /**
    * Where a chat's work happens there. In a repository, the same place in the
    * chat's checkout; the checkout itself is filled by the first command's
@@ -219,11 +278,7 @@ export class HostBackend implements TerminalBackend {
     paths: HostPaths,
     ensure: boolean,
   ): Promise<{ cwd: string; checkout?: { remote: string; local: string } }> {
-    const root = await repoTop(repoDir);
-    // git reports the top as a real path (macOS's /var is /private/var): compare like with like.
-    const local = root ? await realpath(localCwd).catch(() => localCwd) : localCwd;
-    const checkout = root ? chatWorktreePath(paths.root, this.deps.instanceId, chatId, repoName(root)) : undefined;
-    const cwd = checkout ? posix.join(checkout, within(root!, local)) : chatDir(paths, this.deps.instanceId, chatId);
+    const { root, local, cwd, checkout } = await this.locate(chatId, repoDir, localCwd, paths);
     if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
     if (ensure && root) {
       // Only setup makes the checkout: a bare `mkdir -p` of a wiped one passed
@@ -649,6 +704,13 @@ export class HostBackend implements TerminalBackend {
         `the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started ` +
         `from this chat's terminals; nothing else on the machine is.`,
       mcpNote(host.label, this.mcpLocalDir(info.chatId)),
+      ...(this.deps.agentTools
+        ? [
+            `- To bring here what the sync doesn't (build output, an .xcresult, a screenshot, a test report, a file outside ` +
+              `the checkout), call remote-host's \`remote_fetch\` tool with its path there; it says where the copy is. Its ` +
+              `\`machine_status\` tool says what ${host.label} is and what this chat has there, without running a command.`,
+          ]
+        : []),
       `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its ` +
         `checkout there.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,

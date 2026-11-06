@@ -9,7 +9,7 @@ Plugins for [Dispatch](https://github.com/mdennis281/dispatch). Each one lives i
 
 ## Planned
 
-- **Remote host**, next: the GUI agent (Simulator, UI tests, Safari), then a chat's browser MCPs on the same machine. Design: [docs/design/remote-host.md](docs/design/remote-host.md).
+- **Remote host**, next: the GUI agent (Simulator, UI tests, Safari, and headed browsers and WebKit for the chat's browser MCPs, which run headless on the machine today). Design: [docs/design/remote-host.md](docs/design/remote-host.md).
 
 ## Install
 

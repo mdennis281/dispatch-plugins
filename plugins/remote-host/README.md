@@ -2,7 +2,7 @@
 
 A [Dispatch](https://github.com/mdennis281/dispatch) plugin, part of [dispatch-plugins](https://github.com/mdennis281/dispatch-plugins), that runs a chat's **managed terminals** (the agent's `terminal` tool and the Terminals panel) on **your own machines** over SSH. Macs come first. Each machine you pair becomes a terminal location, `remote-host/<name>`, that a project or chat can pick.
 
-> **Status:** terminals only (Tier A of the design), macOS first. It pairs machines (Settings → Remote hosts), runs shells on them, keeps each chat's worktree in sync with a checkout there, forwards the chat's dev servers here, runs the chat's browser MCP servers there (headless Chromium), and cleans up after a chat when it goes idle or is deleted. The GUI side (Simulator, UI tests, Safari, headed browsers, WebKit) comes later. The design is [docs/design/remote-host.md](../../docs/design/remote-host.md).
+> **Status:** terminals only (Tier A of the design), macOS first. It pairs machines (Settings → Remote hosts), runs shells on them, keeps each chat's worktree in sync with a checkout there, forwards the chat's dev servers here, runs the chat's browser MCP servers there (headless Chromium), gives the agent tools to fetch files from the machine and check on it, and cleans up after a chat when it goes idle or is deleted. The GUI side (Simulator, UI tests, Safari, headed browsers, WebKit) comes later. The design is [docs/design/remote-host.md](../../docs/design/remote-host.md).
 
 ## What it does
 
@@ -109,6 +109,19 @@ A chat whose terminal runs on a machine drives a browser **there** by default: D
 - **Per chat.** Each server keeps its output and uploads under `~/.dispatch-host/<instance>/mcp/<chat>/<server>/`, and its temporary files (the browser profile) under a short `~/.dispatch-host/t/<hash>/` (browsers put sockets there, and macOS caps a socket path at 104 bytes). Both are deleted with the chat. The installed packages and browsers are shared by every chat and instance, and stay until you delete them.
 - **Files cross over.** Dispatch answers the server's `roots/list` with those paths there. A file a result names there (a screenshot, a snapshot, a trace) is copied to this computer, under the system temp folder's `dispatch-remote-host/`, and the result names the copy. A local file a call names (an upload, a `file://` page) is copied there first; a local path to save to gets the file copied back to it. Copies are capped at 200 MB.
 - **A configured MCP server** placed on the machine (`mcpServers.<name>.location`) runs as written, in the chat's directory there, with the same lifetime. Its `env` goes over in a file only `dispatch` can read, which is deleted as the server starts, so a token there never shows in `ps`. Its arguments do show, as they would here.
+
+## The agent's tools
+
+On a Dispatch with agent tools (#519), the agent gets two tools of remote-host's own, as `mcp__dispatch-plugin-remote-host__<name>`, on every runtime:
+
+- **`remote_fetch`** copies a file or a whole folder from the chat's machine to this computer, and says where the copy is. It is for what the sync doesn't bring back: build output and anything git ignores, an `.xcresult` bundle, a screenshot, a test or coverage report, a crash log, a file outside the checkout.
+  - A relative path is taken in the chat's checkout there, at the same place as the agent's working directory. An absolute path, or `~/…` for the machine's home, also works.
+  - A folder comes whole, as a tar stream unpacked here. Only files and folders are written; links, and anything that would land outside the folder, are skipped and listed. Up to 1 GB.
+  - By default the copy goes in the chat's own folder for copies, under the system temp folder's `dispatch-remote-host/`, outside the worktree, so the sync never takes it back. It is deleted with the chat. With `to`, the agent picks the place. **A path that already exists is replaced only if you approve it**, on the same card as a tool permission: Codex runs MCP tools without asking, so the tool asks for itself. Where Dispatch can't ask, it refuses instead.
+  - `show: true` on an image (PNG, JPEG, GIF, WebP) also returns it to the agent to look at.
+- **`machine_status`** reports the chat's machine (or every paired one): whether it can be reached and why not, its OS, architecture, free disk, git, Xcode and Homebrew, whether root with approval is on, and what the chat has there (terminals, MCP servers, forwarded ports, its checkout's path). It only reads what the plugin already knows.
+
+Both copy and read as `dispatch`, so they reach nothing a chat shell couldn't. On an older Dispatch the plugin works the same without them.
 
 ## Root, with your approval
 

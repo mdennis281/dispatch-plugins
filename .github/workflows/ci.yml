@@ -33,10 +33,10 @@ env:
   # The Dispatch commit the SDK is built from. Pinned, so a change on Dispatch's
   # main can't turn this repository red on its own. Move it when a plugin needs
   # newer SDK types or hooks, and commit the rebuilt bundles in the same PR.
-  # a9ec9ce (#518): has `optionalCapabilities`, where remote-host lists #512's
-  # `approvals` and #517's `runner`, so the SDK's schema and test context
-  # read that list.
-  DISPATCH_REF: a9ec9ce5a8b445e7463d91d35cdf49cc02c76c62
+  # f26890d (#519): has `ctx.tools`, remote-host's agent tools, and the test
+  # context's `t.tools`. After #518 (`optionalCapabilities`), where tools,
+  # approvals and runner are listed.
+  DISPATCH_REF: f26890d6080ab1c2dfed37ddc1134881fef84455
 
 jobs:
   plugins:

@@ -15,6 +15,7 @@ import { backendId, connectionChanged, elevateSecretName, keySecretName, type Ho
 import { HostLink, type LinkConnection, type LinkTiming } from "./link.js";
 import { reservedPortsOf } from "./ports.js";
 import { runsOf } from "./sync/run-lock.js";
+import { toolsOf } from "./tools/index.js";
 import type { HostShellOptions } from "./session.js";
 
 export interface RegistryDeps {
@@ -139,6 +140,7 @@ export class HostRegistry {
       ...(runs ? { runs, where: (backend: string) => this.labelOf(backend) } : {}),
       ...(this.deps.lockWaitMs !== undefined ? { lockWaitMs: this.deps.lockWaitMs } : {}),
       ...(approvals ? { approvals } : {}),
+      ...(toolsOf(ctx) ? { agentTools: true } : {}),
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || undefined,
       ...(this.deps.elevationConnect ? { elevationConnect: this.deps.elevationConnect } : {}),
     });
@@ -163,6 +165,11 @@ export class HostRegistry {
 
   get(slug: string): Entry | undefined {
     return this.entries.get(slug);
+  }
+
+  /** Every paired machine's entry. */
+  all(): Entry[] {
+    return [...this.entries.values()];
   }
 
   list(): HostView[] {

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -24,6 +24,14 @@ describe.skipIf(!SH)("remoteFiles (the machine played by the local sh)", () => {
     expect(await files.fetch(fwd(join(dir, "missing.png")), join(dir, "x.png"))).toBe(false);
     writeFileSync(join(dir, "big.bin"), "x".repeat(100));
     await expect(files.fetch(fwd(join(dir, "big.bin")), join(dir, "y.bin"))).rejects.toThrow(/100 bytes, over the/);
+  });
+
+  it("stops when cancelled, and leaves no copy or temporary behind", async () => {
+    writeFileSync(join(dir, "cancel.png"), "PNG");
+    const to = join(dir, "cancelled", "copy.png");
+    await expect(files.fetch(fwd(join(dir, "cancel.png")), to, AbortSignal.abort())).rejects.toThrow(/cancelled/);
+    expect(existsSync(to)).toBe(false);
+    expect(readdirSync(join(dir, "cancelled"))).toEqual([]);
   });
 
   it("copies a local file there, making its directory", async () => {
