@@ -72,7 +72,7 @@ through each plugin's rebuilt bundle.
    - a remote edit conflicts with a local one;
    - the cwd is missing on the machine (never `cd ~`);
    - the machine is offline;
-   - another terminal holds the checkout's foreground lock.
+   - another terminal holds the checkout's foreground lock: one of the chat's on the same machine, or (with core E28) any foreground run on this computer in the same local files, or the chat's on another location.
 
    The backend declares `fallback: "refuse"`. A Mac terminal never quietly becomes a Windows shell.
 4. **Three-way sync** around each run, with the last snapshot as the base:
@@ -238,7 +238,7 @@ Sizes: S is under a day, M is a few days, L is about a week, XL is more.
 |---|---|---|
 | E22 | Retire or hand over a removed backend's cleanup rows | S |
 | E27 | A shared coordination primitive in `config/` (lock, or plugin state that survives updates) for both instances | M |
-| E28 | Backends see which runs are in flight per chat and terminal, for the foreground lock | S |
+| E28 | Backends see which runs are in flight per chat and terminal, for the foreground lock. **Done: Dispatch #514** (`ctx.terminals.runs` / `onRun`). remote-host ≥ 0.7.2 uses it (sync/run-lock.ts): a command on the machine is refused while a foreground run elsewhere works in the same local files, and a pull-back waits (up to 2 min) for one that started meanwhile. Not covered: a local command can't be made to wait (core asks no plugin first), and two chats that share one local checkout (no worktrees) aren't matched while both run on machines (a remote run's directory doesn't say which local files it syncs) | S |
 | E9 | `run_subapp` with `location` | M |
 | E11 | Plugin tool guard / `localShellPolicy` for the agent's local Bash in remote-default chats | M |
 | E13 | `{execPath}` MCP token; reloadable plugin MCP contributions | S |

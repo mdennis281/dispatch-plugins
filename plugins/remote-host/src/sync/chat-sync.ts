@@ -15,6 +15,9 @@
  *    command in another terminal of the chat would otherwise sync files out
  *    from under it. One core stopped waiting for (timed out, cancelled)
  *    keeps it until the shell there says it ended, or the shell is gone.
+ *    A foreground command elsewhere in the same local files (a terminal on
+ *    this computer, this chat's on another machine) holds them too, and a
+ *    pull-back waits for one that started meanwhile (run-lock.ts).
  *
  * After a command (`afterRun`): pull back. Each path the machine changed
  * comes back where the local file still matches the base, checked against
@@ -100,6 +103,7 @@ import {
   type RemotePaths,
   type RemoteSide,
 } from "./remote.js";
+import type { CheckoutLock, RunInFlight } from "./run-lock.js";
 
 /** Untracked files bigger than this aren't sent; new files the machine makes bigger than this aren't brought back. */
 export const DEFAULT_CAP_BYTES = 50 * 1024 * 1024;
@@ -162,6 +166,8 @@ export interface ChatSyncDeps {
   capBytes?: number;
   /** Most bytes per transfer batch (tests make it small). */
   batchBytes?: number;
+  /** The lock across Dispatch's other shells in these files (run-lock.ts), when this Dispatch reports its runs. */
+  lock?: CheckoutLock;
 }
 
 interface Holder {
@@ -200,6 +206,10 @@ export class ChatSync {
       const h = this.holder;
       // A command core stopped waiting for may still be running, even in this terminal.
       if (h && (h.terminal !== info.terminal || h.ended)) return { refuse: this.busyText(h) };
+      // Before anything here is read or written: a shell elsewhere (on this
+      // computer, say) running a command in these files holds them too.
+      const others = await this.d.lock?.others(this.lockQuery(info.runId), "before");
+      if (others?.length) return { refuse: this.d.lock!.refusal(others, this.d.chatId, this.d.label) };
       const notices: string[] = this.pending.splice(0);
       try {
         await this.prepare();
@@ -239,12 +249,23 @@ export class ChatSync {
       if (info.outcome === "finished" || info.outcome === "shell-exited") this.holder = undefined;
       else h.ended = info.outcome;
     }
+    // A command elsewhere (on this computer, say) may have started in these
+    // files meanwhile, since nothing asks this plugin first: bring nothing back
+    // while it runs. Waited for outside the queue, so this chat's next command
+    // there is refused at once rather than held behind the wait.
+    const wait = this.d.lock ? await this.d.lock.waitClear(this.lockQuery(info.runId), info.signal) : undefined;
+    const busy: RunInFlight[] = wait?.still ?? [];
     return this.serial(async () => {
       const notices: string[] = [];
       try {
         await this.prepare();
         if (!this.rec.base) return {};
-        await this.pullBack(notices, info.command, info.signal);
+        if (busy.length) notices.push(this.d.lock!.notBack(wait!, this.d.chatId, this.d.label));
+        else {
+          const waited = wait && this.d.lock!.waited(wait, this.d.chatId, this.d.label);
+          if (waited) notices.push(waited);
+          await this.pullBack(notices, info.command, info.signal);
+        }
       } catch (err) {
         notices.push(
           `[${this.d.label}] Could not check for changes the command made there (${errText(err)}). ` +
@@ -289,6 +310,10 @@ export class ChatSync {
   /** The shell there says a run is over (one core stopped waiting for, say): it no longer holds the checkout. */
   runEnded(runId: string): void {
     if (this.holder?.runId === runId) this.holder = undefined;
+  }
+
+  private lockQuery(runId: string) {
+    return { chatId: this.d.chatId, root: this.d.root, runId };
   }
 
   /** Run `fn` after every earlier sync of this chat. */

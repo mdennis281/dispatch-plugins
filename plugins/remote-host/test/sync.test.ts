@@ -26,6 +26,7 @@ import type { TerminalAfterRunInfo, TerminalRunInfo } from "@dispatch/plugin-sdk
 import { repoTop, within } from "../src/backend.js";
 import { ChatSync, restoreLine, type ChatSyncDeps } from "../src/sync/chat-sync.js";
 import { batches, parseRawDiff, pathProblem } from "../src/sync/local.js";
+import { CheckoutLock, type RunInFlight } from "../src/sync/run-lock.js";
 import { SH, localRemote } from "./local-remote.js";
 
 const win = process.platform === "win32";
@@ -814,6 +815,119 @@ describe.skipIf(!SH)("the checkout lock", () => {
     expect((await s.beforeRun(run({ terminal: "main" }))).refuse).toMatch(/`pnpm build` timed out and may still be running/);
     s.runEnded(r1.runId);
     expect((await s.beforeRun(run({ terminal: "main" }))).refuse).toBeUndefined();
+  });
+
+  /** Core's runs anywhere, as `ctx.terminals.runs()` would list them, with the lock this machine builds on them. */
+  function elsewhere(afterWaitMs = 5_000) {
+    const inFlight: RunInFlight[] = [];
+    const ended = new Set<(e: { kind: "started" | "ended"; run: RunInFlight }) => void>();
+    const lock = new CheckoutLock({
+      runs: {
+        runs: () => [...inFlight],
+        onRun: (fn) => (ended.add(fn), () => ended.delete(fn)),
+      },
+      self: "remote-host/test-mac",
+      where: (b) => (b === "local" ? "this computer" : b),
+      afterWaitMs,
+    });
+    let seq = 0;
+    return {
+      lock,
+      start: (r: Partial<RunInFlight>): RunInFlight => {
+        const full: RunInFlight = { runId: `else-${++seq}`, chatId: "chat-1", terminal: "build", backend: "local", cwd: "/x", background: false, startedAt: Date.now(), ...r };
+        inFlight.push(full);
+        return full;
+      },
+      end: (run: RunInFlight) => {
+        inFlight.splice(inFlight.indexOf(run), 1);
+        for (const fn of ended) fn({ kind: "ended", run });
+      },
+    };
+  }
+
+  it("refuses a command while a terminal on this computer runs one in the same files, and touches nothing", async () => {
+    const t = setup();
+    const e = elsewhere();
+    const s = t.mk({ lock: e.lock });
+    const local = e.start({ cwd: join(t.local, "src"), chatId: "chat-other" });
+    writeFileSync(join(t.local, "a.txt"), "being written here\n");
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toMatch(/^Not run: terminal "build" of another chat on this computer \(for \d+ s\) is running a command in this chat's files/);
+    // Nothing was read or set up there.
+    expect(existsSync(t.work)).toBe(false);
+    e.end(local);
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+    expect(read(`${t.work}/a.txt`)).toBe("being written here\n");
+  });
+
+  it("doesn't count a terminal elsewhere in other files, a background one, or another chat's on another location", async () => {
+    const t = setup();
+    const e = elsewhere();
+    const s = t.mk({ lock: e.lock });
+    e.start({ cwd: t.host }); // on this computer, outside the chat's files
+    e.start({ cwd: t.local, background: true }); // a dev server here
+    e.start({ backend: "proxmox-terminal/pve", chatId: "chat-other" });
+    e.start({ backend: "remote-host/test-mac", terminal: "server" }); // this machine's own: its lock is the per-machine one
+    expect((await s.beforeRun(run())).refuse).toBeUndefined();
+  });
+
+  it("refuses while this chat runs a command at another location, and between two machines lets the older go first", async () => {
+    const t = setup();
+    const e = elsewhere();
+    const s = t.mk({ lock: e.lock });
+    const pve = e.start({ backend: "proxmox-terminal/pve", cwd: "/root/work" });
+    expect((await s.beforeRun(run())).refuse).toMatch(/terminal "build" on proxmox-terminal\/pve \(for \d+ s\) is running a command/);
+    e.end(pve);
+    // Another machine of this plugin's started first: it goes, this doesn't.
+    const other = e.start({ backend: "remote-host/studio", startedAt: Date.now() - 1_000 });
+    const mine = e.start({ backend: "remote-host/test-mac", runId: "mine", terminal: "main" });
+    expect((await s.beforeRun(run({ runId: mine.runId }))).refuse).toMatch(/on remote-host\/studio/);
+    e.end(other);
+    e.end(mine);
+    // Started after this one: it is the one that gives way.
+    const me = e.start({ backend: "remote-host/test-mac", runId: "me-2", terminal: "main", startedAt: Date.now() - 1_000 });
+    e.start({ backend: "remote-host/studio" });
+    expect((await s.beforeRun(run({ runId: me.runId }))).refuse).toBeUndefined();
+  });
+
+  it("brings a command's changes back only once a command started here meanwhile is over, and says it waited", async () => {
+    const t = setup();
+    const e = elsewhere();
+    const s = t.mk({ lock: e.lock });
+    const r1 = run({ command: "pnpm codegen" });
+    expect((await s.beforeRun(r1)).refuse).toBeUndefined();
+    writeFileSync(`${t.work}/gen.ts`, "export const g = 1;\n");
+    const local = e.start({ cwd: t.local, terminal: "lint" });
+    setTimeout(() => {
+      // Not back yet while it runs.
+      expect(existsSync(join(t.local, "gen.ts"))).toBe(false);
+      e.end(local);
+    }, 1_200);
+    const a = await s.afterRun(after(r1));
+    expect(text(a)).toMatch(/\[Test Mac\] Waited \d+ s for terminal "lint" on this computer to finish its command in this chat's files/);
+    expect(text(a)).toMatch(/Brought back the changes made there by `pnpm codegen`/);
+    expect(read(join(t.local, "gen.ts"))).toBe("export const g = 1;\n");
+  });
+
+  it("past the wait, brings nothing back and says so; the next command brings it back", async () => {
+    const t = setup();
+    const e = elsewhere(300);
+    const s = t.mk({ lock: e.lock });
+    const r1 = run({ command: "pnpm codegen" });
+    await s.beforeRun(r1);
+    writeFileSync(`${t.work}/gen.ts`, "export const g = 1;\n");
+    const local = e.start({ cwd: t.local, terminal: "test" });
+    const a = await s.afterRun(after(r1));
+    expect(text(a)).toMatch(/\[Test Mac\] What the command changed there isn't brought back yet: terminal "test" on this computer \(for \d+ s\) is still running/);
+    expect(existsSync(join(t.local, "gen.ts"))).toBe(false);
+    // Still running: the next command is refused, and brings nothing back either.
+    expect((await s.beforeRun(run())).refuse).toMatch(/terminal "test" on this computer/);
+    expect(existsSync(join(t.local, "gen.ts"))).toBe(false);
+    e.end(local);
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toBeUndefined();
+    expect(text(b)).toMatch(/A gen\.ts/);
+    expect(read(join(t.local, "gen.ts"))).toBe("export const g = 1;\n");
   });
 
   it("isn't taken by a run core gave up on while it synced", async () => {

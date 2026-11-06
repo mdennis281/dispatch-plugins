@@ -14,6 +14,7 @@ import { removeElevation } from "./elevation-setup.js";
 import { backendId, connectionChanged, elevateSecretName, keySecretName, type HostConfig } from "./hosts.js";
 import { HostLink, type LinkConnection, type LinkTiming } from "./link.js";
 import { reservedPortsOf } from "./ports.js";
+import { runsOf } from "./sync/run-lock.js";
 import type { HostShellOptions } from "./session.js";
 
 export interface RegistryDeps {
@@ -32,6 +33,8 @@ export interface RegistryDeps {
   approvals?: Approvals;
   /** Tests: the elevation login. */
   elevationConnect?: ElevationDeps["connect"];
+  /** Tests: how long a pull-back waits for a run elsewhere in the files. */
+  lockWaitMs?: number;
 }
 
 export interface Entry {
@@ -122,6 +125,7 @@ export class HostRegistry {
     });
     const approvals = this.deps.approvals ?? approvalsOf(ctx);
     const reservedPorts = reservedPortsOf(ctx);
+    const runs = runsOf(ctx);
     entry.backend = new HostBackend(id, {
       host: () => entry.host,
       link: entry.link,
@@ -132,6 +136,8 @@ export class HostRegistry {
       ...(this.deps.shell ? { shell: this.deps.shell } : {}),
       ...(this.deps.portPollMs ? { portPollMs: this.deps.portPollMs } : {}),
       ...(reservedPorts ? { reservedPorts } : {}),
+      ...(runs ? { runs, where: (backend: string) => this.labelOf(backend) } : {}),
+      ...(this.deps.lockWaitMs !== undefined ? { lockWaitMs: this.deps.lockWaitMs } : {}),
       ...(approvals ? { approvals } : {}),
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || undefined,
       ...(this.deps.elevationConnect ? { elevationConnect: this.deps.elevationConnect } : {}),
@@ -147,6 +153,12 @@ export class HostRegistry {
     // the link moves it as it connects.
     entry.link.start();
     ctx.log.info(`remote-host: registered ${id} (${host.label})`);
+  }
+
+  /** A location's name, by backend id: one of these machines by its label, anything else by its id. */
+  private labelOf(backend: string): string {
+    for (const e of this.entries.values()) if (backendId(e.host.slug) === backend) return e.host.label;
+    return backend;
   }
 
   get(slug: string): Entry | undefined {
