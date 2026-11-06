@@ -36,6 +36,7 @@ import { PortForwards, type ReservedPort } from "./ports.js";
 import { Elevation, type Approvals, type ElevationDeps, type ElevationState } from "./elevation.js";
 import { HostShell, type HostShellOptions, type SessionOpener } from "./session.js";
 import { ChatSync, DEFAULT_CAP_BYTES, legacySyncKey, syncKey, type ChatSyncDeps } from "./sync/chat-sync.js";
+import { CheckoutLock, type RunsView } from "./sync/run-lock.js";
 import { linkRemote } from "./sync/link-remote.js";
 import { repoName } from "./sync/local.js";
 import type { RemoteSide } from "./sync/remote.js";
@@ -56,6 +57,12 @@ export interface HostBackendDeps {
   portPollMs?: number;
   /** `ctx.runner.reservedPorts`, when this Dispatch has it: ports here no forward may take. Without it, Dispatch's defaults. */
   reservedPorts?: () => Promise<readonly ReservedPort[]>;
+  /** Every shell's runs, anywhere (`ctx.terminals.runs`), when this Dispatch reports them: the lock across locations. */
+  runs?: RunsView;
+  /** A location's name by backend id, for that lock's messages. */
+  where?: (backend: string) => string;
+  /** Tests: how long a pull-back waits for a run elsewhere in the files. */
+  lockWaitMs?: number;
   /** `ctx.approvals`, when this Dispatch has it. Without it nothing is ever elevated. */
   approvals?: Approvals;
   /** The machine's elevation key (`REMOTE_HOST_ELEVATE_KEY_<SLUG>`), if elevation is set up there. */
@@ -411,7 +418,17 @@ export class HostBackend implements TerminalBackend {
       remote: this.remote,
       log: this.deps.log,
       ...(this.deps.kv ? { kv: this.deps.kv } : {}),
+      ...(this.deps.runs ? { lock: this.lock(this.deps.runs) } : {}),
       ...this.deps.sync,
+    });
+  }
+
+  private lock(runs: RunsView): CheckoutLock {
+    return new CheckoutLock({
+      runs,
+      self: this.id,
+      where: (backend) => (backend === "local" ? "this computer" : (this.deps.where?.(backend) ?? backend)),
+      ...(this.deps.lockWaitMs !== undefined ? { afterWaitMs: this.deps.lockWaitMs } : {}),
     });
   }
 
@@ -436,7 +453,9 @@ export class HostBackend implements TerminalBackend {
       `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is ` +
         `saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others ` +
         `are refused, so files never change under a running command; one that timed out holds every terminal until it ends ` +
-        `(Ctrl-C it). Outside a git repository nothing is synced.`,
+        `(Ctrl-C it). Likewise while a terminal on this computer (or this chat's terminal on another machine) runs a ` +
+        `command in the same files: a command in this terminal is refused, so run them one after the other, not side by ` +
+        `side. Outside a git repository nothing is synced.`,
       `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: ` +
         `on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on ` +
         `another, which the terminal result and Ports & processes give. Open ` +

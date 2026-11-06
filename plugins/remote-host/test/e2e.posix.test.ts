@@ -282,6 +282,14 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
         next = await t.terminals.beforeRun(ID, { chatId: "chat-sync", terminal: "main", command: "next", runId: `sync-4-${i}` });
       }
       expect(next.ran).toBe(true);
+
+      // A terminal on this computer running a command in the same files holds them too (core E28).
+      const here = t.terminals.startRun({ chatId: "chat-sync", backend: "local", cwd: join(repo, "src"), terminal: "build" });
+      const busy = await t.terminals.beforeRun(ID, { chatId: "chat-sync", terminal: "main", command: "after", runId: "sync-5" });
+      expect(busy.ran).toBe(false);
+      expect(busy.refusal).toMatch(/terminal "build" on this computer \(for \d+ s\) is running a command in this chat's files/);
+      t.terminals.endRun(here.runId);
+      expect((await t.terminals.beforeRun(ID, { chatId: "chat-sync", terminal: "main", command: "after", runId: "sync-6" })).ran).toBe(true);
       h.kill();
     } finally {
       rmSync(repo, { recursive: true, force: true });
