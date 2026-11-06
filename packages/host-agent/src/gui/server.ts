@@ -50,6 +50,7 @@ import { posix } from "node:path";
 import { randomBytes } from "node:crypto";
 import { assertId } from "../layout.js";
 import { FrameDecoder, decodeJson, encodeFrame, encodeOutput } from "../protocol.js";
+import { hostKillIo, killPlan, killTree, type KillIo } from "../procs.js";
 import { compareVersions } from "../runtime.js";
 import { AGENT_VERSION } from "../version.js";
 import { findDialogs, readScreen, type ScreenState } from "./dialogs.js";
@@ -163,6 +164,8 @@ export interface GuiServerOptions {
   exit?: (code: number) => void;
   /** Base environment for simctl and for runs that bring none. */
   env?: NodeJS.ProcessEnv;
+  /** How a run's tree is listed and killed; tests pass a fake. */
+  killIo?: KillIo;
 }
 
 interface LiveRun {
@@ -172,6 +175,8 @@ interface LiveRun {
   sock: Socket;
   argv0: string;
   startedAt: number;
+  /** Its start time, as ps shows it: a pid alive with another one is someone else's process now. */
+  start?: string;
 }
 
 export class GuiServer {
@@ -250,7 +255,7 @@ export class GuiServer {
     this.stopping = true;
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
-    for (const r of [...this.runs.values()]) this.killRun(r, "SIGKILL");
+    await Promise.all([...this.runs.values()].map((r) => this.killRun(r, "SIGKILL")));
     this.stopSafariDriver();
     this.releaseCaffeinate?.();
     this.releaseCaffeinate = undefined;
@@ -449,6 +454,13 @@ export class GuiServer {
     child.once("spawn", () => {
       started = true;
       sock.write(encodeFrame(GF.started, { runId: id, pid: child.pid! }));
+      void (this.o.killIo ?? hostKillIo)
+        .listProcs()
+        .then((rows) => {
+          const s = rows.find((x) => x.pid === child.pid)?.start;
+          if (s) r.start = s;
+        })
+        .catch(() => {});
     });
     let out = 0;
     let err = 0;
@@ -479,6 +491,8 @@ export class GuiServer {
         const e: RunExit = { code, signal };
         if (!sock.destroyed) sock.end(encodeFrame(GF.exit, e));
         this.log(`run ${id} (${r.argv0}) ended: ${signal ?? `exit ${code}`}`);
+        // Nothing a run started outlives it: a browser's helpers, a server it backgrounded.
+        void this.sweepRun(r);
       };
       if (pipesOpen === 0) return finish();
       onPipesClosed = finish;
@@ -486,7 +500,7 @@ export class GuiServer {
     });
     // The client went away (Ctrl-C'd, its shell killed): so does the run.
     sock.once("close", () => {
-      if (this.runs.has(id)) this.killRun(r, "SIGTERM");
+      if (this.runs.has(id)) void this.killRun(r, "SIGTERM");
     });
     this.runs.set(id, r);
     this.updateCaffeinate();
@@ -502,11 +516,44 @@ export class GuiServer {
     }
   }
 
-  /** SIGTERM (then SIGKILL after the grace) to the run's whole process group. */
-  private killRun(r: LiveRun, sig: NodeJS.Signals = "SIGTERM"): void {
+  /**
+   * End a run's whole tree as Tier A ends a shell's: its process group, its
+   * session (the run is a session leader, so a helper that left the group is
+   * still in it), and their descendants. The tree is listed FIRST and those
+   * processes remembered, because one that started its own session is found
+   * only through its parent, which `sig` (SIGTERM) may end. Then, after the
+   * grace, SIGKILL to what is left of them and of the tree. Resolves when done.
+   */
+  private async killRun(r: LiveRun, sig: NodeJS.Signals = "SIGTERM"): Promise<void> {
+    const pid = r.child.pid;
+    if (!pid) return;
+    const io = this.o.killIo ?? hostKillIo;
+    let tracked: Array<{ pid: number; start: string }> = [];
+    try {
+      const rows = await io.listProcs();
+      const members = await io.sessionMembers(pid);
+      const plan = killPlan(rows, { root: pid, ...(r.start ? { rootStart: r.start } : {}), sessionMembers: members, self: process.pid });
+      const start = new Map(rows.map((x) => [x.pid, x.start]));
+      tracked = plan.pids.flatMap((p) => (start.has(p) ? [{ pid: p, start: start.get(p)! }] : []));
+      for (const t of tracked) io.kill(t.pid, sig);
+    } catch {
+      /* listing failed: the group alone, below */
+    }
     this.signalRun(r, sig);
-    // Then SIGKILL whatever is left in its group, the leader or stragglers.
-    if (sig !== "SIGKILL") setTimeout(() => this.signalRun(r, "SIGKILL"), this.t.killGraceMs).unref?.();
+    if (sig !== "SIGKILL") await new Promise((done) => setTimeout(done, this.t.killGraceMs).unref?.());
+    await this.sweepRun(r, tracked);
+  }
+
+  /** SIGKILL to whatever is left of the run's tree (and of `tracked`): the leader, or stragglers once it has gone. */
+  private async sweepRun(r: LiveRun, tracked: Array<{ pid: number; start: string }> = []): Promise<void> {
+    const pid = r.child.pid;
+    if (!pid) return;
+    try {
+      await killTree(this.o.killIo ?? hostKillIo, { root: pid, ...(r.start ? { rootStart: r.start } : {}), tracked, self: process.pid });
+    } catch (e) {
+      this.log(`run ${r.id}: ending what it started failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.signalRun(r, "SIGKILL");
+    }
   }
 
   private updateCaffeinate(): void {
@@ -632,7 +679,7 @@ export class GuiServer {
     let runs = 0;
     for (const r of [...this.runs.values()]) {
       if (r.chat && mine(r.chat)) {
-        this.killRun(r);
+        void this.killRun(r);
         runs++;
       }
     }
@@ -730,7 +777,7 @@ export class GuiServer {
     if (!this.deadManFired) {
       this.deadManFired = true;
       this.log(`dead-man: no Dispatch contact for ${Math.round(silent / 3_600_000)}h; ending runs, shutting Simulators down, releasing Safari`);
-      for (const r of [...this.runs.values()]) this.killRun(r);
+      for (const r of [...this.runs.values()]) void this.killRun(r);
       if (this.state.safari) this.dropSafari(this.state.safari);
       for (const lease of Object.values(this.state.sims)) await this.simctl.shutdown(lease.udid).catch(() => {});
       this.updateCaffeinate();

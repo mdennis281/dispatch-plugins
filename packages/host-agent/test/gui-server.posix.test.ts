@@ -290,6 +290,31 @@ d("dispatch-gui run", () => {
     await until(() => s.runCount === 0);
   });
 
+  it("ends a helper that left the run's session, found while its parent was alive", async () => {
+    const s = await startServer();
+    const pidFile = join(work, "escapee.pid");
+    // A browser-like leader: it starts a helper in a session of its own, then waits.
+    const leader = `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1e6)'],{detached:true,stdio:'ignore'});require('fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));setInterval(()=>{},1e6)`;
+    const c = connect(sock());
+    await new Promise((r) => c.once("connect", r));
+    c.write(encodeFrame(GF.request, { v: 1, op: "run", argv: [process.execPath, "-e", leader], cwd: work, env: { PATH: process.env.PATH! } }));
+    await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "");
+    const helper = Number(readFileSync(pidFile, "utf8"));
+    expect(alive(helper)).toBe(true);
+    c.destroy();
+    await until(() => !alive(helper));
+    await until(() => s.runCount === 0);
+  });
+
+  it("ends what a run left running in its group when it exits on its own", async () => {
+    await startServer();
+    const pidFile = join(work, "straggler.pid");
+    const io = collect();
+    expect(await guiRun(sock(), { op: "run", argv: ["sh", "-c", `sleep 600 >/dev/null 2>&1 & echo $! > ${pidFile}`], cwd: work, env: { PATH: process.env.PATH! } }, io)).toBe(0);
+    const straggler = Number(readFileSync(pidFile, "utf8"));
+    await until(() => !alive(straggler));
+  });
+
   it("gives the run the chat's Simulator", async () => {
     await startServer();
     const lease = await guiCall<SimLease>(sock(), { op: "sim", instance: INST, chat: "c1" });
@@ -552,7 +577,7 @@ d("dispatch-gui, in a chat shell", () => {
   // `dispatch-gui run --stdin`, as its own process. Bytes in, the same bytes out, the exit code, the env.
   it.skipIf(!existsSync(DIST))("passes a stdio server's bytes through both ways as `run --stdin`, a process", async () => {
     await startServer();
-    const echo = "let n=0;process.stdin.on('data',c=>{n+=c.length;process.stdout.write(c)});process.stdin.on('end',()=>{process.stderr.write(process.env.SEAM+':'+n);process.exit(4)})";
+    const echo = "let n=0;process.stdin.on('data',c=>{n+=c.length;process.stdout.write(c)});process.stdin.on('end',()=>{process.stderr.write(process.env.SEAM+':'+n);process.exitCode=4})";
     const child = spawn(process.execPath, [DIST, "dispatch-gui", "run", "--stdin", "--", process.execPath, "-e", echo], {
       cwd: work,
       env: { ...env, DISPATCH_HOST_ROOT: root, SEAM: "plan-env" },
