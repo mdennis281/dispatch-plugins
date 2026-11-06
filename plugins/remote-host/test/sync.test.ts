@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TerminalAfterRunInfo, TerminalRunInfo } from "@dispatch/plugin-sdk";
 import { repoTop, within } from "../src/backend.js";
-import { ChatSync, type ChatSyncDeps } from "../src/sync/chat-sync.js";
+import { ChatSync, restoreLine, type ChatSyncDeps } from "../src/sync/chat-sync.js";
 import { batches, parseRawDiff, pathProblem } from "../src/sync/local.js";
 import { SH, localRemote } from "./local-remote.js";
 
@@ -987,6 +987,19 @@ describe.skipIf(!SH)("which checkout it is", () => {
     expect(read(`${t.work}/untracked.txt`)).toBe("only here\n");
   });
 
+  it("says a new terminal set it up again even when that command is cancelled", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    rmSync(t.work, { recursive: true, force: true });
+    await s.ensureCheckout("");
+    const b = await s.beforeRun(run({ signal: AbortSignal.abort() }));
+    expect(b.refuse).toBeDefined();
+    expect(text(b)).toMatch(/checkout there was gone; it is set up again from your files/);
+  });
+
   it("a new terminal in a checkout that is there only makes its directory", async () => {
     const t = setup();
     const s = t.mk();
@@ -1099,6 +1112,15 @@ describe.skipIf(!SH)("bulk deletes there", () => {
     g(t2.local, "restore", `--source=${m2![1]}`, "--worktree", "--pathspec-file-nul", `--pathspec-from-file=${m2![2]}`);
     expect(read(join(t2.local, "odd name [1].txt"))).toBe("odd\n");
     expect(read(join(t2.local, "f2.txt"))).toBe("2\n");
+  });
+
+  it("still names the snapshot when the pathspec file can't be written", async () => {
+    // Not a repository: git can't say where its directory is, so no file.
+    const nowhere = mkdtempSync(join(tmpdir(), "rh-norepo-"));
+    dirs.push(nowhere);
+    const sha = "a".repeat(40);
+    const line = await restoreLine(nowhere, sha, ["odd name.txt", "b"]);
+    expect(line).toBe(`\`git restore --source=${sha} --worktree -- <path>\`, for each of the files above`);
   });
 });
 

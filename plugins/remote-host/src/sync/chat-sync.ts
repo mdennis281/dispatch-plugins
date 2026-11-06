@@ -225,7 +225,8 @@ export class ChatSync {
         };
       }
       // Core has stopped waiting: this run won't happen, so it holds nothing.
-      if (info.signal.aborted) return { refuse: "Not run: cancelled while syncing." };
+      // Its notices still go: one a new terminal's setup left can't be said again.
+      if (info.signal.aborted) return { refuse: "Not run: cancelled while syncing.", notices };
       if (!info.background) this.holder = { runId: info.runId, terminal: info.terminal, command: info.command };
       return notices.length ? { notices } : {};
     });
@@ -900,14 +901,19 @@ function newCheckoutId(): string {
  * any shell. A few plain names are listed in it; otherwise they go in a
  * pathspec file in this repository's git directory, each taken literally.
  */
-async function restoreLine(root: string, commit: string, paths: readonly string[]): Promise<string> {
+export async function restoreLine(root: string, commit: string, paths: readonly string[]): Promise<string> {
   const cmd = `git restore --source=${commit} --worktree`;
   if (paths.length <= 5 && paths.every((x) => /^[\w.@+/-]+$/.test(x) && !x.startsWith("-"))) {
     return `\`${cmd} -- ${paths.map((x) => `'${x}'`).join(" ")}\``;
   }
-  const file = resolve(root, await git(root, ["rev-parse", "--git-path", `dispatch-restore-${commit.slice(0, 12)}`])).replace(/\\/g, "/");
-  await writeFile(file, paths.map((x) => `:(literal)${x}\0`).join(""));
-  return `\`${cmd} --pathspec-file-nul --pathspec-from-file=${file}\``;
+  try {
+    const file = resolve(root, await git(root, ["rev-parse", "--git-path", `dispatch-restore-${commit.slice(0, 12)}`])).replace(/\\/g, "/");
+    await writeFile(file, paths.map((x) => `:(literal)${x}\0`).join(""));
+    return `\`${cmd} --pathspec-file-nul --pathspec-from-file=${file}\``;
+  } catch {
+    // The files are already deleted by now: the notice must go out whatever happens here.
+    return `\`${cmd} -- <path>\`, for each of the files above`;
+  }
 }
 
 /** The same content (or both absent), whatever the modes. */

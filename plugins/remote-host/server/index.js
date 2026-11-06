@@ -23113,7 +23113,7 @@ class ChatSync {
           notices
         };
       }
-      if (info.signal.aborted) return { refuse: "Not run: cancelled while syncing." };
+      if (info.signal.aborted) return { refuse: "Not run: cancelled while syncing.", notices };
       if (!info.background) this.holder = { runId: info.runId, terminal: info.terminal, command: info.command };
       return notices.length ? { notices } : {};
     });
@@ -23668,9 +23668,13 @@ async function restoreLine(root, commit, paths) {
   if (paths.length <= 5 && paths.every((x) => /^[\w.@+/-]+$/.test(x) && !x.startsWith("-"))) {
     return `\`${cmd} -- ${paths.map((x) => `'${x}'`).join(" ")}\``;
   }
-  const file = resolve(root, await git(root, ["rev-parse", "--git-path", `dispatch-restore-${commit.slice(0, 12)}`])).replace(/\\/g, "/");
-  await writeFile(file, paths.map((x) => `:(literal)${x}\0`).join(""));
-  return `\`${cmd} --pathspec-file-nul --pathspec-from-file=${file}\``;
+  try {
+    const file = resolve(root, await git(root, ["rev-parse", "--git-path", `dispatch-restore-${commit.slice(0, 12)}`])).replace(/\\/g, "/");
+    await writeFile(file, paths.map((x) => `:(literal)${x}\0`).join(""));
+    return `\`${cmd} --pathspec-file-nul --pathspec-from-file=${file}\``;
+  } catch {
+    return `\`${cmd} -- <path>\`, for each of the files above`;
+  }
 }
 function tag(c) {
   if (isAbsent(c.from)) return "A";
