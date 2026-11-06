@@ -324,7 +324,7 @@ function PairDialog({ host, prefill, onClose }) {
           className: monoInputCls,
           value: address,
           autoFocus: true,
-          placeholder: "10.0.10.16",
+          placeholder: "10.0.4.5",
           onChange: (e) => setAddress(e.target.value),
           onKeyDown: (e) => e.key === "Enter" && address.trim() && void scan()
         }

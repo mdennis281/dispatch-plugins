@@ -15,7 +15,7 @@ const HOST: HostConfig = {
   slug: "cvx-mac",
   label: "CVX Mac",
   user: "dispatch",
-  addresses: ["cvx-mac.lan", "10.0.10.16"],
+  addresses: ["cvx-mac.lan", "10.0.4.5"],
   port: 22,
   hostKey: "SHA256:vH2I6HOzQ1J5PJs3HVEiIEM6IMfqsUr64kEVGUbAvrc",
   hostKeyType: "ssh-ed25519",
@@ -77,11 +77,11 @@ const machine = (a: Record<string, AddressBehaviour>) => new FakeMachine(a);
 
 describe("finding the machine", () => {
   it("skips an address that answers with another host key, and never trusts it", async () => {
-    const m = machine({ "cvx-mac.lan": "wrong-key", "10.0.10.16": "ok" });
+    const m = machine({ "cvx-mac.lan": "wrong-key", "10.0.4.5": "ok" });
     const { l, statuses } = link(m);
     l.start();
     const linked = await l.ready();
-    expect(linked.address).toBe("10.0.10.16");
+    expect(linked.address).toBe("10.0.4.5");
     // Every attempt pinned the key AND the key type.
     for (const t of m.targets) {
       expect(t.algorithms?.serverHostKey).toEqual(["ssh-ed25519"]);
@@ -96,12 +96,12 @@ describe("finding the machine", () => {
 
   it("dials a name on IPv4 when the key's from= list is IPv4 only, and an address as written", async () => {
     // cvx-mac.local resolving to IPv6 got the key refused twice in the live run.
-    const m = machine({ "cvx-mac.lan": "refused", "10.0.10.16": "ok" });
+    const m = machine({ "cvx-mac.lan": "refused", "10.0.4.5": "ok" });
     const { l } = link(m);
     l.start();
     await l.ready();
     const byHost = Object.fromEntries(m.targets.map((t) => [t.host, t.family]));
-    expect(byHost).toEqual({ "cvx-mac.lan": 4, "10.0.10.16": undefined });
+    expect(byHost).toEqual({ "cvx-mac.lan": 4, "10.0.4.5": undefined });
 
     // With an IPv6 address in from=, a name may be dialled on either.
     const m6 = machine({ "cvx-mac.lan": "ok" });
@@ -112,29 +112,29 @@ describe("finding the machine", () => {
   });
 
   it("tries the address that worked last time first", async () => {
-    const m = machine({ "cvx-mac.lan": "timeout", "10.0.10.16": "ok" });
-    const kv = new Map<string, unknown>([["host:cvx-mac", { lastAddress: "10.0.10.16" }]]);
+    const m = machine({ "cvx-mac.lan": "timeout", "10.0.4.5": "ok" });
+    const kv = new Map<string, unknown>([["host:cvx-mac", { lastAddress: "10.0.4.5" }]]);
     const { l } = link(m, { kv });
     l.start();
     await l.ready();
-    expect(m.targets.map((t) => t.host)).toEqual(["10.0.10.16"]);
+    expect(m.targets.map((t) => t.host)).toEqual(["10.0.4.5"]);
   });
 
   it("is offline with each address's reason when none answers, and tries again after a backoff", async () => {
-    const m = machine({ "cvx-mac.lan": "refused", "10.0.10.16": "timeout" });
+    const m = machine({ "cvx-mac.lan": "refused", "10.0.4.5": "timeout" });
     const { l, statuses } = link(m);
     l.start();
-    await expect(l.ready()).rejects.toThrow(/cvx-mac.lan: connection refused.*10\.0\.10\.16: no answer/);
+    await expect(l.ready()).rejects.toThrow(/cvx-mac.lan: connection refused.*10\.0\.4\.5: no answer/);
     await until(() => statuses.some((s) => s.state === "offline"));
     const tries = m.targets.length;
     await until(() => m.targets.length > tries);
-    m.addresses["10.0.10.16"] = "ok";
+    m.addresses["10.0.4.5"] = "ok";
     await until(() => statuses.at(-1)?.state === "online");
   });
 
   it("refuses at once while offline, without dialling, and brings its own next try closer", async () => {
     // The live run: a command on a machine off Wi-Fi waited 12 s for every address to fail.
-    const m = machine({ "cvx-mac.lan": "refused", "10.0.10.16": "refused" });
+    const m = machine({ "cvx-mac.lan": "refused", "10.0.4.5": "refused" });
     let t = 1_000_000;
     const { l, statuses } = link(m, { now: () => t, timing: { backoffMs: [60_000], recentContactMs: 20_000, nudgeMs: 5_000 } });
     l.start();
@@ -149,17 +149,17 @@ describe("finding the machine", () => {
     expect(m.targets.length).toBe(tries);
 
     // The refusal brought the next try forward from 30 s to 5 s, and that try finds the machine back.
-    m.addresses["10.0.10.16"] = "ok";
+    m.addresses["10.0.4.5"] = "ok";
     t += 4_000;
     await new Promise((r) => setTimeout(r, 60));
     expect(m.targets.length).toBe(tries);
     t += 1_001;
     await until(() => statuses.at(-1)?.state === "online");
-    await expect(l.ready()).resolves.toMatchObject({ address: "10.0.10.16" });
+    await expect(l.ready()).resolves.toMatchObject({ address: "10.0.4.5" });
   });
 
   it("still tries for real when the machine answered a moment ago, a blip, and gets through", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     let t = 1_000_000;
     const { l, statuses } = link(m, { now: () => t, timing: { backoffMs: [60_000], recentContactMs: 20_000 } });
     l.start();
@@ -169,11 +169,11 @@ describe("finding the machine", () => {
     expect(statuses.at(-1)).toMatchObject({ state: "offline" });
     const tries = m.targets.length;
     t += 10_000;
-    await expect(l.ready()).resolves.toMatchObject({ address: "10.0.10.16" });
+    await expect(l.ready()).resolves.toMatchObject({ address: "10.0.4.5" });
     expect(m.targets.length).toBe(tries + 1);
 
     // Down for longer than that: refused without a dial.
-    m.addresses["10.0.10.16"] = "refused";
+    m.addresses["10.0.4.5"] = "refused";
     m.open()[0]!.close();
     t += 21_000;
     await until(() => statuses.at(-1)?.state === "offline");
@@ -183,7 +183,7 @@ describe("finding the machine", () => {
   });
 
   it("dials anyway for a patient caller, one that won't get another chance (removing a machine)", async () => {
-    const m = machine({ "cvx-mac.lan": "refused", "10.0.10.16": "refused" });
+    const m = machine({ "cvx-mac.lan": "refused", "10.0.4.5": "refused" });
     let t = 1_000_000;
     const { l, statuses } = link(m, { now: () => t, timing: { backoffMs: [60_000], recentContactMs: 20_000 } });
     l.start();
@@ -191,13 +191,13 @@ describe("finding the machine", () => {
     await until(() => statuses.at(-1)?.state === "offline");
     t += 30_000;
     // Back, but the link won't try again for another 30 s.
-    m.addresses["10.0.10.16"] = "ok";
+    m.addresses["10.0.4.5"] = "ok";
     await expect(l.ready()).rejects.toThrow(/it is offline/);
-    await expect(l.ready(undefined, { patient: true })).resolves.toMatchObject({ address: "10.0.10.16" });
+    await expect(l.ready(undefined, { patient: true })).resolves.toMatchObject({ address: "10.0.4.5" });
   });
 
   it("counts a link dropped for an unanswered hello as just in touch, so a blip there is dialled too", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     let t = 1_000_000;
     const { l, statuses } = link(m, { now: () => t, timing: { backoffMs: [60_000], recentContactMs: 20_000, helloEveryMs: 30_000 } });
     l.start();
@@ -213,18 +213,18 @@ describe("finding the machine", () => {
     m.helloFails = false;
     t += 5_000;
     // The last hello was 36 s ago, but the link was up until 5 s ago: a real attempt, which gets through.
-    await expect(l.ready()).resolves.toMatchObject({ address: "10.0.10.16" });
+    await expect(l.ready()).resolves.toMatchObject({ address: "10.0.4.5" });
   });
 
   it("says the key was refused rather than that the machine is down", async () => {
     expect(describeConnectError(new Error("All configured authentication methods failed"))).toMatch(/key was refused/);
-    const m = machine({ "cvx-mac.lan": "bad-key", "10.0.10.16": "bad-key" });
+    const m = machine({ "cvx-mac.lan": "bad-key", "10.0.4.5": "bad-key" });
     const { l } = link(m);
     await expect(l.ready()).rejects.toThrow(/key was refused/);
   });
 
   it("is offline, and says to pair again, without its key", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l } = link(m, { key: undefined });
     await expect(l.ready()).rejects.toThrow(/REMOTE_HOST_KEY_CVX_MAC secret is missing/);
     expect(m.targets).toEqual([]);
@@ -233,7 +233,7 @@ describe("finding the machine", () => {
 
 describe("installing", () => {
   it("sends the pinned runtime and the agent when they are missing, over stdin, and verifies the agent runs", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     m.node = undefined;
     m.agent = undefined;
     const { l, runtime } = link(m);
@@ -244,7 +244,7 @@ describe("installing", () => {
   });
 
   it("sends nothing when the right versions are there", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l, runtime } = link(m);
     await l.ready();
     expect(runtime.calls).toBe(0);
@@ -252,7 +252,7 @@ describe("installing", () => {
   });
 
   it("never downgrades a newer runtime someone else installed", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     m.node = "v25.1.0";
     const { l, runtime } = link(m);
     await l.ready();
@@ -260,7 +260,7 @@ describe("installing", () => {
   });
 
   it("sweeps this instance's orphans, says hello, and probes on every connect", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l } = link(m);
     await l.ready();
     const agentCmds = m.commands.filter((c) => c.includes("dispatch-host.mjs'")).map((c) => c.split("dispatch-host.mjs' ")[1]);
@@ -275,7 +275,7 @@ describe("installing", () => {
 
 describe("staying up", () => {
   it("goes offline when the connection drops, and comes back by itself", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l, statuses } = link(m);
     l.start();
     await l.ready();
@@ -287,7 +287,7 @@ describe("staying up", () => {
   });
 
   it("has dispatch-host collect garbage there once a day, the first a day after pairing, and remembers when", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const kv = new Map<string, unknown>();
     const { l } = link(m, { kv, timing: { gcEveryMs: 150 } });
     l.start();
@@ -303,7 +303,7 @@ describe("staying up", () => {
   });
 
   it("drops a link whose hello goes unanswered", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l, statuses } = link(m);
     l.start();
     await l.ready();
@@ -312,7 +312,7 @@ describe("staying up", () => {
   });
 
   it("reconnects when how to reach the machine changes, not when its label does", async () => {
-    const m = machine({ "10.0.10.16": "ok", "cvx-mac.local": "ok" });
+    const m = machine({ "10.0.4.5": "ok", "cvx-mac.local": "ok" });
     const { l } = link(m);
     await l.ready();
     l.update({ ...HOST, label: "Garage Mac" }, false);
@@ -324,7 +324,7 @@ describe("staying up", () => {
 
 describe("shells", () => {
   it("go on their own connections, eight to each, so the control connection always has room", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l } = link(m);
     await l.ready();
     const control = m.open()[0]!;
@@ -336,7 +336,7 @@ describe("shells", () => {
     expect(pool.map((c) => c.live()).sort()).toEqual([4, SESSIONS_PER_CONNECTION]);
     // Each extra connection pins the machine's key like the first.
     for (const c of pool) {
-      expect(c.target.host).toBe("10.0.10.16");
+      expect(c.target.host).toBe("10.0.4.5");
       expect(c.target.hostVerifier).toBeTypeOf("function");
       expect(c.target.algorithms?.serverHostKey).toEqual(["ssh-ed25519"]);
     }
@@ -344,7 +344,7 @@ describe("shells", () => {
   });
 
   it("reuse room a closed shell left, and an idle extra connection is closed", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l } = link(m, { timing: { idleSessionConnectionMs: 30 } });
     l.start();
     await l.ready();
@@ -358,7 +358,7 @@ describe("shells", () => {
   });
 
   it("have their directories made a few at a time, so a burst of spawns never hits sshd's limit", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l } = link(m);
     await l.ready();
     const control = m.open()[0]!;
@@ -369,7 +369,7 @@ describe("shells", () => {
   });
 
   it("are refused, not left waiting, while the machine is offline", async () => {
-    const m = machine({ "10.0.10.16": "refused" });
+    const m = machine({ "10.0.4.5": "refused" });
     const { l } = link(m);
     await expect(l.openSession("exec shell")).rejects.toThrow(/connection refused/);
   });
@@ -377,7 +377,7 @@ describe("shells", () => {
 
 describe("forwarded connections", () => {
   it("dial the machine over the control connection as it is now", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const dialled: string[] = [];
     m.tcp = async (host, port) => {
       dialled.push(`${host}:${port}`);
@@ -393,7 +393,7 @@ describe("forwarded connections", () => {
   });
 
   it("are refused at once while the machine is offline, and never start a connect of their own", async () => {
-    const m = machine({ "10.0.10.16": "refused" });
+    const m = machine({ "10.0.4.5": "refused" });
     const { l } = link(m);
     // A browser retrying a forwarded port of a sleeping Mac, again and again.
     for (let i = 0; i < 5; i++) await expect(l.tcp("127.0.0.1", 3000)).rejects.toThrow(/not connected/);
@@ -403,10 +403,10 @@ describe("forwarded connections", () => {
 
 describe("races", () => {
   it("throws away a connect that finishes after the settings changed", async () => {
-    const m = machine({ "10.0.10.16": "ok", "cvx-mac.local": "ok" });
+    const m = machine({ "10.0.4.5": "ok", "cvx-mac.local": "ok" });
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
-    m.hold = (a) => (a === "10.0.10.16" ? held : Promise.resolve());
+    m.hold = (a) => (a === "10.0.4.5" ? held : Promise.resolve());
     const { l, statuses } = link(m);
     const stale = l.ready();
     stale.catch(() => {});
@@ -415,12 +415,12 @@ describe("races", () => {
     release();
     await expect(stale).rejects.toThrow(/settings changed/);
     expect(l.address).toBe("cvx-mac.local");
-    expect(m.conns.filter((c: FakeConn) => c.target.host === "10.0.10.16" && c.isOpen)).toEqual([]);
+    expect(m.conns.filter((c: FakeConn) => c.target.host === "10.0.4.5" && c.isOpen)).toEqual([]);
     expect(statuses.at(-1)?.state).toBe("online");
   });
 
   it("Check probes a live machine without dropping its connection", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l } = link(m);
     await l.ready();
     const conn = m.open()[0]!;
@@ -433,7 +433,7 @@ describe("races", () => {
   });
 
   it("keeps the link when the control connection is full, rather than calling the machine gone", async () => {
-    const m = machine({ "10.0.10.16": "ok" });
+    const m = machine({ "10.0.4.5": "ok" });
     const { l, statuses, warns } = link(m);
     l.start();
     await l.ready();

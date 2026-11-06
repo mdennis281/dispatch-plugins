@@ -138,7 +138,7 @@ describe("port forwards", () => {
     r.chats.add("chat-a");
     const [a, b, c, d] = await Promise.all([freePort(), freePort(), freePort(), freePort()]);
     r.report.sessions.push(
-      { sid: "s1", chat: "chat-a", ports: [listener(a), listener(d, "node", "10.0.10.16")] },
+      { sid: "s1", chat: "chat-a", ports: [listener(a), listener(d, "node", "10.0.4.5")] },
       // A chat with no shell on this machine any more (its forwards went with it).
       { sid: "s2", chat: "chat-b", ports: [listener(b)] },
     );

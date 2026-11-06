@@ -10,7 +10,7 @@ import { HostRegistry } from "../src/registry.js";
 import { AGENT, FakeMachine, PROBE, fakeRuntime, type AddressBehaviour } from "./fake-machine.js";
 
 const INSTANCE = "inst-1";
-const ADDR = "10.0.10.16";
+const ADDR = "10.0.4.5";
 const HOST: HostConfig = {
   slug: "studio",
   label: "Studio",
