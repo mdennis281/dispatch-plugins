@@ -136,6 +136,78 @@ describe.skipIf(!posix)("checkBrew", () => {
     expect(await checkBrew({ ...process.env, PATH: empty }, { developerDir: XCODE })).toBeUndefined();
   });
 
+  describe("Command Line Tools older than Homebrew needs on this macOS", () => {
+    /** cvx-mac's brew doctor, 2026-11-06: Command Line Tools 14.3.1 on macOS 27.2. */
+    const TOO_OLD = [
+      "Warning: Your Command Line Tools are too outdated.",
+      "",
+      "Update them from Software Update in System Settings.",
+      "",
+      "Alternatively, manually download them from:",
+      "  https://developer.apple.com/download/all/.",
+      "You should download the Command Line Tools for Xcode 27.0.",
+    ];
+    /** A brew whose `doctor <check>` prints `lines` to stderr and exits `code`; each doctor call is logged. */
+    function brew(lines: string[], code: number): { dir: string; doctor: string } {
+      const echo = lines.map((l) => `echo '${l}' >&2`).join("; ");
+      const b = bin(
+        `case "$1" in doctor) echo "$*" >> "$(dirname "$0")/doctor"; ${echo || ":"}; exit ${code};; *) echo "Homebrew 7.0.12";; esac`,
+        "brew",
+      );
+      return { dir: b, doctor: join(b, "doctor") };
+    }
+    const ok = () => join(bin(`echo ${CLT_DEVELOPER_DIR}/usr/bin/clang`, "xcrun"), "xcrun");
+    const clt = { developerDir: CLT_DEVELOPER_DIR };
+
+    it("asks brew's own check, and says which ones it wants: brew runs, so nothing is blocked", async () => {
+      const b = brew(TOO_OLD, 1);
+      const env = { ...process.env, PATH: `${b.dir}:${process.env.PATH}` };
+      expect(await checkBrew(env, clt, ok())).toEqual({
+        path: join(b.dir, "brew"),
+        version: "Homebrew 7.0.12",
+        writable: true,
+        cltTooOld: "Command Line Tools for Xcode 27.0",
+      });
+      expect(readFileSync(b.doctor, "utf8")).toBe("doctor check_clt_minimum_version\n");
+    });
+
+    it("still says so when brew doesn't name the ones it wants", async () => {
+      const b = brew(["Warning: Your Command Line Tools are too outdated."], 1);
+      const env = { ...process.env, PATH: `${b.dir}:${process.env.PATH}` };
+      expect(await checkBrew(env, clt, ok())).toMatchObject({ cltTooOld: "newer Command Line Tools" });
+    });
+
+    it("says nothing when they're new enough, when this brew has no such check, or when brew failed some other way", async () => {
+      for (const [lines, code] of [
+        [["Your system is ready to brew."], 0],
+        [["Error: No check available by the name: check_clt_minimum_version"], 1],
+        [["Error: Something else broke"], 1],
+      ] as const) {
+        const b = brew([...lines], code);
+        const env = { ...process.env, PATH: `${b.dir}:${process.env.PATH}` };
+        const r = await checkBrew(env, clt, ok());
+        expect(r).toEqual({ path: join(b.dir, "brew"), version: "Homebrew 7.0.12", writable: true });
+      }
+    });
+
+    it("says only that brew is blocked while Xcode's license stops it", async () => {
+      const b = brew(TOO_OLD, 1);
+      const x = xcrun();
+      const env = { ...process.env, PATH: `${b.dir}:${process.env.PATH}` };
+      const r = await checkBrew(env, { developerDir: XCODE }, x.path);
+      expect(r?.blocked).toMatch(/license/);
+      expect(r?.cltTooOld).toBeUndefined();
+    });
+
+    it("doesn't ask with no developer directory chosen, nor off a Mac", async () => {
+      const b = brew(TOO_OLD, 1);
+      const env = { ...process.env, PATH: `${b.dir}:${process.env.PATH}` };
+      expect(await checkBrew(env, { developerDir: null }, ok())).not.toHaveProperty("cltTooOld");
+      expect(await checkBrew(env, undefined, ok())).not.toHaveProperty("cltTooOld");
+      expect(existsSync(b.doctor)).toBe(false);
+    });
+  });
+
   // Root writes anywhere, so a read-only prefix proves nothing there.
   it.skipIf(process.getuid?.() === 0)("says this account can't install with a Homebrew whose prefix another account owns", async () => {
     const prefix = mkdtempSync(join(tmpdir(), "dh-brew-"));

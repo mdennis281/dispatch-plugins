@@ -554,10 +554,15 @@ function brewNote(brew: NonNullable<ProbeResult["brew"]>): string {
       `and don't \`brew install\` (it can't write there) or use sudo. If a tool is missing, tell the user.`
     );
   }
+  // Old Command Line Tools: bottles pour, source builds stop. Updating them needs the owner, so the agent is told not to try.
+  const old = brew.cltTooOld
+    ? ` Only formulae with a bottle install: the Command Line Tools there are too old for its macOS, so one brew has to ` +
+      `build from source fails. Don't update or reinstall them (that needs sudo); if you need one, tell the user.`
+    : "";
   return (
     `- Homebrew${ver ? ` ${ver}` : ""} is installed there${at}: install a tool the machine lacks with ` +
     `\`brew install <formula>\`. No sudo: never \`sudo brew\`. It stays installed for every chat using this machine, so ` +
-    `say what you installed.`
+    `say what you installed.${old}`
   );
 }
 

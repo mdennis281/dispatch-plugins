@@ -44,6 +44,14 @@ export interface BrewCheck {
    * through /etc/paths.d: usable, but every `brew install` fails.
    */
   writable: boolean;
+  /**
+   * macOS: Homebrew's own check says the Command Line Tools are older than it
+   * needs on this macOS, and this is the ones it asks for ("Command Line Tools
+   * for Xcode 27.0"). Bottles still install; building a formula from source
+   * stops. Not a fault. Absent when they're new enough, brew is blocked, or
+   * brew didn't say. Agents older than 0.2.5 don't report it.
+   */
+  cltTooOld?: string;
 }
 
 export interface ProbeResult {
@@ -162,6 +170,11 @@ export async function checkGit(env: NodeJS.ProcessEnv, mac?: { developerDir: str
  * `xcode-select` can. So run brew's check the way brew does: with no
  * DEVELOPER_DIR, and only when `xcode-select` chose a directory. brew skips the
  * check when none is chosen, and the stub would open the install dialog.
+ *
+ * Once brew runs, its own minimum for the Command Line Tools on this macOS is
+ * asked of brew itself (`brew doctor check_clt_minimum_version`), not
+ * guessed from a table here. Older ones still pour bottles but build nothing
+ * from source: cvx-mac, 2026-11-06, Command Line Tools 14.3.1 on macOS 27.2.
  * `xcrun` is a parameter for the tests.
  */
 export async function checkBrew(
@@ -178,13 +191,30 @@ export async function checkBrew(
   const prefix = said.startsWith("/") && isDir(said) ? said : posix.dirname(posix.dirname(path));
   const writable = brewWritable(prefix);
   let blocked: string | undefined;
+  let cltTooOld: string | undefined;
   if (mac?.developerDir) {
+    // Started beside brew's own check; its answer counts only if brew runs.
+    const doctor = out(path, ["doctor", "check_clt_minimum_version"], env);
     const r = await out(xcrun, ["--find", "clang"], { HOME: env.HOME, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });
     if (r.code !== 0 && /license/i.test(`${r.stderr}\n${r.stdout}`)) {
       blocked = `Xcode's license isn't accepted (exit ${r.code}), and Homebrew ignores DEVELOPER_DIR, so it uses xcode-select's ${mac.developerDir}`;
     }
+    const d = await doctor;
+    if (!blocked) cltTooOld = cltWanted(d.code, `${d.stdout}\n${d.stderr}`);
   }
-  return { path, version, ...(blocked ? { blocked } : {}), writable };
+  return { path, version, ...(blocked ? { blocked } : {}), writable, ...(cltTooOld ? { cltTooOld } : {}) };
+}
+
+/**
+ * What `brew doctor check_clt_minimum_version` asks for when it fails: "Your
+ * Command Line Tools are too outdated. … You should download the Command Line
+ * Tools for Xcode 27.0." Exit 1 alone isn't enough: a brew without that check
+ * also exits 1 ("No check available by the name"), as does one that couldn't
+ * start, so the warning has to be about the Command Line Tools.
+ */
+function cltWanted(code: number, text: string): string | undefined {
+  if (code !== 1 || !/Command Line Tools/.test(text) || /No check available/i.test(text)) return undefined;
+  return text.match(/Command Line Tools for Xcode [\d.]*\d/)?.[0] ?? "newer Command Line Tools";
 }
 
 function isDir(p: string): boolean {

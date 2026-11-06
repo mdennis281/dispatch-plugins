@@ -225,7 +225,7 @@ function statusWords(v) {
 function statusLine(v) {
   const s = v.status;
   const seen = s.lastSeenAt ? `last seen ${ago(s.lastSeenAt)}` : void 0;
-  if (s.state === "online") return ["Online", seen].filter(Boolean).join(" · ");
+  if (s.state === "online") return ["Online", s.detail, seen].filter(Boolean).join(" · ");
   return [statusWords(v), seen].filter(Boolean).join(" · ");
 }
 function probeLine(v) {

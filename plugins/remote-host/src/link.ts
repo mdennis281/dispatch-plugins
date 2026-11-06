@@ -669,7 +669,11 @@ function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   });
 }
 
-/** Online, or degraded with the reason a human would want to know. */
+/**
+ * Online, or degraded with the reason a human would want to know. A note that
+ * is no fault (old Command Line Tools: Homebrew pours bottles but builds
+ * nothing from source) rides along as the detail without degrading it.
+ */
 export function statusFrom(probe: ProbeResult, lastSeenAt: number): TerminalBackendStatusInput {
   const issues: string[] = [];
   if (typeof probe.freeDiskBytes === "number" && probe.freeDiskBytes < LOW_DISK_BYTES) {
@@ -685,7 +689,17 @@ export function statusFrom(probe: ProbeResult, lastSeenAt: number): TerminalBack
     );
   }
   if (probe.loginEnvError) issues.push("login shell environment unreadable");
-  return issues.length ? { state: "degraded", detail: issues.join("; "), lastSeenAt } : { state: "online", lastSeenAt };
+  const notes: string[] = [];
+  if (probe.brew?.cltTooOld && !probe.brew.blocked) {
+    // Not a fault: bottles install. Said so a failed source build has its reason, and the human the fix.
+    notes.push(
+      `Homebrew builds nothing from source: the Command Line Tools are too old for this macOS ` +
+        `(it wants the ${probe.brew.cltTooOld}); bottles install`,
+    );
+  }
+  const detail = [...issues, ...notes].join("; ");
+  if (issues.length) return { state: "degraded", detail, lastSeenAt };
+  return { state: "online", ...(detail ? { detail } : {}), lastSeenAt };
 }
 
 /**
