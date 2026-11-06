@@ -845,6 +845,64 @@ describe.skipIf(!SH)("restarts and lost state", () => {
     expect(text(b)).toMatch(/Set up this chat's files there/);
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("one\ntwo\n");
   });
+
+  it("sets it up again, deleting nothing here, when it was wiped and a new terminal made its directory again", async () => {
+    // Live on cvx-mac: ~/.dispatch-host deleted, the machine paired again,
+    // and the first command in a new terminal deleted every file here.
+    const t = setup();
+    writeFileSync(join(t.local, "untracked.txt"), "only here\n");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    rmSync(t.work, { recursive: true, force: true });
+    // What a new terminal does before the first sync: make the directory it starts in.
+    mkdirSync(join(t.work, "src"), { recursive: true });
+    const b = await s.beforeRun(run());
+    expect(text(b)).toMatch(/checkout there was gone; it is set up again/);
+    expect(text(b)).not.toMatch(/Brought back|rebuilt/);
+    expect(read(join(t.local, "a.txt"))).toBe("one\ntwo\n");
+    expect(read(join(t.local, "src", "b.ts"))).toBe("export const b = 1;\n");
+    expect(read(join(t.local, "untracked.txt"))).toBe("only here\n");
+    expect(read(`${t.work}/untracked.txt`)).toBe("only here\n");
+  });
+
+  it("keeps a record per machine: back from another one, the old checkout's files aren't taken for changes made there", async () => {
+    const t = setup();
+    const r1 = run();
+    const a = t.mk();
+    await a.beforeRun(r1);
+    await a.afterRun(after(r1));
+    // The chat moves to another machine, and a.txt changes while it is there.
+    const other = join(t.host, "..", "other-machine").replace(/\\/g, "/");
+    mkdirSync(other);
+    const b = t.mk({ slug: "other-mac", label: "Other Mac", hostRoot: async () => other });
+    writeFileSync(join(t.local, "a.txt"), "edited while on the other machine\n");
+    const r2 = run();
+    await b.beforeRun(r2);
+    await b.afterRun(after(r2));
+    // Back on the first: its checkout still has the old a.txt, which nobody changed there.
+    const back = await t.mk().beforeRun(run());
+    expect(text(back)).not.toMatch(/Brought back/);
+    expect(read(join(t.local, "a.txt"))).toBe("edited while on the other machine\n");
+    expect(read(`${t.work}/a.txt`)).toBe("edited while on the other machine\n");
+    expect([...t.kv.keys()].sort()).toEqual(["sync:other-mac:chat-1", "sync:test-mac:chat-1"]);
+  });
+
+  it("takes over the per-chat record older versions kept", async () => {
+    const t = setup();
+    const s1 = t.mk();
+    const r1 = run();
+    await s1.beforeRun(r1);
+    await s1.afterRun(after(r1));
+    t.kv.set("sync:chat-1", t.kv.get("sync:test-mac:chat-1"));
+    t.kv.delete("sync:test-mac:chat-1");
+    writeFileSync(`${t.work}/a.txt`, "changed there\n");
+    const b = await t.mk().beforeRun(run());
+    expect(text(b)).toMatch(/Brought back .*M a\.txt/);
+    expect(text(b)).not.toMatch(/Set up/);
+    expect([...t.kv.keys()]).toEqual(["sync:test-mac:chat-1"]);
+  });
 });
 
 describe("pieces", () => {

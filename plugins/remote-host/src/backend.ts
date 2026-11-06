@@ -34,7 +34,7 @@ import { agentCommand, type HostPaths } from "./install.js";
 import type { HostLink } from "./link.js";
 import { PortForwards } from "./ports.js";
 import { HostShell, type HostShellOptions, type SessionOpener } from "./session.js";
-import { ChatSync, DEFAULT_CAP_BYTES, type ChatSyncDeps } from "./sync/chat-sync.js";
+import { ChatSync, DEFAULT_CAP_BYTES, legacySyncKey, syncKey, type ChatSyncDeps } from "./sync/chat-sync.js";
 import { linkRemote } from "./sync/link-remote.js";
 import { repoName } from "./sync/local.js";
 import type { RemoteSide } from "./sync/remote.js";
@@ -300,7 +300,8 @@ export class HostBackend implements TerminalBackend {
     const r = await this.deps.link.agent<ForgetResult>(["forget", "--instance", this.deps.instanceId, "--chat", chatId], 50_000);
     this.served.delete(chatId);
     await this.deps.kv?.delete(this.servedKey(chatId));
-    await this.deps.kv?.delete(`sync:${chatId}`);
+    await this.deps.kv?.delete(syncKey(this.deps.host().slug, chatId));
+    await this.deps.kv?.delete(legacySyncKey(chatId));
     if (r.removed || r.killed.length) {
       this.deps.log.info(
         `remote-host ${this.deps.host().slug}: deleted chat ${chatId}'s checkout there` + (r.killed.length ? `, ending ${r.killed.length} session(s)` : ""),

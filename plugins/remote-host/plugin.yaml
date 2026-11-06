@@ -2,7 +2,7 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: remote-host
 name: Remote host
-version: 0.5.9
+version: 0.5.10
 dispatch: ">=1"
 description: >-
   Run a chat's managed terminals on your own machines over SSH. Each paired

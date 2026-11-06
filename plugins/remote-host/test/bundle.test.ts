@@ -148,7 +148,12 @@ describe("activation", () => {
 describe("routes", () => {
   it("serves the pane: list, pair, rename, check, remove", async () => {
     const port = await closedPort();
-    const t = await activate({ settings: { hosts: [host("lab", port)] }, secrets: { REMOTE_HOST_KEY_LAB: "k" } });
+    const t = await activate({
+      settings: { hosts: [host("lab", port)] },
+      secrets: { REMOTE_HOST_KEY_LAB: "k" },
+      // What it keeps of the machine's chats, and another machine's.
+      kv: { "sync:lab:chat-1": { v: 1 }, "served:lab:chat-1": { at: 1 }, "sync:lab2:chat-1": { v: 1 }, "served:lab2:chat-2": { at: 1 } },
+    });
     expect(t.routes.list().sort()).toEqual(
       [
         "DELETE /hosts/:slug",
@@ -188,6 +193,8 @@ describe("routes", () => {
     expect(removed.body).toMatchObject({ removed: "lab", keyLine: "unreachable" });
     expect(t.settings.get().hosts).toEqual([]);
     expect(t.secrets.has("REMOTE_HOST_KEY_LAB")).toBe(false);
+    // Paired again under this name, it starts clean: no old base to read a new, empty checkout against.
+    expect([...t.kv.keys()].filter((k) => /^(sync|served):/.test(k)).sort()).toEqual(["served:lab2:chat-2", "sync:lab2:chat-1"]);
     await until(() => !t.terminalBackends.has("remote-host/lab"));
   });
 });
