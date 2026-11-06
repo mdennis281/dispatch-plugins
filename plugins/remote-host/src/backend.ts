@@ -32,7 +32,7 @@ import { errText, git } from "@dispatch-plugins/remote-core";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
 import type { HostLink } from "./link.js";
-import { PortForwards } from "./ports.js";
+import { PortForwards, type ReservedPort } from "./ports.js";
 import { Elevation, type Approvals, type ElevationDeps, type ElevationState } from "./elevation.js";
 import { HostShell, type HostShellOptions, type SessionOpener } from "./session.js";
 import { ChatSync, DEFAULT_CAP_BYTES, legacySyncKey, syncKey, type ChatSyncDeps } from "./sync/chat-sync.js";
@@ -54,6 +54,8 @@ export interface HostBackendDeps {
   publish?: (port: TerminalPortForwardInput) => () => void;
   /** Overrides for tests: how often listeners are polled. */
   portPollMs?: number;
+  /** `ctx.runner.reservedPorts`, when this Dispatch has it: ports here no forward may take. Without it, Dispatch's defaults. */
+  reservedPorts?: () => Promise<readonly ReservedPort[]>;
   /** `ctx.approvals`, when this Dispatch has it. Without it nothing is ever elevated. */
   approvals?: Approvals;
   /** The machine's elevation key (`REMOTE_HOST_ELEVATE_KEY_<SLUG>`), if elevation is set up there. */
@@ -123,6 +125,7 @@ export class HostBackend implements TerminalBackend {
       chats: () => this.chatsWithShells(),
       log: deps.log,
       label: () => this.label,
+      ...(deps.reservedPorts ? { reserved: deps.reservedPorts } : {}),
       ...(deps.portPollMs ? { intervalMs: deps.portPollMs } : {}),
     });
   }
@@ -435,7 +438,8 @@ export class HostBackend implements TerminalBackend {
         `are refused, so files never change under a running command; one that timed out holds every terminal until it ends ` +
         `(Ctrl-C it). Outside a git repository nothing is synced.`,
       `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: ` +
-        `on the same port when it is free here, else on another, which the terminal result and Ports & processes give. Open ` +
+        `on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on ` +
+        `another, which the terminal result and Ports & processes give. Open ` +
         `that URL, not the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those ` +
         `started from this chat's terminals; nothing else on the machine is.`,
       `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its ` +

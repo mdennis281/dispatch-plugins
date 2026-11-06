@@ -22706,6 +22706,11 @@ async function removeElevation(el) {
   }
 }
 const PORT_POLL_MS = 4e3;
+const DEFAULT_RESERVED = [
+  { port: 4318, reason: "the installed Dispatch instance's default port" },
+  { port: 4319, reason: "the development Dispatch instance's default port" },
+  { port: 24678, reason: "a development Dispatch instance's live-reload socket" }
+];
 class PortForwards {
   constructor(deps) {
     this.deps = deps;
@@ -22716,6 +22721,7 @@ class PortForwards {
   /** Ports that failed to forward, so each failure is logged once rather than every poll. */
   failed = /* @__PURE__ */ new Set();
   listFailing = false;
+  reservedFailing = false;
   disposed = false;
   /** A shell started: poll while there are any. Idempotent. */
   wake() {
@@ -22758,15 +22764,22 @@ class PortForwards {
         if (validPort(l.port) && isLoopback(l.host)) want.set(key(s.chat, l.port), { chat: s.chat, l });
       }
     }
+    const reserved = want.size || this.forwards.size ? await this.reserved() : /* @__PURE__ */ new Map();
+    if (this.disposed) return;
     for (const [k, f] of this.forwards) {
       const w = want.get(k);
+      const why = reserved.get(f.localPort);
       if (!w || w.l.host !== f.host) this.close(k);
+      else if (why) {
+        this.deps.log.info(`remote-host ${this.deps.label()}: moving port ${f.remotePort}'s forward off ${f.localPort}, now reserved here (${why})`);
+        this.close(k);
+      }
     }
     for (const k of [...this.failed]) if (!want.has(k)) this.failed.delete(k);
     for (const [k, { chat, l }] of want) {
       if (this.forwards.has(k) || this.disposed) continue;
       try {
-        const f = await this.open(chat, l);
+        const f = await this.open(chat, l, reserved);
         this.forwards.set(k, f);
         this.failed.delete(k);
         if (this.disposed || !this.deps.chats().has(chat)) this.close(k);
@@ -22793,7 +22806,27 @@ class PortForwards {
     if (this.timer) clearInterval(this.timer);
     this.timer = void 0;
   }
-  async open(chat, l) {
+  /**
+   * The ports no forward may take, by port, with why. Dispatch's own fixed
+   * ones always, whatever `ctx.runner` says or if asking it fails.
+   */
+  async reserved() {
+    const out = /* @__PURE__ */ new Map();
+    if (this.deps.reserved) {
+      try {
+        for (const r of await this.deps.reserved()) if (validPort(r.port) && !out.has(r.port)) out.set(r.port, r.reason);
+        this.reservedFailing = false;
+      } catch (err) {
+        if (!this.reservedFailing) {
+          this.deps.log.warn(`remote-host ${this.deps.label()}: could not ask Dispatch which ports are reserved, so only its own are kept clear: ${errText(err)}`);
+        }
+        this.reservedFailing = true;
+      }
+    }
+    for (const r of DEFAULT_RESERVED) if (!out.has(r.port)) out.set(r.port, r.reason);
+    return out;
+  }
+  async open(chat, l, reserved) {
     const sockets = /* @__PURE__ */ new Set();
     const server2 = createServer((sock) => {
       sockets.add(sock);
@@ -22811,8 +22844,9 @@ class PortForwards {
         () => sock.destroy()
       );
     });
-    const localPort = await listen(server2, l.port);
+    const localPort = await listen(server2, l.port, reserved);
     const label = command(l.command);
+    const why = reserved.get(l.port);
     let withdraw;
     try {
       withdraw = this.deps.publish({ chatId: chat, remotePort: l.port, url: urlOf(localPort), ...label ? { label } : {} });
@@ -22822,7 +22856,7 @@ class PortForwards {
       throw err;
     }
     this.deps.log.info(
-      `remote-host ${this.deps.label()}: forwarding port ${l.port}${label ? ` (${label})` : ""} for chat ${chat} to ${urlOf(localPort)}`
+      `remote-host ${this.deps.label()}: forwarding port ${l.port}${label ? ` (${label})` : ""} for chat ${chat} to ${urlOf(localPort)}` + (why ? `; not to ${l.port}, which is reserved here (${why})` : "")
     );
     return { chat, remotePort: l.port, host: l.host, localPort, server: server2, sockets, withdraw };
   }
@@ -22839,7 +22873,8 @@ class PortForwards {
   }
 }
 const EPHEMERAL_TRIES = 8;
-async function listen(server2, preferred) {
+const RESERVED_TRIES = 64;
+async function listen(server2, preferred, reserved = /* @__PURE__ */ new Set()) {
   const attempt = (port) => new Promise((resolve2, reject) => {
     const fail = (err) => {
       server2.off("listening", ok);
@@ -22853,7 +22888,7 @@ async function listen(server2, preferred) {
     server2.once("listening", ok);
     server2.listen(port, "127.0.0.1");
   });
-  if (await freeOnV6Loopback(preferred)) {
+  if (!reserved.has(preferred) && await freeOnV6Loopback(preferred)) {
     try {
       return await attempt(preferred);
     } catch {
@@ -22861,8 +22896,9 @@ async function listen(server2, preferred) {
   }
   for (let i = 1; ; i++) {
     const port = await attempt(0);
-    if (i >= EPHEMERAL_TRIES || await freeOnV6Loopback(port)) return port;
+    if (!reserved.has(port) && (i >= EPHEMERAL_TRIES || await freeOnV6Loopback(port))) return port;
     await new Promise((r) => server2.close(() => r()));
+    if (i >= RESERVED_TRIES) throw new Error(`no free port here that isn't reserved, after ${i} tries`);
   }
 }
 function freeOnV6Loopback(port) {
@@ -22871,6 +22907,12 @@ function freeOnV6Loopback(port) {
     probe.once("error", (err) => resolve2(err.code !== "EADDRINUSE" && err.code !== "EACCES"));
     probe.listen({ port, host: "::1", ipv6Only: true, exclusive: true }, () => probe.close(() => resolve2(true)));
   });
+}
+function reservedPortsOf(ctx) {
+  const runner = ctx?.runner;
+  if (!runner || typeof runner.reservedPorts !== "function") return void 0;
+  const view = runner;
+  return () => view.reservedPorts();
 }
 function key(chat, port) {
   return `${chat}\0${port}`;
@@ -24681,6 +24723,7 @@ class HostBackend {
       chats: () => this.chatsWithShells(),
       log: deps.log,
       label: () => this.label,
+      ...deps.reservedPorts ? { reserved: deps.reservedPorts } : {},
       ...deps.portPollMs ? { intervalMs: deps.portPollMs } : {}
     });
   }
@@ -24977,7 +25020,7 @@ class HostBackend {
       rootNote(host.label, this.elevation.state),
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB aren't sent.`,
       `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command; one that timed out holds every terminal until it ends (Ctrl-C it). Outside a git repository nothing is synced.`,
-      `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: on the same port when it is free here, else on another, which the terminal result and Ports & processes give. Open that URL, not the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started from this chat's terminals; nothing else on the machine is.`,
+      `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on another, which the terminal result and Ports & processes give. Open that URL, not the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started from this chat's terminals; nothing else on the machine is.`,
       `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its checkout there.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you started (Ctrl-C the terminal, \`kill %1\`).`
@@ -25139,6 +25182,7 @@ class HostRegistry {
       ...this.deps.timing ? { timing: this.deps.timing } : {}
     });
     const approvals = this.deps.approvals ?? approvalsOf(ctx);
+    const reservedPorts = reservedPortsOf(ctx);
     entry.backend = new HostBackend(id, {
       host: () => entry.host,
       link: entry.link,
@@ -25148,6 +25192,7 @@ class HostRegistry {
       ...ctx.kv ? { kv: ctx.kv } : {},
       ...this.deps.shell ? { shell: this.deps.shell } : {},
       ...this.deps.portPollMs ? { portPollMs: this.deps.portPollMs } : {},
+      ...reservedPorts ? { reservedPorts } : {},
       ...approvals ? { approvals } : {},
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || void 0,
       ...this.deps.elevationConnect ? { elevationConnect: this.deps.elevationConnect } : {}

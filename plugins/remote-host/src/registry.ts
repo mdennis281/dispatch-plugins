@@ -13,6 +13,7 @@ import { HELPER_PATH, approvalsOf, type Approvals, type ElevationDeps } from "./
 import { removeElevation } from "./elevation-setup.js";
 import { backendId, connectionChanged, elevateSecretName, keySecretName, type HostConfig } from "./hosts.js";
 import { HostLink, type LinkConnection, type LinkTiming } from "./link.js";
+import { reservedPortsOf } from "./ports.js";
 import type { HostShellOptions } from "./session.js";
 
 export interface RegistryDeps {
@@ -120,6 +121,7 @@ export class HostRegistry {
       ...(this.deps.timing ? { timing: this.deps.timing } : {}),
     });
     const approvals = this.deps.approvals ?? approvalsOf(ctx);
+    const reservedPorts = reservedPortsOf(ctx);
     entry.backend = new HostBackend(id, {
       host: () => entry.host,
       link: entry.link,
@@ -129,6 +131,7 @@ export class HostRegistry {
       ...(ctx.kv ? { kv: ctx.kv } : {}),
       ...(this.deps.shell ? { shell: this.deps.shell } : {}),
       ...(this.deps.portPollMs ? { portPollMs: this.deps.portPollMs } : {}),
+      ...(reservedPorts ? { reservedPorts } : {}),
       ...(approvals ? { approvals } : {}),
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || undefined,
       ...(this.deps.elevationConnect ? { elevationConnect: this.deps.elevationConnect } : {}),
