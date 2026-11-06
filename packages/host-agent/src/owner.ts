@@ -11,12 +11,14 @@
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
+import { posix } from "node:path";
 import { performance } from "node:perf_hooks";
 import { appendRun, StreamLog } from "./journal.js";
 import { sessionPaths, type SessionRecord } from "./layout.js";
 import { captureLoginEnv, loginShell, shellEnv } from "./env.js";
 import { hasCommandLineTools } from "./git-env.js";
-import { FrameDecoder, F, decodeJson, type AttachMsg, type ExitMsg } from "./protocol.js";
+import { FrameDecoder, F, checkElevate, decodeJson, encodeFrame, type AttachMsg, type ExitMsg } from "./protocol.js";
+import { ensureShims } from "./shims.js";
 import { escapees, hostKillIo, killTree, listProcs, sameProcess, sessionMembers, signalTree } from "./procs.js";
 import { lastContact, readRecord, touchContact, writeRecord } from "./records.js";
 import { Session, type Client } from "./session.js";
@@ -125,7 +127,19 @@ async function serve(
       return undefined;
     },
   );
-  const env = shellEnv({ agentEnv: process.env, ...(login ? { login } : {}), extra: a.extraEnv, clt: hasCommandLineTools() });
+  // `sudo` and `dispatch-elevate` for the shell, next to this agent build.
+  let elevate: { binDir: string; socket: string } | undefined;
+  const script = process.argv[1];
+  if (script) {
+    const binDir = posix.join(posix.dirname(script), "bin");
+    try {
+      ensureShims(binDir, process.execPath, script);
+      elevate = { binDir, socket: paths.socket };
+    } catch (e) {
+      log(`elevation shims not written (${String(e)}); sudo in this shell is the machine's own`);
+    }
+  }
+  const env = shellEnv({ agentEnv: process.env, ...(login ? { login } : {}), extra: a.extraEnv, clt: hasCommandLineTools(), ...(elevate ? { elevate } : {}) });
 
   const shell = spawn(bashPath(), ["--noprofile", "--norc"], { cwd: a.cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
   if (!shell.pid) {
@@ -205,15 +219,31 @@ async function serve(
   server.on("connection", (sock: Socket) => {
     const client: Client = sock;
     const dec = new FrameDecoder();
-    let attached = false;
+    // The relay (Dispatch) attaches; `dispatch-elevate`, from inside the shell, asks once and waits.
+    let kind: "new" | "relay" | "elevate" = "new";
     sock.on("data", (chunk: Buffer) => {
       try {
         for (const f of dec.push(chunk)) {
-          if (!attached) {
+          if (kind === "new") {
+            if (f.type === F.elevate) {
+              kind = "elevate";
+              let msg;
+              try {
+                msg = checkElevate(decodeJson(f.payload));
+              } catch (e) {
+                sock.end(encodeFrame(F.elevateDone, { code: null, error: e instanceof Error ? e.message : String(e) }));
+                return;
+              }
+              const id = session.elevate(client, msg);
+              if (id) log(`elevation ${id} asked: ${JSON.stringify(msg.argv).slice(0, 300)}`);
+              continue;
+            }
             if (f.type !== F.attach) throw new Error(`first frame 0x${f.type.toString(16)} is not ATTACH`);
-            attached = true;
+            kind = "relay";
             contact();
             session.attach(client, attachMsg(f.payload));
+          } else if (kind === "elevate") {
+            continue; // it has nothing more to say; it only waits
           } else if (!session.handle(client, f)) {
             throw new Error("the client sent a frame it could not have meant");
           }
@@ -221,11 +251,12 @@ async function serve(
       } catch (e) {
         // One confused client must not end the session: drop it, keep the shell.
         log(`dropping a client: ${String(e)}`);
-        session.detachClient(client);
+        if (kind === "elevate") session.elevateGone(client);
+        else session.detachClient(client);
         sock.destroy();
       }
     });
-    sock.on("close", () => session.detachClient(client));
+    sock.on("close", () => (kind === "elevate" ? session.elevateGone(client) : session.detachClient(client)));
     sock.on("error", () => {
       /* the relay went away; close follows */
     });

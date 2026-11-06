@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { StreamLog, type RunEntry } from "../src/journal.js";
-import { F, FrameDecoder, decodeJson, decodeOutput, encodeFrame, type ExitMsg, type ReadyMsg } from "../src/protocol.js";
+import { F, FrameDecoder, decodeJson, decodeOutput, encodeElevateOutput, encodeFrame, type ExitMsg, type ReadyMsg } from "../src/protocol.js";
 import { Session, type Client } from "../src/session.js";
 
 const dirs: string[] = [];
@@ -330,5 +330,95 @@ describe("Session", () => {
     expect(c.destroyed).toBe(false);
     shell.say("z".repeat(200));
     expect(c.destroyed).toBe(true);
+  });
+});
+
+describe("Session: elevation requests", () => {
+  const ask = { argv: ["installer", "-pkg", "/tmp/x.pkg", "-target", "/"], cwd: "/w" };
+  const req = (c: FakeClient, i = 0) => decodeJson<{ id: string; argv: string[]; cwd: string }>(c.of(F.elevateRequest)[i]!.payload);
+  const out = (id: string, stream: 1 | 2, text: string) => frame(F.elevateOutput, encodeElevateOutput(id, stream, Buffer.from(text))[0]!.subarray(5));
+
+  it("passes a request up to Dispatch, its output and end back down to the asker alone, then closes it", () => {
+    const { session } = setup();
+    const relay = new FakeClient();
+    session.attach(relay, { v: 1 });
+    const asker = new FakeClient();
+    const id = session.elevate(asker, ask)!;
+    expect(req(relay)).toEqual({ id, ...ask });
+    session.handle(relay, out(id, 1, "installed\n"));
+    session.handle(relay, out(id, 2, "warning\n"));
+    session.handle(relay, frame(F.elevateEnd, { id, code: 0 }));
+    expect(asker.of(F.elevateData).map((f) => [f.payload[0], f.payload.subarray(1).toString()])).toEqual([
+      [1, "installed\n"],
+      [2, "warning\n"],
+    ]);
+    expect(decodeJson(asker.of(F.elevateDone)[0]!.payload)).toEqual({ code: 0 });
+    expect(asker.ended).toBe(true);
+    // Answered: a late frame for it goes nowhere.
+    session.handle(relay, out(id, 1, "late\n"));
+    expect(asker.of(F.elevateData)).toHaveLength(2);
+  });
+
+  it("holds a request made while Dispatch is away, and asks again on every attach until answered", () => {
+    const { session } = setup();
+    const asker = new FakeClient();
+    const id = session.elevate(asker, ask)!;
+    const first = new FakeClient();
+    session.attach(first, { v: 1 });
+    expect(req(first).id).toBe(id);
+    // The link dropped before the answer: the next attach asks again (the plugin ignores what it already has).
+    const second = new FakeClient();
+    session.attach(second, { v: 1, resume: { out: 0, err: 0 } });
+    expect(req(second).id).toBe(id);
+    session.handle(second, frame(F.elevateEnd, { id, code: null, error: "the user denied it" }));
+    expect(decodeJson(asker.of(F.elevateDone)[0]!.payload)).toEqual({ code: null, error: "the user denied it" });
+    const third = new FakeClient();
+    session.attach(third, { v: 1, resume: { out: 0, err: 0 } });
+    expect(third.of(F.elevateRequest)).toHaveLength(0);
+  });
+
+  it("withdraws a request whose asker went away, and says so again on the next attach", () => {
+    const { session } = setup();
+    const relay = new FakeClient();
+    session.attach(relay, { v: 1 });
+    const asker = new FakeClient();
+    const id = session.elevate(asker, ask)!;
+    session.elevateGone(asker);
+    expect(decodeJson(relay.of(F.elevateCancel)[0]!.payload)).toEqual({ id });
+    // That cancel may have been lost with the link: the next attach repeats it, and no longer asks.
+    const again = new FakeClient();
+    session.attach(again, { v: 1, resume: { out: 0, err: 0 } });
+    expect(again.of(F.elevateRequest)).toHaveLength(0);
+    expect(decodeJson(again.of(F.elevateCancel)[0]!.payload)).toEqual({ id });
+    // An answer that crosses the cancel is dropped.
+    session.handle(again, frame(F.elevateEnd, { id, code: 0 }));
+    expect(asker.of(F.elevateDone)).toHaveLength(0);
+  });
+
+  it("refuses more than a handful at once, and any once the shell is ending; ends the waiting ones with the shell", async () => {
+    const { session, shell } = setup();
+    const askers = Array.from({ length: 9 }, () => new FakeClient());
+    const ids = askers.map((a) => session.elevate(a, ask));
+    expect(ids.slice(0, 8).every(Boolean)).toBe(true);
+    expect(ids[8]).toBeUndefined();
+    expect(decodeJson(askers[8]!.of(F.elevateDone)[0]!.payload)).toMatchObject({ code: null, error: expect.stringMatching(/already waiting/) });
+    shell.emit("exit", 0, null);
+    shell.emit("close", 0, null);
+    await tick();
+    for (const a of askers.slice(0, 8)) expect(decodeJson(a.of(F.elevateDone)[0]!.payload)).toEqual({ code: null, error: "the shell ended" });
+    const late = new FakeClient();
+    expect(session.elevate(late, ask)).toBeUndefined();
+    expect(late.ended).toBe(true);
+  });
+
+  it("ignores elevation frames from a client that isn't the attached one", () => {
+    const { session } = setup();
+    const relay = new FakeClient();
+    session.attach(relay, { v: 1 });
+    const asker = new FakeClient();
+    const id = session.elevate(asker, ask)!;
+    const stranger = new FakeClient();
+    session.handle(stranger, frame(F.elevateEnd, { id, code: 0 }));
+    expect(asker.of(F.elevateDone)).toHaveLength(0);
   });
 });

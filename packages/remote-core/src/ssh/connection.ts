@@ -49,6 +49,26 @@ export interface ExecResult {
   stderr: string;
 }
 
+/** How a channel's command ended: its exit status, or the signal that ended it (`SIGTERM`). */
+export interface ChannelExit {
+  code: number | null;
+  signal?: string;
+}
+
+const exits = new WeakMap<ClientChannel, ChannelExit>();
+
+/**
+ * How the command on a channel from {@link SshConnection.channel} ended, if it
+ * has. Read it at `close` when no `exit` event was seen: a quick command's
+ * whole answer (output, exit status, close) can arrive in the same read as
+ * the reply to the exec itself, and ssh2 emits `exit` right then, before the
+ * caller's `await` resumes and listens. The output waits in the stream; the
+ * exit status would be lost.
+ */
+export function channelExit(ch: ClientChannel): ChannelExit | undefined {
+  return exits.get(ch);
+}
+
 export class SshConnection extends EventEmitter {
   private client?: Client;
   private closed = false;
@@ -181,7 +201,12 @@ export class SshConnection extends EventEmitter {
   channel(command: string): Promise<ClientChannel> {
     const client = this.requireClient();
     return new Promise((resolve, reject) => {
-      client.exec(command, (err, ch) => (err ? reject(err) : resolve(ch)));
+      client.exec(command, (err, ch) => {
+        if (err) return reject(err);
+        // Now, synchronously: see channelExit.
+        ch.once("exit", (code: number | null, signal?: string) => exits.set(ch, { code, ...(signal ? { signal } : {}) }));
+        resolve(ch);
+      });
     });
   }
 

@@ -53,6 +53,12 @@ export function shellEnv(opts: {
   login?: Record<string, string>;
   extra?: Record<string, string>;
   clt?: boolean;
+  /**
+   * A chat shell's way to ask for root: `binDir` (with `dispatch-elevate` and
+   * the `sudo` shim, shims.ts) goes in front of PATH, and `socket` is the
+   * session owner's, where `dispatch-elevate` sends its request.
+   */
+  elevate?: { binDir: string; socket: string };
 }): Record<string, string> {
   const env: Record<string, string> = {};
   for (const k of BASE_ENV) {
@@ -66,8 +72,16 @@ export function shellEnv(opts: {
     if (!NAME.test(k)) throw new Error(`not an environment variable name: ${JSON.stringify(k)}`);
     env[k] = String(v);
   }
+  if (opts.elevate) {
+    // Last, so nothing above can move it: the shim must come before /usr/bin/sudo.
+    env.PATH = `${opts.elevate.binDir}:${env.PATH}`;
+    env[ELEVATE_SOCKET_ENV] = opts.elevate.socket;
+  }
   return env;
 }
+
+/** Where `dispatch-elevate` finds its session's owner. */
+export const ELEVATE_SOCKET_ENV = "DISPATCH_ELEVATE_SOCK";
 
 /**
  * The plugin's extra variables, as `--env` carries them: base64 of a JSON

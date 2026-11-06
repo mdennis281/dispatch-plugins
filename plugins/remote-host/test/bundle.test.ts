@@ -11,6 +11,7 @@ import { createTestContext, type TestContext } from "@dispatch/plugin-sdk/testin
 import type { PluginCapability, PluginModule } from "@dispatch/plugin-sdk";
 import { PluginManifestSchema, pluginSecretAllowed } from "@dispatch/plugin-sdk/manifest";
 import { generateKeyPair } from "@dispatch-plugins/remote-core";
+import { elevateSecretName, keySecretName } from "../src/hosts.js";
 
 const dir = fileURLToPath(new URL("..", import.meta.url));
 const manifest = readFileSync(`${dir}/plugin.yaml`, "utf8");
@@ -76,7 +77,7 @@ async function activate(opts: Parameters<typeof createTestContext>[0] = {}) {
 describe("the manifest", () => {
   it("asks for what the plugin uses and no more", () => {
     expect(capabilities).toEqual(["terminals", "secrets", "secrets:write", "kv", "routes", "ui"]);
-    expect(manifestSecrets).toEqual(["REMOTE_HOST_KEY_*"]);
+    expect(manifestSecrets).toEqual(["REMOTE_HOST_KEY_*", "REMOTE_HOST_ELEVATE_KEY_*"]);
     expect(manifest).toMatch(/^id: remote-host$/m);
     const pkg = JSON.parse(readFileSync(`${dir}/package.json`, "utf8")) as { version: string };
     expect(manifest).toContain(`version: ${pkg.version}`);
@@ -101,6 +102,10 @@ describe("the manifest", () => {
     expect(pluginSecretAllowed(manifestSecrets, "REMOTE_HOST_KEY_CVX_MAC")).toBe(true);
     expect(pluginSecretAllowed(manifestSecrets, `REMOTE_HOST_KEY_${"A".repeat(48)}`)).toBe(true);
     expect(pluginSecretAllowed(manifestSecrets, "OTHER_SECRET")).toBe(false);
+    // Each machine's elevation key too, under its own name.
+    expect(pluginSecretAllowed(manifestSecrets, elevateSecretName("cvx-mac"))).toBe(true);
+    expect(elevateSecretName("cvx-mac")).toBe("REMOTE_HOST_ELEVATE_KEY_CVX_MAC");
+    expect(elevateSecretName("cvx-mac")).not.toBe(keySecretName("cvx-mac"));
   });
 });
 

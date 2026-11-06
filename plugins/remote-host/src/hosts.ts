@@ -51,6 +51,16 @@ export function keySecretName(slug: string): string {
   return `REMOTE_HOST_KEY_${slug.toUpperCase().replace(/-/g, "_")}`;
 }
 
+/**
+ * The secret holding a machine's ELEVATION key: it logs in only to the root
+ * helper's hidden account there (elevation.ts). Never the same key as the
+ * chat shells', so nothing the agent's account can reach can log in with it.
+ * `REMOTE_HOST_KEY_*` doesn't cover it: `ELEVATE_KEY_…` doesn't start with `KEY_`.
+ */
+export function elevateSecretName(slug: string): string {
+  return `REMOTE_HOST_ELEVATE_KEY_${slug.toUpperCase().replace(/-/g, "_")}`;
+}
+
 const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
 const ADDRESS = /^[A-Za-z0-9._:%-]{1,253}$/;
 const USER = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;

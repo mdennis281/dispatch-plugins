@@ -9,7 +9,8 @@ import { errText, type SshTarget } from "@dispatch-plugins/remote-core";
 import type { InstanceInfo, ProbeResult } from "@dispatch-plugins/host-agent";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
 import { HostBackend } from "./backend.js";
-import { backendId, connectionChanged, keySecretName, type HostConfig } from "./hosts.js";
+import { approvalsOf, type Approvals, type ElevationDeps } from "./elevation.js";
+import { backendId, connectionChanged, elevateSecretName, keySecretName, type HostConfig } from "./hosts.js";
 import { HostLink, type LinkConnection, type LinkTiming } from "./link.js";
 import type { HostShellOptions } from "./session.js";
 
@@ -25,6 +26,10 @@ export interface RegistryDeps {
   shell?: Partial<HostShellOptions>;
   /** Tests: how often listeners are polled. */
   portPollMs?: number;
+  /** Tests: stands in for `ctx.approvals` (createTestContext has none yet). */
+  approvals?: Approvals;
+  /** Tests: the elevation login. */
+  elevationConnect?: ElevationDeps["connect"];
 }
 
 export interface Entry {
@@ -111,6 +116,7 @@ export class HostRegistry {
       ...(this.deps.connect ? { connect: this.deps.connect } : {}),
       ...(this.deps.timing ? { timing: this.deps.timing } : {}),
     });
+    const approvals = this.deps.approvals ?? approvalsOf(ctx);
     entry.backend = new HostBackend(id, {
       host: () => entry.host,
       link: entry.link,
@@ -120,6 +126,9 @@ export class HostRegistry {
       ...(ctx.kv ? { kv: ctx.kv } : {}),
       ...(this.deps.shell ? { shell: this.deps.shell } : {}),
       ...(this.deps.portPollMs ? { portPollMs: this.deps.portPollMs } : {}),
+      ...(approvals ? { approvals } : {}),
+      elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || undefined,
+      ...(this.deps.elevationConnect ? { elevationConnect: this.deps.elevationConnect } : {}),
     });
     try {
       terminals.registerBackend(entry.backend);

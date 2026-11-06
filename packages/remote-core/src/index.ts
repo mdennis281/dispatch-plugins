@@ -6,7 +6,7 @@
  * never imported at runtime. A plugin that uses it builds with
  * `withSsh2(...)` from `@dispatch-plugins/remote-core/vite`.
  */
-export { SshConnection, type ExecResult, type SshAuth, type SshTarget } from "./ssh/connection.js";
+export { SshConnection, channelExit, type ChannelExit, type ExecResult, type SshAuth, type SshTarget } from "./ssh/connection.js";
 export { hostKeyFingerprint, pinnedHostKey, tofuHostKey, trustProvisioner, type HostVerifier } from "./ssh/host-verifier.js";
 export { generateKeyPair, publicKeyOf, type SshKeyPair } from "./ssh/keys.js";
 export { keyTypeOf, scanHostKey, type HostKeyScan } from "./ssh/scan.js";

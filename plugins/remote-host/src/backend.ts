@@ -26,13 +26,14 @@ import type {
   TerminalRunInfo,
   TerminalSpawnInfo,
 } from "@dispatch/plugin-sdk";
-import type { Attribution, ChatDir, ForgetResult } from "@dispatch-plugins/host-agent";
+import type { Attribution, ChatDir, ElevateRequestMsg, ForgetResult } from "@dispatch-plugins/host-agent";
 import { CLT_DEVELOPER_DIR, XCODE_DEVELOPER_DIR, assertId, chatWorktreePath, instanceLayout, sq, type ProbeResult } from "@dispatch-plugins/host-agent";
 import { errText, git } from "@dispatch-plugins/remote-core";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
 import type { HostLink } from "./link.js";
 import { PortForwards } from "./ports.js";
+import { Elevation, type Approvals, type ElevationDeps, type ElevationState } from "./elevation.js";
 import { HostShell, type HostShellOptions, type SessionOpener } from "./session.js";
 import { ChatSync, DEFAULT_CAP_BYTES, legacySyncKey, syncKey, type ChatSyncDeps } from "./sync/chat-sync.js";
 import { linkRemote } from "./sync/link-remote.js";
@@ -53,6 +54,12 @@ export interface HostBackendDeps {
   publish?: (port: TerminalPortForwardInput) => () => void;
   /** Overrides for tests: how often listeners are polled. */
   portPollMs?: number;
+  /** `ctx.approvals`, when this Dispatch has it. Without it nothing is ever elevated. */
+  approvals?: Approvals;
+  /** The machine's elevation key (`REMOTE_HOST_ELEVATE_KEY_<SLUG>`), if elevation is set up there. */
+  elevateKey?: () => Promise<string | undefined>;
+  /** Tests: the elevation login. */
+  elevationConnect?: ElevationDeps["connect"];
 }
 
 export class HostBackend implements TerminalBackend {
@@ -90,6 +97,8 @@ export class HostBackend implements TerminalBackend {
    */
   private readonly pendingDeletes = new Set<string>();
   private forgetting = false;
+  /** Running commands as root there, with the user's approval (elevation.ts). */
+  readonly elevation: Elevation;
 
   constructor(
     readonly id: string,
@@ -97,6 +106,15 @@ export class HostBackend implements TerminalBackend {
   ) {
     this.label = deps.host().label;
     const { link, instanceId } = deps;
+    this.elevation = new Elevation({
+      host: deps.host,
+      address: () => link.address,
+      key: deps.elevateKey ?? (async () => undefined),
+      ...(deps.approvals ? { approvals: deps.approvals } : {}),
+      log: deps.log,
+      ...(deps.elevationConnect ? { connect: deps.elevationConnect } : {}),
+    });
+    void this.elevation.refresh();
     this.ports = new PortForwards({
       list: () => link.agent<Attribution>(["ports", "--instance", instanceId], 30_000),
       dial: (host, port) => link.tcp(host, port),
@@ -149,7 +167,11 @@ export class HostBackend implements TerminalBackend {
     const sh = await HostShell.start(opener, { label: this.label, log: this.deps.log, ...this.deps.shell }, info.signal);
     const key = shellKey(info.chatId, info.name);
     this.shells.set(key, sh);
+    // `sudo` / `dispatch-elevate` in this shell: the user is asked, and only then does anything run as root.
+    sh.on("elevate", (req: ElevateRequestMsg) => void this.elevation.handle(req, { chatId, terminal: info.name }, sh));
+    sh.on("elevateCancel", (id: string) => this.elevation.cancel(id));
     sh.on("exit", () => {
+      this.elevation.cancelShell(sh);
       if (this.shells.get(key) === sh) this.shells.delete(key);
       // Whatever it was running is over, so it no longer holds the checkout.
       this.syncs.get(chatId)?.releaseTerminal(info.name);
@@ -234,6 +256,8 @@ export class HostBackend implements TerminalBackend {
   onConnected(): void {
     if (this.pendingDeletes.size) void this.forgetPending();
     if (this.orphansSince !== undefined) void this.cleanOrphans();
+    // The other instance may have turned elevation on or off meanwhile (secrets are shared).
+    void this.elevation.refresh();
   }
 
   /** Forget the chats deleted while the machine was away. One that fails stays only while it is unreachable: core's retry has the rest. */
@@ -400,6 +424,7 @@ export class HostBackend implements TerminalBackend {
         `with PATH and locale from the login shell. On it: ${tools(probe)}.`,
       ...(probe?.platform === "darwin" ? [xcodeNote(probe)] : []),
       ...(probe?.brew ? [brewNote(probe.brew)] : []),
+      rootNote(host.label, this.elevation.state),
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked ` +
         `files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts ` +
         `at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, ` +
@@ -529,6 +554,34 @@ function xcodeNote(probe: ProbeResult): string {
     );
   }
   return `- If Xcode's tools (xcodebuild, xcrun simctl) say they need Xcode, set its developer directory on that command: ${xcode}.`;
+}
+
+/**
+ * Root, for the agent: `sudo` there asks the user (elevation.ts), once per
+ * command. What it says depends on whether elevation is set up there; before
+ * the first look, it says both.
+ */
+function rootNote(label: string, state: ElevationState | undefined): string {
+  const how =
+    `\`sudo <command>\` (or \`dispatch-elevate <command>\`) there asks the user to approve running that one command as ` +
+    `root. It waits for their answer (your command's timeout is paused meanwhile), then runs it once, as root, in the ` +
+    `current directory, with root's own environment (system PATH only: give full paths to anything else) and no input, so ` +
+    `it can't prompt. Ask only for what truly needs root, one command at a time, and say why first. A denial is final: ` +
+    `don't retry it or work around it. Homebrew never needs it.`;
+  if (state === "on") return `- Root: ${how}`;
+  if (state === "off") {
+    return (
+      `- Root: nothing can run as root on ${label}: elevation isn't set up there, and \`sudo\` says so and fails. If ` +
+      `something truly needs root, tell the user what and why; they can turn elevation on in Settings → Remote hosts.`
+    );
+  }
+  if (state === "unsupported") {
+    return (
+      `- Root: nothing can run as root on ${label}: \`sudo\` there fails, because this Dispatch can't ask the user for ` +
+      `approval. If something truly needs root, tell the user what and why.`
+    );
+  }
+  return `- Root: if elevation is set up on ${label}, ${how} If it isn't, \`sudo\` says so and fails: then tell the user.`;
 }
 
 /**

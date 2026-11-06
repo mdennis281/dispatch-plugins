@@ -20236,6 +20236,7 @@ class RemoteShell extends EventEmitter {
 function trustProvisioner() {
   return () => true;
 }
+const exits = /* @__PURE__ */ new WeakMap();
 class SshConnection extends EventEmitter {
   constructor(target) {
     super();
@@ -20351,7 +20352,11 @@ class SshConnection extends EventEmitter {
   channel(command) {
     const client2 = this.requireClient();
     return new Promise((resolve2, reject) => {
-      client2.exec(command, (err, ch) => err ? reject(err) : resolve2(ch));
+      client2.exec(command, (err, ch) => {
+        if (err) return reject(err);
+        ch.once("exit", (code, signal) => exits.set(ch, { code, ...signal ? { signal } : {} }));
+        resolve2(ch);
+      });
     });
   }
   /** `exec`, throwing on a non-zero exit with stderr in the message. */
