@@ -165,6 +165,48 @@ If the machine can't be reached, the key is deleted here anyway (nothing can use
 sudo /usr/local/libexec/dispatch-elevate uninstall
 ```
 
+## The Mac's login session (Tier B)
+
+A command run over SSH isn't part of the Mac's login session, so it can't reach the screen. UI tests, the Simulator,
+safaridriver and visible browsers need the session, and so does Playwright's *headless* WebKit, which hangs in a plain SSH
+shell (cvx-mac, 2026-11-06). So on a Mac, dispatch-host also runs as a **GUI agent**, a LaunchAgent in the paired
+user's login session, and a chat's shell gets `dispatch-gui` to use it:
+
+- `dispatch-gui run <cmd> [args…]` runs a command inside the login session and streams its output to the terminal.
+  Ctrl-C stops it, and so does the chat's shell ending (idle, deleted): nothing it started outlives the chat.
+- `dispatch-gui sim` prints the chat's **own Simulator**, a clone of one base device (the newest iOS runtime's newest
+  iPhone), made on first use. Shells started after that have it as `$DISPATCH_SIM_UDID`. It shuts down when the chat
+  goes idle and is deleted with the chat. To give every chat a prepared device, boot the base (`Dispatch base (…)`)
+  once, set it up, and shut it down: clones made after that start from it.
+- `$DISPATCH_DERIVED_DATA` is the chat's own Xcode DerivedData, inside its directory there, so two chats building the
+  same project never share one, and it goes with the chat.
+- `dispatch-gui safari` leases the Mac's **real Safari**, which runs one automation session at a time: one chat holds
+  it, with safaridriver on a port of its own, until it lets go (`--release`), goes idle, or doesn't renew it within
+  30 minutes. While the chat holding it has a command running on the Mac, Dispatch renews it, so a long UI test
+  keeps it (this needs a Dispatch that reports runs in flight, core E28; an older one logs that the lease will lapse).
+  Another chat asking is told who holds it. Safari's "Allow Remote Automation" (`safaridriver --enable`) needs the
+  Mac's owner, once.
+
+How it runs:
+- **One per user, shared.** Both Dispatch instances on the machine (stable and dev) use the same GUI agent, so the
+  Safari lease and the Simulators are coordinated there, on the machine, whichever Dispatch asks.
+- **Installed on every connect.** `~/Library/LaunchAgents/com.dispatch-host.gui.plist` runs
+  `~/.dispatch-host/gui/current.mjs`, a link to one agent build, with the pinned Node. Nothing needs `sudo`.
+- **Upgrades never go backwards.** A plugin points the link at its own build only when that is newer. The agent
+  restarts into it once nothing it started is still running. An older plugin leaves the link alone and talks to the
+  newer agent.
+- **Nobody logged in, no GUI agent.** With FileVault on, a Mac can't log in by itself, so after a reboot there is no
+  login session until someone logs in at the Mac as the paired user. Shells work meanwhile; the machine reports
+  **degraded: "Tier A only, log in at the Mac"**, and the agent is told `dispatch-gui` isn't available. The
+  LaunchAgent starts by itself at that login.
+- **Dialogs.** The health probe asks it for windows waiting for a human on the screen (a permission prompt, a
+  keychain password, the "install the command line developer tools?" offer, a modal alert), by owning process; a UI
+  test stalls behind one without an error. Window titles would need Screen Recording, so they are never read.
+- **Dead-man switch.** After 12 hours with no Dispatch in touch, it ends its runs, shuts the chats' Simulators down,
+  releases Safari, and lets the Mac sleep. After 7 days it removes its LaunchAgent and exits: a plugin that was
+  disabled or uninstalled leaves nothing running. Uninstalling the plugin from the last Dispatch using the machine
+  removes it at once.
+
 ## When a chat ends
 
 - **Idle.** When Dispatch retires an idle chat's session, its shells on the machine end, and whatever they were running (a dev server, a watcher) with them. Its checkout stays, so it picks up where it was when the chat is used again.
@@ -187,10 +229,12 @@ If the machine can't be reached, the rest still happens, and a notice says which
 ## Status
 
 Each machine reports one of three states to Dispatch, re-checked every 30 s:
-- **online**, sometimes with a note that isn't a fault: Homebrew builds nothing from source because the Command Line
+- **online**, sometimes with a note that isn't a fault: the Mac's screen is locked, no Simulator can be made (Xcode's
+  license, no iOS runtime), or Homebrew builds nothing from source because the Command Line
   Tools are older than it needs on that macOS (brew's own `check_clt_minimum_version`). Bottled formulae still
   install. The agent is told so, and not to update them itself;
-- **degraded**, with the reason: low disk, an unreadable login environment, or git that sync can't run. The reason
+- **degraded**, with the reason: "Tier A only, log in at the Mac" (nobody is logged in at the Mac as the paired user,
+  so there is no GUI agent), a dialog waiting on the Mac's screen, low disk, an unreadable login environment, or git that sync can't run. The reason
   names that git and says why: none on the PATH, no developer tools, or (exit 69) Xcode's license not accepted,
   with the fix. On a Mac with the Command Line Tools installed, sync's git runs with
   `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, and so does a chat's shell by default. An Xcode update then

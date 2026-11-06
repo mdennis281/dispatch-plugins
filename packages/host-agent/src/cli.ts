@@ -17,6 +17,8 @@
  *   chats    --instance I              print the instance's chat directories
  *   gc       --instance I [--repo-idle-days N]
  *   elevate  <command…>                 ask the user to run a command as root (elevate.ts); chat shells call it `dispatch-elevate`
+ *   gui      install | status | release | uninstall | serve   the GUI agent, Tier B (gui/cli.ts)
+ *   dispatch-gui run|sim|safari|status   what a chat shell's `dispatch-gui` runs (gui/cli.ts)
  *   version
  *
  * Query commands print one line of JSON. `--root` (or DISPATCH_HOST_ROOT)
@@ -28,7 +30,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertId, rootDir } from "./layout.js";
 import { runOwner } from "./owner.js";
-import { collectGarbage, forgetChat, forgetInstance, listChats } from "./lifecycle.js";
+import { collectGarbage, forgetChat, forgetInstance, listChats, listInstances } from "./lifecycle.js";
+import { uninstallGui } from "./gui/client.js";
 import { probe } from "./probe.js";
 import { decodeEnvArg, decodeExecArg, takeSessionEnv } from "./env.js";
 import { provision, runProgram } from "./provision.js";
@@ -40,6 +43,7 @@ import type { SessionRecord } from "./layout.js";
 import { runRelay } from "./relay.js";
 import { sweepInstance } from "./sweep.js";
 import { AGENT_VERSION } from "./version.js";
+import { dispatchGui, guiMain, releaseGui } from "./gui/cli.js";
 
 export interface ParsedArgs {
   cmd: string;
@@ -107,9 +111,23 @@ export async function main(argv: readonly string[]): Promise<number> {
       onSignal: processSignals,
     });
   }
-  const { cmd, opts, flags } = parseArgs(argv);
+  // So does `dispatch-gui` (`run -- xcodebuild …`).
+  if (argv[0] === "dispatch-gui") {
+    const root = process.env.DISPATCH_HOST_ROOT ?? rootDir(homedir());
+    return dispatchGui(argv.slice(1), { root, home: homedir() }, {
+      env: process.env,
+      cwd: process.cwd(),
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      onSignal: processSignals,
+    });
+  }
+  const gui = argv[0] === "gui";
+  const { cmd, opts, flags } = parseArgs(gui ? argv.slice(1) : argv);
   const root = opts.root ?? process.env.DISPATCH_HOST_ROOT ?? rootDir(homedir());
   const instance = () => assertId("instance", need(opts, "instance"));
+  if (gui) return guiMain(cmd, opts, flags, { root, home: homedir(), script: fileURLToPath(import.meta.url), print });
 
   switch (cmd) {
     case "version":
@@ -217,7 +235,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         await killSession(join(dir, "session.json"), rec);
         killed.push(rec.sid);
       }
-      print({ killed });
+      // What the chat runs in the login session goes with its shells; its Simulator shuts down.
+      const gui = sid ? undefined : await releaseGui({ root, home: homedir() }, id, all ? undefined : chat, false).catch(() => undefined);
+      print({ killed, ...(gui?.answered ? { gui } : {}) });
       return 0;
     }
 
@@ -225,12 +245,17 @@ export async function main(argv: readonly string[]): Promise<number> {
       const id = instance();
       touchContact(root, id);
       if (flags.has("all")) {
-        print(await forgetInstance({ root, instance: id, kill: killSession }));
+        const gui = await releaseGui({ root, home: homedir() }, id, undefined, true).catch((e: unknown) => ({ answered: false, error: String(e) }));
+        const r = await forgetInstance({ root, instance: id, kill: killSession });
+        // The last instance gone: nothing will use the GUI agent again.
+        const uninstalled = listInstances(root).length === 0 ? await uninstallGui({ root, home: homedir() }).catch(() => undefined) : undefined;
+        print({ ...r, gui, ...(uninstalled ? { guiUninstalled: true } : {}) });
         return 0;
       }
       const chat = need(opts, "chat");
+      const gui = await releaseGui({ root, home: homedir() }, id, assertId("chat", chat), true).catch((e: unknown) => ({ answered: false, error: String(e) }));
       const r = await forgetChat({ root, instance: id, chat, kill: killSession });
-      print(r);
+      print({ ...r, gui });
       // Not done: say why, and fail, so the plugin's delete fails and core tries it again.
       if (r.errors?.length) {
         process.stderr.write(`dispatch-host: could not delete chat ${chat}'s refs: ${r.errors.join("; ")}\n`);

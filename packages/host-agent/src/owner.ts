@@ -11,6 +11,7 @@
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
+import { homedir } from "node:os";
 import { posix } from "node:path";
 import { performance } from "node:perf_hooks";
 import { appendRun, StreamLog } from "./journal.js";
@@ -19,6 +20,7 @@ import { captureLoginEnv, loginShell, shellEnv } from "./env.js";
 import { hasCommandLineTools } from "./git-env.js";
 import { FrameDecoder, F, checkElevate, decodeJson, encodeFrame, type AttachMsg, type ExitMsg } from "./protocol.js";
 import { ensureShims } from "./shims.js";
+import { guiShellEnv } from "./gui/shell.js";
 import { escapees, hostKillIo, killTree, listProcs, sameProcess, sessionMembers, signalTree } from "./procs.js";
 import { lastContact, readRecord, touchContact, writeRecord } from "./records.js";
 import { Session, type Client } from "./session.js";
@@ -130,7 +132,7 @@ async function serve(
       return undefined;
     },
   );
-  // `sudo` and `dispatch-elevate` for the shell, next to this agent build. A
+  // `sudo`, `dispatch-elevate` and `dispatch-gui` for the shell, next to this agent build. A
   // hosted process is no shell: nothing in it asks for root.
   let elevate: { binDir: string; socket: string } | undefined;
   const script = process.argv[1];
@@ -140,10 +142,23 @@ async function serve(
       ensureShims(binDir, process.execPath, script);
       elevate = { binDir, socket: paths.socket };
     } catch (e) {
-      log(`elevation shims not written (${String(e)}); sudo in this shell is the machine's own`);
+      log(`shims not written (${String(e)}); sudo in this shell is the machine's own, and there is no dispatch-gui`);
     }
   }
-  const env = shellEnv({ agentEnv: process.env, ...(login ? { login } : {}), extra: a.extraEnv, clt: hasCommandLineTools(), ...(elevate ? { elevate } : {}) });
+  // Tier B: whose shell this is, and the chat's own DerivedData and Simulator. Never a reason not to start the shell.
+  let gui: Record<string, string> = {};
+  try {
+    gui = guiShellEnv({ root: a.root, home: homedir(), instance: a.instance, chat: a.chat, sid: a.sid });
+  } catch (e) {
+    log(`Tier B variables not set (${String(e)})`);
+  }
+  const env = shellEnv({
+    agentEnv: process.env,
+    ...(login ? { login } : {}),
+    extra: { ...gui, ...a.extraEnv },
+    clt: hasCommandLineTools(),
+    ...(elevate ? { elevate } : {}),
+  });
 
   // Its own session (detached), so its pid is the group every kill takes down.
   const [program, args] = a.exec ? [a.exec[0]!, a.exec.slice(1)] : [bashPath(), ["--noprofile", "--norc"]];
