@@ -23,6 +23,7 @@ import { bundledAgent } from "../src/agent.js";
 import { ELEVATE_USER, type ApprovalRequest, type ApprovalResult } from "../src/elevation.js";
 import type { HostConfig } from "../src/hosts.js";
 import { HostRegistry } from "../src/registry.js";
+import { registerTools } from "../src/tools/index.js";
 
 const posix = process.platform !== "win32";
 /** dispatch-host finds listeners with lsof; a runner without it can't attribute ports. */
@@ -347,6 +348,38 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     expect([...t.kv.keys()]).not.toContain("served:e2e:chat-del");
     const rows = await registry.get("e2e")!.link.agent<Array<{ chat: string }>>(["list", "--instance", INSTANCE]);
     expect(rows.filter((r) => r.chat === "chat-del")).toEqual([]);
+  });
+
+  it("remote_fetch copies a file and a folder from the chat's machine; machine_status describes it", { timeout: 60_000 }, async () => {
+    registerTools(t.ctx.tools, { registry, log: t.ctx.log });
+    const h = await t.terminals.spawn(ID, { chatId: "chat-fetch", name: "main" });
+    const w = watch(h);
+    h.stdin.write(
+      "mkdir -p build/Run.xcresult/Data && echo plist > build/Run.xcresult/Info.plist && " +
+        "head -c 300000 /dev/zero > build/Run.xcresult/Data/big.bin && ln -s /etc/hosts build/Run.xcresult/link && " +
+        "echo green > build/report.txt && echo made-it\n",
+    );
+    await until(() => w.out.includes("made-it"), 20_000, "the build outputs");
+    const local = join(tmpdir(), "dispatch-remote-host", INSTANCE, "e2e", "chat-fetch", "fetched");
+
+    const file = await t.tools.call("remote_fetch", { path: "build/report.txt" }, { chatId: "chat-fetch" });
+    expect(file.isError, JSON.stringify(file)).toBeUndefined();
+    expect(readFileSync(join(local, "report.txt"), "utf8")).toBe("green\n");
+
+    const dir = await t.tools.call("remote_fetch", { path: "build/Run.xcresult" }, { chatId: "chat-fetch" });
+    expect(dir.content[0]).toMatchObject({ type: "text", text: expect.stringMatching(/2 files in 2 folders.*\nNot copied \(1\): link \(a symbolic link\)\.$/s) });
+    expect(readFileSync(join(local, "Run.xcresult", "Info.plist"), "utf8")).toBe("plist\n");
+    expect(readFileSync(join(local, "Run.xcresult", "Data", "big.bin")).length).toBe(300_000);
+
+    const status = await t.tools.call("machine_status", {}, { chatId: "chat-fetch" });
+    const out = (status.content[0] as { text: string }).text;
+    expect(out).toContain("E2E (terminal location remote-host/e2e): ");
+    expect(out).toContain("this chat there: terminals main");
+    expect(out).toContain(`this chat's directory there: ${join(home, ".dispatch-host", INSTANCE, "chats", "chat-fetch")}`);
+
+    h.kill();
+    await until(() => w.exit !== undefined, 10_000, "the shell to end");
+    rmSync(join(tmpdir(), "dispatch-remote-host", INSTANCE, "e2e", "chat-fetch"), { recursive: true, force: true });
   });
 
   it("hosts a configured MCP server there and keeps it across a dropped connection", { timeout: 90_000 }, async () => {

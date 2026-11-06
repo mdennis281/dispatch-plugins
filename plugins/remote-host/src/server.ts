@@ -6,11 +6,13 @@
 import { definePlugin } from "@dispatch/plugin-sdk";
 import { errText } from "@dispatch-plugins/remote-core";
 import { bundledAgent, nodejsOrgRuntime } from "./agent.js";
+import { approvalsOf } from "./elevation.js";
 import { ElevationSetups } from "./elevation-setup.js";
 import { readHosts, type HostConfig } from "./hosts.js";
 import { Pairing } from "./pairing.js";
 import { HostRegistry } from "./registry.js";
 import { defineRoutes } from "./routes.js";
+import { registerTools, toolsOf } from "./tools/index.js";
 
 /** What one activation holds, for `deactivate`. */
 let live: { registry: HostRegistry; pairing: Pairing; setups: ElevationSetups; off: () => void } | undefined;
@@ -67,7 +69,18 @@ export default definePlugin({
     });
     const setups = new ElevationSetups();
     ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, setups, hosts, saveHosts }));
-    live = { registry, pairing, setups, off };
+    // The agent's tools (remote_fetch, machine_status), where this Dispatch has `ctx.tools` (#519).
+    const approvals = approvalsOf(ctx);
+    const offTools = registerTools(toolsOf(ctx), { registry, log: ctx.log, ...(approvals ? { approvals } : {}) });
+    live = {
+      registry,
+      pairing,
+      setups,
+      off: () => {
+        offTools();
+        off();
+      },
+    };
   },
 
   /**

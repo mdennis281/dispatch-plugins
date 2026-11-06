@@ -2,7 +2,7 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: remote-host
 name: Remote host
-version: 0.8.1
+version: 0.9.0
 dispatch: ">=1"
 description: >-
   Run a chat's managed terminals on your own machines over SSH. Each paired
@@ -44,3 +44,8 @@ optionalCapabilities:
   # a forwarded dev server never takes one (#517). Only the deny-list is read.
   # Without it, Dispatch's own default ports are still kept clear.
   - runner
+  # The agent's own tools (#519): remote_fetch copies a file or folder (an
+  # .xcresult, a screenshot, a report) from the chat's machine to here, and
+  # machine_status says what the machine is and what the chat has there.
+  # Without it the agent has neither; everything else works the same.
+  - tools
