@@ -129,6 +129,26 @@ export async function checkoutStatus(remote: RemoteSide, p: RemotePaths, baseTre
   return { ...known, changes: parseRawDiff(out.slice(at + "\ndiff\n".length)), sizes };
 }
 
+/**
+ * Whether the checkout's directory holds anything but directories and its
+ * `.git`. A checkout wiped there doesn't stay missing: a new terminal makes
+ * the directory it starts in (`mkdir -p`) before the first sync runs. So
+ * "no .git" alone can't tell a wiped checkout from one whose `.git` a command
+ * removed. Asked only when a checkout lost its `.git` or its HEAD, never on
+ * the way of every command.
+ */
+export async function checkoutHasFiles(remote: RemoteSide, p: RemotePaths): Promise<boolean> {
+  const script = [
+    PRELUDE,
+    `cd ${sq(p.work)} 2>/dev/null || { echo empty; exit 0; }`,
+    `F=$(find . -path ./.git -prune -o ! -type d -print 2>/dev/null | head -n 1)`,
+    `if [ -n "$F" ]; then echo files; else echo empty; fi`,
+  ].join("\n");
+  const r = await remote.run(script, { timeoutMs: 60_000 });
+  if (r.code !== 0) throw new Error(`looking at the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+  return /^files\s*$/m.test(r.stdout);
+}
+
 /** Make the shared repository and the chat's checkout, if they aren't there. Idempotent. */
 export async function initCheckout(remote: RemoteSide, p: RemotePaths): Promise<void> {
   const script = [

@@ -68,6 +68,7 @@ import {
   ClashError,
   StaleError,
   checkoutCommit,
+  checkoutHasFiles,
   checkoutStatus,
   hashThere,
   initCheckout,
@@ -99,7 +100,7 @@ export interface Conflict {
   raw?: string;
 }
 
-/** What survives a restart, in kv `sync:<chatId>`. */
+/** What survives a restart, in kv `sync:<slug>:<chatId>` ({@link syncKey}). */
 export interface SyncRecord {
   v: 1;
   root: string;
@@ -237,7 +238,17 @@ export class ChatSync {
 
   private async prepare(): Promise<RemotePaths> {
     if (!this.loaded) {
-      const saved = await this.d.kv?.get<SyncRecord>(this.key()).catch(() => undefined);
+      let saved = await this.d.kv?.get<SyncRecord>(this.key()).catch(() => undefined);
+      if (!saved) {
+        // Up to 0.5.9 the record was the chat's, whatever the machine: the
+        // first machine to load it takes it over, as before.
+        const legacy = legacySyncKey(this.d.chatId);
+        saved = await this.d.kv?.get<SyncRecord>(legacy).catch(() => undefined);
+        if (saved) {
+          await this.d.kv?.set(this.key(), saved).catch(() => {});
+          await this.d.kv?.delete(legacy).catch(() => {});
+        }
+      }
       if (saved && saved.v === 1 && saved.root === this.d.root) this.rec = { ...empty(this.d.root), ...saved };
       this.loaded = true;
     }
@@ -257,7 +268,13 @@ export class ChatSync {
     const root = this.d.root;
     let base = this.rec.base;
     let st = await checkoutStatus(this.d.remote, p, base?.tree);
-    if (st.state === "missing" || (st.state === "nogit" && !base)) {
+    const broken = st.state === "nogit" || (st.state === "ok" && !!base && !st.head);
+    // Only directories left, the ones a new terminal made to start in: wiped
+    // (the machine re-paired, its ~/.dispatch-host deleted), not a .git a
+    // command removed. Rebuilt on the base, every file would read as deleted
+    // there and be deleted here; it did, live, on cvx-mac.
+    const wiped = st.state === "missing" || (broken && !!base && !(await checkoutHasFiles(this.d.remote, p)));
+    if (wiped || (st.state === "nogit" && !base)) {
       if (!base) return;
       // Wiped: start again from the local files.
       this.rec.base = undefined;
@@ -266,7 +283,7 @@ export class ChatSync {
       await this.save();
       return;
     }
-    if (st.state === "nogit" || (base && !st.head)) {
+    if (broken) {
       // A command removed the checkout's .git (or its HEAD; or rebuilding it
       // was cut short), but its files are there: rebuild it on the base, so
       // what changed there is still seen as a change.
@@ -277,6 +294,8 @@ export class ChatSync {
       st = await checkoutStatus(this.d.remote, p, base!.tree);
       if (st.state !== "ok") throw new Error("the machine's checkout could not be rebuilt");
     }
+    // Missing and no .git returned or were rebuilt above; this only says so to the compiler.
+    if (st.state !== "ok") return;
     if (!base) {
       // Dispatch lost its record (kv), the machine kept its own: carry on from it
       // rather than overwrite whatever changed there since.
@@ -696,7 +715,7 @@ export class ChatSync {
   }
 
   private key(): string {
-    return `sync:${this.d.chatId}`;
+    return syncKey(this.d.slug, this.d.chatId);
   }
 
   private async save(): Promise<void> {
@@ -706,6 +725,21 @@ export class ChatSync {
       this.d.log.warn(`remote-host ${this.d.slug}: could not save chat ${this.d.chatId}'s sync state: ${errText(err)}`);
     }
   }
+}
+
+/**
+ * A chat's sync record on one machine. Per machine because its base is that
+ * machine's checkout: a chat moved to another machine and back must not read
+ * the old checkout against the other's base, or its stale files come back as
+ * changes made there.
+ */
+export function syncKey(slug: string, chatId: string): string {
+  return `sync:${slug}:${chatId}`;
+}
+
+/** Where the record was up to 0.5.9: one per chat. */
+export function legacySyncKey(chatId: string): string {
+  return `sync:${chatId}`;
 }
 
 function empty(root: string): SyncRecord {

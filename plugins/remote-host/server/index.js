@@ -22864,6 +22864,17 @@ async function checkoutStatus(remote, p, baseTree) {
   for (const m of out.slice(0, at).matchAll(/^([0-9a-f]{40}) (\d+)$/gm)) sizes.set(m[1], Number(m[2]));
   return { ...known, changes: parseRawDiff(out.slice(at + "\ndiff\n".length)), sizes };
 }
+async function checkoutHasFiles(remote, p) {
+  const script = [
+    PRELUDE,
+    `cd ${sq(p.work)} 2>/dev/null || { echo empty; exit 0; }`,
+    `F=$(find . -path ./.git -prune -o ! -type d -print 2>/dev/null | head -n 1)`,
+    `if [ -n "$F" ]; then echo files; else echo empty; fi`
+  ].join("\n");
+  const r = await remote.run(script, { timeoutMs: 6e4 });
+  if (r.code !== 0) throw new Error(`looking at the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+  return /^files\s*$/m.test(r.stdout);
+}
 async function initCheckout(remote, p) {
   const script = [
     PRELUDE,
@@ -23095,7 +23106,17 @@ class ChatSync {
   }
   async prepare() {
     if (!this.loaded) {
-      const saved = await this.d.kv?.get(this.key()).catch(() => void 0);
+      let saved = await this.d.kv?.get(this.key()).catch(() => void 0);
+      if (!saved) {
+        const legacy = legacySyncKey(this.d.chatId);
+        saved = await this.d.kv?.get(legacy).catch(() => void 0);
+        if (saved) {
+          await this.d.kv?.set(this.key(), saved).catch(() => {
+          });
+          await this.d.kv?.delete(legacy).catch(() => {
+          });
+        }
+      }
       if (saved && saved.v === 1 && saved.root === this.d.root) this.rec = { ...empty(this.d.root), ...saved };
       this.loaded = true;
     }
@@ -23114,7 +23135,9 @@ class ChatSync {
     const root = this.d.root;
     let base = this.rec.base;
     let st = await checkoutStatus(this.d.remote, p, base?.tree);
-    if (st.state === "missing" || st.state === "nogit" && !base) {
+    const broken = st.state === "nogit" || st.state === "ok" && !!base && !st.head;
+    const wiped = st.state === "missing" || broken && !!base && !await checkoutHasFiles(this.d.remote, p);
+    if (wiped || st.state === "nogit" && !base) {
       if (!base) return;
       this.rec.base = void 0;
       this.rec.conflicts = [];
@@ -23122,7 +23145,7 @@ class ChatSync {
       await this.save();
       return;
     }
-    if (st.state === "nogit" || base && !st.head) {
+    if (broken) {
       await initCheckout(this.d.remote, p);
       await this.sendObjects(await objectsFor(root, base.commit, base.tree), signal);
       await setBase(this.d.remote, p, this.d.chatId, base.commit);
@@ -23130,6 +23153,7 @@ class ChatSync {
       st = await checkoutStatus(this.d.remote, p, base.tree);
       if (st.state !== "ok") throw new Error("the machine's checkout could not be rebuilt");
     }
+    if (st.state !== "ok") return;
     if (!base) {
       if (!st.base) return;
       base = this.rec.base = st.base;
@@ -23480,7 +23504,7 @@ class ChatSync {
     };
   }
   key() {
-    return `sync:${this.d.chatId}`;
+    return syncKey(this.d.slug, this.d.chatId);
   }
   async save() {
     try {
@@ -23489,6 +23513,12 @@ class ChatSync {
       this.d.log.warn(`remote-host ${this.d.slug}: could not save chat ${this.d.chatId}'s sync state: ${errText(err)}`);
     }
   }
+}
+function syncKey(slug, chatId) {
+  return `sync:${slug}:${chatId}`;
+}
+function legacySyncKey(chatId) {
+  return `sync:${chatId}`;
 }
 function empty(root) {
   return { v: 1, root, overlay: {}, pins: {}, conflicts: [], skippedHost: {}, skippedLocal: {} };
@@ -23772,7 +23802,8 @@ class HostBackend {
     const r = await this.deps.link.agent(["forget", "--instance", this.deps.instanceId, "--chat", chatId], 5e4);
     this.served.delete(chatId);
     await this.deps.kv?.delete(this.servedKey(chatId));
-    await this.deps.kv?.delete(`sync:${chatId}`);
+    await this.deps.kv?.delete(syncKey(this.deps.host().slug, chatId));
+    await this.deps.kv?.delete(legacySyncKey(chatId));
     if (r.removed || r.killed.length) {
       this.deps.log.info(
         `remote-host ${this.deps.host().slug}: deleted chat ${chatId}'s checkout there` + (r.killed.length ? `, ending ${r.killed.length} session(s)` : "")
@@ -24150,6 +24181,9 @@ function defineRoutes(deps) {
       registry.sync(deps.hosts());
       await ctx.secrets?.delete?.(name);
       await ctx.kv?.delete(`host:${host.slug}`);
+      for (const prefix of [`sync:${host.slug}:`, `served:${host.slug}:`]) {
+        for (const k of await ctx.kv?.list(prefix).catch(() => []) ?? []) await ctx.kv?.delete(k);
+      }
       return {
         removed: host.slug,
         keyLine,

@@ -70,7 +70,9 @@ describe("a deleted chat", () => {
   });
 
   it("is forgotten there, and its records here go", async () => {
-    const { t, connected, forgot } = setup({ kv: { "served:studio:chat-1": { at: 1 }, "sync:chat-1": { v: 1 }, "served:studio:chat-2": { at: 1 } } });
+    const { t, connected, forgot } = setup({
+      kv: { "served:studio:chat-1": { at: 1 }, "sync:studio:chat-1": { v: 1 }, "sync:chat-1": { v: 1 }, "served:studio:chat-2": { at: 1 } },
+    });
     await connected();
     await t.terminals.chatDeleted("chat-1");
     expect(forgot()).toEqual(["chat-1"]);
@@ -114,12 +116,12 @@ describe("a deleted chat", () => {
 
 describe("a deleted chat, when git won't run there", () => {
   it("is refused with dispatch-host's reason, keeping its records, so core retries until git works", async () => {
-    const { m, t, connected, forgot } = setup({ kv: { "served:studio:chat-1": { at: 1 }, "sync:chat-1": { v: 1 } } });
+    const { m, t, connected, forgot } = setup({ kv: { "served:studio:chat-1": { at: 1 }, "sync:studio:chat-1": { v: 1 } } });
     await connected();
     m.forgetFails = "p.git: You have not agreed to the Xcode license agreements.";
     await expect(t.terminals.chatDeleted("chat-1")).rejects.toThrow(/forget exited 1: .*Xcode license/);
     expect(t.kv.has("served:studio:chat-1")).toBe(true);
-    expect(t.kv.has("sync:chat-1")).toBe(true);
+    expect(t.kv.has("sync:studio:chat-1")).toBe(true);
     m.forgetFails = undefined;
     await t.terminals.chatDeleted("chat-1");
     expect(forgot()).toEqual(["chat-1", "chat-1"]);

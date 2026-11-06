@@ -128,6 +128,12 @@ export function defineRoutes(deps: RoutesDeps): (r: PluginRouter<PluginRequest, 
       registry.sync(deps.hosts());
       await ctx.secrets?.delete?.(name);
       await ctx.kv?.delete(`host:${host.slug}`);
+      // What this Dispatch knew of the machine's chats goes too: a machine
+      // paired again under this name starts clean, and a sync record kept
+      // from before would read its new, empty checkout against the old base.
+      for (const prefix of [`sync:${host.slug}:`, `served:${host.slug}:`]) {
+        for (const k of (await ctx.kv?.list(prefix).catch(() => [])) ?? []) await ctx.kv?.delete(k);
+      }
       return {
         removed: host.slug,
         keyLine,
