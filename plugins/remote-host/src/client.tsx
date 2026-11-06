@@ -293,7 +293,8 @@ function statusWords(v: HostView): string {
 function statusLine(v: HostView): string {
   const s = v.status;
   const seen = s.lastSeenAt ? `last seen ${ago(s.lastSeenAt)}` : undefined;
-  if (s.state === "online") return ["Online", seen].filter(Boolean).join(" · ");
+  // Online can carry a note that is no fault (Homebrew's old Command Line Tools).
+  if (s.state === "online") return ["Online", s.detail, seen].filter(Boolean).join(" · ");
   return [statusWords(v), seen].filter(Boolean).join(" · ");
 }
 

@@ -482,4 +482,22 @@ describe("statusFrom", () => {
     });
     expect(statusFrom({ ...PROBE, brew: { path: "/opt/homebrew/bin/brew", version: "Homebrew 7.0.12", writable: true } }, 5)).toEqual({ state: "online", lastSeenAt: 5 });
   });
+
+  it("says Homebrew builds nothing from source with Command Line Tools too old for the macOS, but stays online", () => {
+    const brew = { path: "/opt/homebrew/bin/brew", version: "Homebrew 7.0.12", writable: true, cltTooOld: "Command Line Tools for Xcode 27.0" };
+    const note =
+      "Homebrew builds nothing from source: the Command Line Tools are too old for this macOS " +
+      "(it wants the Command Line Tools for Xcode 27.0); bottles install";
+    expect(statusFrom({ ...PROBE, brew }, 5)).toEqual({ state: "online", detail: note, lastSeenAt: 5 });
+    // Beside a real fault it rides along; the fault is what degrades it.
+    expect(statusFrom({ ...PROBE, loginEnvError: "timed out", brew }, 5)).toEqual({
+      state: "degraded",
+      detail: `login shell environment unreadable; ${note}`,
+      lastSeenAt: 5,
+    });
+    // A blocked brew runs nothing at all: that alone is said.
+    const blocked = statusFrom({ ...PROBE, brew: { ...brew, blocked: "Xcode's license isn't accepted (exit 69)" } }, 5);
+    expect(blocked.state).toBe("degraded");
+    expect(blocked.detail).not.toMatch(/source/);
+  });
 });

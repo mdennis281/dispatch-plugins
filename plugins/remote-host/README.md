@@ -116,7 +116,9 @@ If the machine can't be reached, the rest still happens, and a notice says which
 ## Status
 
 Each machine reports one of three states to Dispatch, re-checked every 30 s:
-- **online**;
+- **online**, sometimes with a note that isn't a fault: Homebrew builds nothing from source because the Command Line
+  Tools are older than it needs on that macOS (brew's own `check_clt_minimum_version`). Bottled formulae still
+  install. The agent is told so, and not to update them itself;
 - **degraded**, with the reason: low disk, an unreadable login environment, or git that sync can't run. The reason
   names that git and says why: none on the PATH, no developer tools, or (exit 69) Xcode's license not accepted,
   with the fix. On a Mac with the Command Line Tools installed, sync's git runs with

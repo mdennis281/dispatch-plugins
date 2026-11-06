@@ -229,6 +229,22 @@ describe("the agent's note", () => {
     const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
     expect(note).toContain("Homebrew 7.0.12 is installed there (`/opt/homebrew/bin/brew`): install a tool the machine lacks with `brew install <formula>`");
     expect(note).toContain("No sudo: never `sudo brew`");
+    expect(note).not.toMatch(/bottle|source/);
+  });
+
+  it("with Command Line Tools too old for the macOS, says only bottles install and not to update them itself", async () => {
+    const { m, r, connected } = setup();
+    m.probe = {
+      ...PROBE,
+      brew: { path: "/opt/homebrew/bin/brew", version: "Homebrew 7.0.12", writable: true, cltTooOld: "Command Line Tools for Xcode 27.0" },
+    };
+    await connected();
+    const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
+    expect(note).toContain("install a tool the machine lacks with `brew install <formula>`");
+    expect(note).toContain("Only formulae with a bottle install");
+    expect(note).toContain("Don't update or reinstall them (that needs sudo); if you need one, tell the user.");
+    // The machine's own words stay out of the prompt.
+    expect(note).not.toContain("Xcode 27.0");
   });
 
   it("with another account's Homebrew, says to use it but not to install with it", async () => {

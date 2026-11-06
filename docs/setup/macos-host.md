@@ -229,6 +229,12 @@ The first must print three paths. `zsh -lc` matters: it's the login shell, which
 from. The second must print `brew runs`. "You have not agreed to the Xcode license" means `xcode-select` still
 points at Xcode (1. above). Once paired, the machine's row says the same.
 
+**Command Line Tools older than the macOS** (cvx-mac: 14.3.1 on macOS 27.2): `brew doctor` says "Your Command
+Line Tools are too outdated". Formulae with a bottle (a prebuilt package) still install. Only one that brew has
+to build from source fails. Dispatch doesn't count that as a fault: the machine's row stays online, with a note
+naming the version brew asks for. To clear it, install the newer ones from Software Update, or from
+<https://developer.apple.com/download/all/> as brew suggests.
+
 ### 7. Keep it awake
 
 1. Keep it plugged in, with the **lid open**. With the lid closed and no external display it sleeps, even on
