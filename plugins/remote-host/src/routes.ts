@@ -21,7 +21,7 @@ import type { PluginContext, PluginReply, PluginRequest, PluginRouter } from "@d
 import { shCommand } from "@dispatch-plugins/host-agent";
 import { errText, publicKeyOf } from "@dispatch-plugins/remote-core";
 import { keyBlobOf, removeKeyScript } from "./authorized-keys.js";
-import { MANUAL_UNINSTALL, removeElevation, verifyElevation, type ElevationSetups, type RemovedThere } from "./elevation-setup.js";
+import { HELPER_VERSION, MANUAL_UNINSTALL, removeElevation, verifyElevation, type ElevationSetups, type RemovedThere } from "./elevation-setup.js";
 import { elevateSecretName, keySecretName, validAddress, type HostConfig } from "./hosts.js";
 import { UserError, type Pairing } from "./pairing.js";
 import type { HostRegistry } from "./registry.js";
@@ -99,9 +99,20 @@ export function defineRoutes(deps: RoutesDeps): (r: PluginRouter<PluginRequest, 
       return { hosts: registry.list() };
     }));
 
-    r.post("/hosts/:slug/elevation/setup", h((req) => {
+    r.post("/hosts/:slug/elevation/setup", h(async (req) => {
       const host = find(req);
       if (!registry.get(host.slug)) throw new UserError(`${host.slug} is not registered in this instance`, 409);
+      // On already (the setup run again, to update the helper): the same key,
+      // so the login that works keeps working whether or not Verify follows.
+      // As stored, so verifying stores back exactly the same secret.
+      const stored = await ctx.secrets?.get(elevateSecretName(host.slug));
+      if (stored?.trim()) {
+        try {
+          return deps.setups.start(host, stored);
+        } catch (err) {
+          ctx.log.warn(`remote-host ${host.slug}: the stored elevation key can't be read (${errText(err)}); making a new one`);
+        }
+      }
       return deps.setups.start(host);
     }));
 
@@ -121,7 +132,10 @@ export function defineRoutes(deps: RoutesDeps): (r: PluginRouter<PluginRequest, 
         ctx.log.info(`remote-host ${host.slug}: elevation is on (helper ${version})`);
       }
       await e.backend.elevation.refresh();
-      return { on: true, version, canAsk: e.backend.elevation.canAsk };
+      // An older helper still works; the pane offers the setup again, which installs this plugin's.
+      const outdated = version !== HELPER_VERSION;
+      if (outdated) ctx.log.info(`remote-host ${host.slug}: its root helper is version ${version}; this plugin has ${HELPER_VERSION}`);
+      return { on: true, version, current: HELPER_VERSION, outdated, canAsk: e.backend.elevation.canAsk };
     }));
 
     r.delete("/hosts/:slug/elevation", h(async (req) => elevationOff(find(req))));

@@ -64,6 +64,9 @@ describe("the helper and setup scripts", () => {
     expect(s).toContain("SUDO='/usr/bin/sudo'");
     expect(s).toContain("ROOT_UID=0\n");
     expect(s).not.toContain("\r");
+    // Version 2: the watcher job is disowned, so bash never reports it into a command's stderr.
+    expect(HELPER_VERSION).toBe("2");
+    expect(s).toMatch(/watcher=\$!\n(?:\s*#.*\n)*\s*disown "\$watcher"/);
   });
 
   it("refuses paths it couldn't quote or would be unsafe to delete", () => {
@@ -130,6 +133,21 @@ describe("ElevationSetups", () => {
     s.start(HOST);
     s.drop("cvx-mac");
     expect(s.key("cvx-mac")).toBeUndefined();
+  });
+
+  it("makes the command again with the key elevation is on with, so updating the helper keeps the same key line", () => {
+    const s = new ElevationSetups({ dispatchName: "My PC" });
+    const first = s.start(HOST);
+    const stored = s.key("cvx-mac")!;
+    s.drop("cvx-mac");
+    const again = s.start(HOST, stored);
+    // The same public key (its comment isn't part of the key, and goes).
+    expect(again.keyLine.split(" ")[2]).toBe(first.keyLine.split(" ")[2]);
+    expect(again.keyLine).toMatch(/^restrict,command="\/usr\/local\/libexec\/dispatch-elevate",from="10\.0\.4\.1,10\.69\.69\.69" ssh-ed25519 \S+$/);
+    expect(s.key("cvx-mac")).toBe(stored);
+    // It installs this plugin's helper.
+    expect(again.script).toContain(`VERSION='${HELPER_VERSION}'`);
+    expect(() => s.start(HOST, "not a key")).toThrow(/not a private key/);
   });
 });
 

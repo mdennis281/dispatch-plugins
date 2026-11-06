@@ -785,6 +785,8 @@ function ElevationDialog({ host, view, onClose }: { host: ClientHost; view: Host
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [manual, setManual] = useState<ElevationOff | null>(null);
+  /** Check found an older helper there than this plugin's: it works, and the setup again updates it. */
+  const [outdated, setOutdated] = useState<{ version: string; current: string } | null>(null);
   const base = `${slugPath(view.slug)}/elevation`;
 
   const act = async (what: string, fn: () => Promise<void>) => {
@@ -801,7 +803,13 @@ function ElevationDialog({ host, view, onClose }: { host: ClientHost; view: Host
   const makeCommand = () => act("setup", async () => setStart(await call<ElevationStart>(host, `${base}/setup`, "POST")));
   const verify = () =>
     act("verify", async () => {
-      const r = await call<{ version: string }>(host, `${base}/verify`, "POST");
+      const r = await call<{ version: string; current?: string; outdated?: boolean }>(host, `${base}/verify`, "POST");
+      if (r.outdated && r.current) {
+        // It works, but with an older helper: stay, and offer the update.
+        setStart(null);
+        setOutdated({ version: r.version, current: r.current });
+        return;
+      }
       host.toast(on ? `${view.label}: root with approval works (helper ${r.version})` : `Root with approval is on for ${view.label}`, {
         kind: "info",
       });
@@ -818,17 +826,24 @@ function ElevationDialog({ host, view, onClose }: { host: ClientHost; view: Host
       onClose();
     });
 
+  // A verify that found an older helper stored the key: it is on, whatever `view` said when this opened.
+  const isOn = on || outdated !== null;
   const footer = manual ? (
     <div className="flex w-full items-center justify-end gap-2">
       <Button size="sm" variant="primary" onClick={onClose}>
         Done
       </Button>
     </div>
-  ) : on ? (
+  ) : isOn && !start ? (
     <div className="flex w-full items-center justify-end gap-2">
       <Button size="sm" variant="ghost" onClick={onClose}>
         Close
       </Button>
+      {outdated && (
+        <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void makeCommand()}>
+          {busy === "setup" ? "Making it…" : "Update the helper"}
+        </Button>
+      )}
       <Button size="sm" disabled={busy !== null} onClick={() => void verify()}>
         {busy === "verify" ? "Checking…" : "Check it"}
       </Button>
@@ -873,8 +888,15 @@ function ElevationDialog({ host, view, onClose }: { host: ClientHost; view: Host
             </p>
             <CopyBox host={host} text={manual.manual!} />
           </>
-        ) : on ? (
+        ) : isOn && !start ? (
           <>
+            {outdated && (
+              <WarnStrip>
+                The helper on {view.label} is version {outdated.version}; this plugin brings version {outdated.current}. It still works. To
+                update it, press <b>Update the helper</b> and run the command there again: it keeps the same key, so nothing stops working
+                meanwhile.
+              </WarnStrip>
+            )}
             <p>
               On. A command in a chat&apos;s terminal on {view.label} that asks for root (<span className="cm-mono">sudo …</span> or{" "}
               <span className="cm-mono">dispatch-elevate …</span>) waits for you to approve that exact command in its chat, then runs once,

@@ -24,15 +24,22 @@
 import { gzipSync } from "node:zlib";
 import { hostname } from "node:os";
 import { sq } from "@dispatch-plugins/host-agent";
-import { errText, generateKeyPair } from "@dispatch-plugins/remote-core";
+import { errText, generateKeyPair, publicKeyOf } from "@dispatch-plugins/remote-core";
 import helperTemplate from "./elevate-helper.sh?raw";
 import setupTemplate from "./elevate-setup.sh?raw";
 import { ELEVATE_USER, ElevationLoginError, HELPER_PATH, type Elevation } from "./elevation.js";
 import { validFrom, type HostConfig } from "./hosts.js";
 import { UserError, safeName } from "./pairing.js";
 
-/** The helper's own version, which `check` prints. Raise it when the helper changes. */
-export const HELPER_VERSION = "1";
+/**
+ * The helper's own version, which `check` prints. Raise it when the helper
+ * changes: Check compares it, and offers to run the setup again, which
+ * installs this one.
+ * - 1: the first.
+ * - 2: bash's report of the killed watcher job no longer ends up in a
+ *   command's stderr.
+ */
+export const HELPER_VERSION = "2";
 
 /** Where everything goes on the machine. Tests point these at a scratch directory. */
 export interface HelperPaths {
@@ -175,10 +182,17 @@ export class ElevationSetups {
     this.now = d.now ?? Date.now;
   }
 
-  /** Mint a key for `host` (replacing one minted before) and make its setup command. */
-  start(host: HostConfig): SetupStart {
+  /**
+   * Make `host`'s setup command, with a new key (replacing one minted before),
+   * or with `keep`, the key elevation is on with now. Kept, the command writes
+   * the same key line, so running it again (to install a newer helper, say)
+   * never locks out the login that works, even if Verify is never pressed.
+   */
+  start(host: HostConfig, keep?: string): SetupStart {
     this.expire();
-    const kp = generateKeyPair(`dispatch-elevate:${host.slug}@${safeName(this.d.dispatchName ?? hostname())}`);
+    const kp = keep
+      ? { privateKey: keep, publicKey: publicKeyOf(keep) }
+      : generateKeyPair(`dispatch-elevate:${host.slug}@${safeName(this.d.dispatchName ?? hostname())}`);
     const paths = this.d.paths ?? MAC_PATHS;
     const keyLine = elevationKeyLine(kp.publicKey, host.allowFrom, paths.helper);
     const script = setupScript(host.slug, keyLine, paths);

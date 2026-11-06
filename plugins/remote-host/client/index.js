@@ -619,6 +619,7 @@ function ElevationDialog({ host, view, onClose }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const [manual, setManual] = useState(null);
+  const [outdated, setOutdated] = useState(null);
   const base = `${slugPath(view.slug)}/elevation`;
   const act = async (what, fn) => {
     setBusy(what);
@@ -634,6 +635,11 @@ function ElevationDialog({ host, view, onClose }) {
   const makeCommand = () => act("setup", async () => setStart(await call(host, `${base}/setup`, "POST")));
   const verify = () => act("verify", async () => {
     const r = await call(host, `${base}/verify`, "POST");
+    if (r.outdated && r.current) {
+      setStart(null);
+      setOutdated({ version: r.version, current: r.current });
+      return;
+    }
     host.toast(on ? `${view.label}: root with approval works (helper ${r.version})` : `Root with approval is on for ${view.label}`, {
       kind: "info"
     });
@@ -648,8 +654,10 @@ function ElevationDialog({ host, view, onClose }) {
     host.toast(`Root with approval is off for ${view.label}`, { kind: "info" });
     onClose();
   });
-  const footer = manual ? /* @__PURE__ */ jsx("div", { className: "flex w-full items-center justify-end gap-2", children: /* @__PURE__ */ jsx(Button, { size: "sm", variant: "primary", onClick: onClose, children: "Done" }) }) : on ? /* @__PURE__ */ jsxs("div", { className: "flex w-full items-center justify-end gap-2", children: [
+  const isOn = on || outdated !== null;
+  const footer = manual ? /* @__PURE__ */ jsx("div", { className: "flex w-full items-center justify-end gap-2", children: /* @__PURE__ */ jsx(Button, { size: "sm", variant: "primary", onClick: onClose, children: "Done" }) }) : isOn && !start ? /* @__PURE__ */ jsxs("div", { className: "flex w-full items-center justify-end gap-2", children: [
     /* @__PURE__ */ jsx(Button, { size: "sm", variant: "ghost", onClick: onClose, children: "Close" }),
+    outdated && /* @__PURE__ */ jsx(Button, { size: "sm", variant: "primary", disabled: busy !== null, onClick: () => void makeCommand(), children: busy === "setup" ? "Making it…" : "Update the helper" }),
     /* @__PURE__ */ jsx(Button, { size: "sm", disabled: busy !== null, onClick: () => void verify(), children: busy === "verify" ? "Checking…" : "Check it" }),
     /* @__PURE__ */ jsx(Button, { size: "sm", variant: "danger", disabled: busy !== null, onClick: () => void turnOff(), children: busy === "off" ? "Turning off…" : "Turn off" })
   ] }) : /* @__PURE__ */ jsxs("div", { className: "flex w-full items-center justify-end gap-2", children: [
@@ -676,7 +684,18 @@ function ElevationDialog({ host, view, onClose }) {
             "). To remove the hidden account, the helper and its sudoers rule, run this there as an administrator:"
           ] }),
           /* @__PURE__ */ jsx(CopyBox, { host, text: manual.manual })
-        ] }) : on ? /* @__PURE__ */ jsxs(Fragment, { children: [
+        ] }) : isOn && !start ? /* @__PURE__ */ jsxs(Fragment, { children: [
+          outdated && /* @__PURE__ */ jsxs(WarnStrip, { children: [
+            "The helper on ",
+            view.label,
+            " is version ",
+            outdated.version,
+            "; this plugin brings version ",
+            outdated.current,
+            ". It still works. To update it, press ",
+            /* @__PURE__ */ jsx("b", { children: "Update the helper" }),
+            " and run the command there again: it keeps the same key, so nothing stops working meanwhile."
+          ] }),
           /* @__PURE__ */ jsxs("p", { children: [
             "On. A command in a chat's terminal on ",
             view.label,
