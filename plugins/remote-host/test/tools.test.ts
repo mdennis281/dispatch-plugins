@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestContext } from "@dispatch/plugin-sdk/testing";
@@ -177,9 +177,44 @@ describe.skipIf(!SH)("the agent's tools (the machine played by the local sh)", (
     writeFileSync(mine, "precious");
     const r = await t.tools.call("remote_fetch", { path: "build/report.txt", to: mine }, { ...call, signal: AbortSignal.abort() as never });
     expect(r.isError).toBe(true);
-    expect(text(r)).toMatch(/cancelled/);
+    expect(text(r)).toBe(`Cancelled: nothing was copied; ${mine} is as it was.`);
     expect(asked).toHaveLength(1);
     expect(readFileSync(mine, "utf8")).toBe("precious");
+  });
+
+  it("says plainly when the machine can't be reached", async () => {
+    const m = cvx();
+    m.backend.whereThere = async () => {
+      throw new Error("10.0.4.250: no answer (asleep, off, or off the network)");
+    };
+    const t = setup([m]);
+    const r = await t.tools.call("remote_fetch", { path: "build/report.txt" }, call);
+    expect(r.isError).toBe(true);
+    expect(text(r)).toBe(
+      "CVX Mac can't be reached right now (10.0.4.250: no answer (asleep, off, or off the network)), so nothing was copied. machine_status says when it is back.",
+    );
+  });
+
+  it("says the connection dropped, and that nothing was written here, when a copy is cut off", async () => {
+    for (const what of ["build/report.txt", "build/Run.xcresult"]) {
+      const m = cvx();
+      const real = m.backend.remoteSide();
+      // The channel closes with no exit status: what a dropped connection looks like.
+      m.backend.remoteSide = () => ({ ...real, stream: async () => ({ code: null, stderr: "" }) });
+      const t = setup([m]);
+      const mine = join(work, `cut-${what.length}.txt`);
+      writeFileSync(mine, "precious");
+      const r = await t.tools.call("remote_fetch", { path: what, to: mine }, call);
+      expect(r.isError).toBe(true);
+      expect(text(r)).toMatch(
+        new RegExp(
+          `^Couldn't copy .*${what.replace(".", "\\.")} from CVX Mac: the connection to the machine dropped during the copy\\. ` +
+            `Nothing was written on this computer; .*cut-${what.length}\\.txt is as it was\\. Try again once CVX Mac is reachable`,
+        ),
+      );
+      expect(readFileSync(mine, "utf8")).toBe("precious");
+      expect(readdirSync(work).filter((n) => n.includes(".part-"))).toEqual([]);
+    }
   });
 
   it("refuses to replace anything on a Dispatch that can't ask", async () => {

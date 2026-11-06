@@ -109,15 +109,20 @@ interface StatusArgs {
 class ToolRefusal extends Error {}
 
 async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall): Promise<PluginToolResult> {
+  // What the error says depends on how far it got: reaching the machine, or copying.
+  let label = "the machine";
+  let from: string | undefined;
+  let dest: string | undefined;
+  let replacing = false;
   try {
     const path = text(args.path, "path");
     if (!path) throw new ToolRefusal("`path` is required: the file or folder on the machine to copy.");
     const to = args.to === undefined ? undefined : text(args.to, "to");
     const e = await pickOne(deps.registry, call.chatId, args.host === undefined ? undefined : text(args.host, "host"));
-    const label = e.host.label;
+    label = e.host.label;
     const signal = call.signal as unknown as AbortSignal;
     const there = await e.backend.whereThere(call.chatId, call.cwd, signal);
-    const from = remotePath(path, there);
+    from = remotePath(path, there);
     const remote = e.backend.remoteSide();
     const found = await look(remote, from);
     if (found.kind === "missing") {
@@ -126,11 +131,13 @@ async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall
     }
     if (found.kind === "other") throw new ToolRefusal(`${from} on ${label} is neither a file nor a folder.`);
 
-    let dest: string;
     if (to) {
       if (!isAbsolute(to) && !call.cwd) throw new ToolRefusal("`to` is relative, and this chat has no working directory to take it in; give an absolute path.");
       dest = isAbsolute(to) ? resolve(to) : resolve(call.cwd!, to);
-      if (existsSync(dest)) await mayReplace(deps, call, dest, `${label}:${from}`, label);
+      if (existsSync(dest)) {
+        await mayReplace(deps, call, dest, `${label}:${from}`, label);
+        replacing = true;
+      }
     } else {
       dest = resolve(e.backend.fetchedDir(call.chatId), localName(from));
     }
@@ -140,7 +147,16 @@ async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall
     return await answer(got, from, dest, label, call, args.show === true);
   } catch (err) {
     if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
-    throw new Error(`remote_fetch failed: ${errText(err)}`);
+    const why = errText(err);
+    const kept = replacing && dest ? `; ${dest} is as it was` : "";
+    const text = call.signal.aborted
+      ? `Cancelled: nothing was copied${kept}.`
+      : !from
+      ? `${label} can't be reached right now (${why}), so nothing was copied. machine_status says when it is back.`
+      : `Couldn't copy ${from} from ${label}: ${why}. Nothing was written on this computer${kept}. ` +
+        `Try again once ${label} is reachable (machine_status says).`;
+    deps.log.warn(`remote-host: remote_fetch for ${call.chatId}: ${text}`);
+    return { content: [{ type: "text", text }], isError: true };
   }
 }
 
@@ -244,7 +260,7 @@ async function describe(e: Entry, v: HostView, call: PluginToolCall): Promise<st
   const p = v.probe;
   const lines = [`${v.label} (terminal location ${v.id}): ${v.status.state}${v.status.detail ? `, ${v.status.detail}` : ""}`];
   const facts: string[] = [];
-  if (v.address) facts.push(`at ${v.address}`);
+  if (v.address) facts.push(v.status.state === "offline" ? `last reached at ${v.address}` : `at ${v.address}`);
   if (p) {
     const os = [p.os.name, p.os.version].filter(Boolean).join(" ") || p.platform;
     facts.push(`${os} on ${p.arch}`, `user ${p.user}, home ${p.home}`);

@@ -19,6 +19,8 @@ export const MAX_COPY_BYTES = 200 * 1024 * 1024;
 const COPY_MS = 5 * 60_000;
 
 const NO_FILE = 3;
+/** What a copy that ended with no exit status means: the channel went with the connection. */
+export const DROPPED = "the connection to the machine dropped during the copy";
 const TOO_BIG = 4;
 
 export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeoutMs?: number } = {}): BridgeFiles {
@@ -48,6 +50,8 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
         await rm(part, { force: true });
         throw err;
       }
+      // The channel normally ends `out` through the pipe; one closed by a dropped connection may not.
+      if (!out.writableEnded) out.end();
       await closed;
       if (signal?.aborted) {
         await rm(part, { force: true });
@@ -57,7 +61,7 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
         await rm(part, { force: true });
         if (r.code === NO_FILE) return false;
         if (r.code === TOO_BIG) throw new Error(`it is ${r.stderr.trim()}, over the ${Math.round(max / 1048576)} MB a copy may be`);
-        throw new Error(r.stderr.trim() || `exit ${r.code}`);
+        throw new Error(r.code === null ? DROPPED : r.stderr.trim() || `exit ${r.code}`);
       }
       await rename(part, to);
       return true;
@@ -76,7 +80,7 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
         `rm -f "$t"; exit 1`,
       ].join("\n");
       const r = await remote.stream(script, { input: (ch) => pipeline(createReadStream(from), ch) }, AbortSignal.timeout(ms));
-      if (r.code !== 0) throw new Error(r.stderr.trim() || `exit ${r.code}`);
+      if (r.code !== 0) throw new Error(r.code === null ? DROPPED : r.stderr.trim() || `exit ${r.code}`);
     },
   };
 }

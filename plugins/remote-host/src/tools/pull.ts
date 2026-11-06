@@ -11,7 +11,7 @@ import { basename, dirname } from "node:path";
 import { Transform } from "node:stream";
 import { sq } from "@dispatch-plugins/host-agent";
 import type { RemoteSide } from "../sync/remote.js";
-import { remoteFiles } from "../mcp/files.js";
+import { DROPPED, remoteFiles } from "../mcp/files.js";
 import { extractTar, type Unpacked } from "./tar.js";
 
 /** The most `remote_fetch` copies at once. An xcresult can be big; a DerivedData folder isn't the tool's to move. */
@@ -32,8 +32,8 @@ export async function look(remote: RemoteSide, path: string): Promise<Found> {
     ].join("\n"),
     { timeoutMs: 60_000 },
   );
-  if (r.code !== 0) throw new Error(r.stderr.trim() || `exit ${r.code}`);
-  const m = /^([dfon])(?: (\d+))?/.exec(r.stdout.trim());
+  if (r.code !== 0) throw new Error(r.code === null ? "the connection to the machine dropped" : r.stderr.trim() || `exit ${r.code}`);
+  const m =/^([dfon])(?: (\d+))?/.exec(r.stdout.trim());
   if (!m) throw new Error(`unexpected answer: ${r.stdout.trim().slice(0, 80)}`);
   if (m[1] === "d") return { kind: "dir", bytes: Number(m[2] ?? 0) * 1024 };
   if (m[1] === "f") return { kind: "file", bytes: Number(m[2] ?? 0) };
@@ -117,11 +117,14 @@ async function streamTar(remote: RemoteSide, from: string, archive: string, max:
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", stop);
+    // The channel normally ends the pipe; one closed by a dropped connection may not.
+    if (!counter.writableEnded && !counter.destroyed) counter.end();
     await closed;
   }
   if (seen > max + 1024 * 1024) throw new Error(`it grew past the ${mb(max)} one copy may be while it was copied`);
   if (signal?.aborted) throw new Error("cancelled");
-  if (r.code !== 0) throw new Error(r.stderr.trim().split("\n").slice(-3).join("; ") || `tar exited ${r.code ?? "without a status"}`);
+  if (r.code === null) throw new Error(DROPPED);
+  if (r.code !== 0) throw new Error(r.stderr.trim().split("\n").slice(-3).join("; ") || `tar exited ${r.code}`);
 }
 
 /** A cancelled call replaces nothing: what is at `to` stays, and the copy is dropped. */
