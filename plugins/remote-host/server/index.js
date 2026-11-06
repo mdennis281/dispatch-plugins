@@ -24586,6 +24586,8 @@ class ChatSync {
     return this.serial(async () => {
       const h = this.holder;
       if (h && (h.terminal !== info.terminal || h.ended)) return { refuse: this.busyText(h) };
+      const others = await this.d.lock?.others(this.lockQuery(info.runId), "before");
+      if (others?.length) return { refuse: this.d.lock.refusal(others, this.d.chatId, this.d.label) };
       const notices = this.pending.splice(0);
       try {
         await this.prepare();
@@ -24618,12 +24620,19 @@ class ChatSync {
       if (info.outcome === "finished" || info.outcome === "shell-exited") this.holder = void 0;
       else h.ended = info.outcome;
     }
+    const wait = this.d.lock ? await this.d.lock.waitClear(this.lockQuery(info.runId), info.signal) : void 0;
+    const busy = wait?.still ?? [];
     return this.serial(async () => {
       const notices = [];
       try {
         await this.prepare();
         if (!this.rec.base) return {};
-        await this.pullBack(notices, info.command, info.signal);
+        if (busy.length) notices.push(this.d.lock.notBack(wait, this.d.chatId, this.d.label));
+        else {
+          const waited = wait && this.d.lock.waited(wait, this.d.chatId, this.d.label);
+          if (waited) notices.push(waited);
+          await this.pullBack(notices, info.command, info.signal);
+        }
       } catch (err) {
         notices.push(
           `[${this.d.label}] Could not check for changes the command made there (${errText$1(err)}). They are brought back before the next command.`
@@ -24664,6 +24673,9 @@ class ChatSync {
   /** The shell there says a run is over (one core stopped waiting for, say): it no longer holds the checkout. */
   runEnded(runId) {
     if (this.holder?.runId === runId) this.holder = void 0;
+  }
+  lockQuery(runId) {
+    return { chatId: this.d.chatId, root: this.d.root, runId };
   }
   /** Run `fn` after every earlier sync of this chat. */
   serial(fn) {
@@ -24871,7 +24883,7 @@ class ChatSync {
     for (const c of taken) delete this.rec.skippedHost[c.path];
     for (const a of aside) this.rec.skippedHost[a.c.path] = a.c.to.sha;
     await this.save();
-    const from = by ? ` by \`${short(by)}\`` : " (by something still running there)";
+    const from = by ? ` by \`${short$1(by)}\`` : " (by something still running there)";
     if (said.back.length) notices.push(`[${this.d.label}] Brought back the changes made there${from}: ${list(said.back)}`);
     const gone = deletes.filter((d) => !lost.has(d));
     if (gone.length) {
@@ -24915,7 +24927,7 @@ class ChatSync {
     const h = this.rec.held;
     const why = h.count > MASS_DELETE_MAX ? `more than ${MASS_DELETE_MAX}` : "more than half of them";
     const what = this.heldPaths.length ? `: ${list(this.heldPaths)}` : "";
-    return `${by ? `\`${short(by)}\` deleted` : "Something deleted"} ${h.count} of the ${h.total} files in this chat's checkout on ${this.d.label}${what}. That is ${why}, so none of it was deleted here${by ? "" : ", and the command didn't run"}. If that is what you meant, delete them here too, then run the next command. If not, just run the next command: they are put back there from your files.`;
+    return `${by ? `\`${short$1(by)}\` deleted` : "Something deleted"} ${h.count} of the ${h.total} files in this chat's checkout on ${this.d.label}${what}. That is ${why}, so none of it was deleted here${by ? "" : ", and the command didn't run"}. If that is what you meant, delete them here too, then run the next command. If not, just run the next command: they are put back there from your files.`;
   }
   /** Conflicts whose copy is gone are settled: what the local file says now wins. */
   async resolved(notices) {
@@ -24935,11 +24947,11 @@ class ChatSync {
     notices.push(`[${this.d.label}] Conflict settled, your version goes there: ${list(done.map((c) => c.path))}`);
   }
   conflictText() {
-    const items = this.rec.conflicts.map((c) => `\`${c.path}\` (theirs: \`${c.copy}\`${c.by ? `, changed by \`${short(c.by)}\`` : ""})`);
+    const items = this.rec.conflicts.map((c) => `\`${c.path}\` (theirs: \`${c.copy}\`${c.by ? `, changed by \`${short$1(c.by)}\`` : ""})`);
     return `a conflict with ${this.d.label}. These files were changed both there and here since the last sync: ${list(items)}. The machine's version of each is saved beside yours. Merge what you want into your file, then delete the copy (to keep the machine's version, move the copy over your file). Once every copy is gone, your files go there and commands run again.`;
   }
   busyText(h) {
-    const what = `\`${short(h.command)}\``;
+    const what = `\`${short$1(h.command)}\``;
     if (h.ended) {
       return `Not run: in terminal "${h.terminal}", ${what} ${h.ended === "timed-out" ? "timed out" : "was cancelled"} and may still be running in this chat's checkout on ${this.d.label}; syncing your files now would change them under it. Wait for it to finish, or stop it (Ctrl-C in that terminal, or close the terminal).`;
     }
@@ -25179,7 +25191,7 @@ function list(items) {
   const shown = items.slice(0, LIST_MAX).join(", ");
   return items.length > LIST_MAX ? `${shown}, and ${items.length - LIST_MAX} more` : shown;
 }
-function short(cmd) {
+function short$1(cmd) {
   const one = cmd.replace(/\s+/g, " ").trim();
   return one.length > 80 ? `${one.slice(0, 77)}...` : one;
 }
@@ -25191,6 +25203,132 @@ async function exists(p) {
     () => true,
     () => false
   );
+}
+function runsOf(ctx) {
+  const t = ctx?.terminals;
+  if (!t || typeof t.runs !== "function") return void 0;
+  const view = t;
+  return {
+    runs: () => view.runs(),
+    ...typeof view.onRun === "function" ? { onRun: (fn) => view.onRun(fn) } : {}
+  };
+}
+const OWN_PREFIX = "remote-host/";
+const AFTER_WAIT_MS = 2 * 6e4;
+const WAIT_NOTICE_MS = 1e3;
+const POLL_MS = 500;
+class CheckoutLock {
+  constructor(d) {
+    this.d = d;
+  }
+  /**
+   * Runs elsewhere that work in these files now, other than `q.runId`.
+   * `before`: what refuses a command here. `after`: what a pull-back waits for.
+   */
+  async others(q, phase) {
+    let all;
+    try {
+      all = this.d.runs.runs();
+    } catch {
+      return [];
+    }
+    const me = all.find((r) => r.runId === q.runId);
+    const out = [];
+    for (const r of all) {
+      if (r.runId === q.runId || r.background || r.backend === this.d.self) continue;
+      if (r.backend === "local") {
+        if (await inFiles(q.root, r.cwd)) out.push(r);
+      } else if (r.chatId === q.chatId) {
+        if (!r.backend.startsWith(OWN_PREFIX)) out.push(r);
+        else if (phase === "before" && older(r, me)) out.push(r);
+      }
+    }
+    return out;
+  }
+  /** Until nothing else works in the files, or the wait is up, or `signal` aborts. */
+  async waitClear(q, signal) {
+    const max = this.d.afterWaitMs ?? AFTER_WAIT_MS;
+    const start = Date.now();
+    let waitedFor = [];
+    for (; ; ) {
+      const still = await this.others(q, "after");
+      if (still.length && !waitedFor.length) waitedFor = still;
+      const waitedMs = Date.now() - start;
+      if (!still.length || waitedMs >= max || signal.aborted) return { waitedMs, waitedFor, still };
+      await this.next(signal, Math.min(POLL_MS, max - waitedMs));
+    }
+  }
+  /** The command here was refused: why, and what to do. */
+  refusal(runs, chatId, label) {
+    return `Not run: ${this.describe(runs, chatId)} running a command in this chat's files, and syncing them with ${label} now would read them while that command changes them, then bring changes back over its work. Wait for it to finish (or stop it), then run this again.`;
+  }
+  /** The pull-back waited, long enough to say. */
+  waited(w, chatId, label) {
+    if (w.still.length || !w.waitedFor.length || w.waitedMs < WAIT_NOTICE_MS) return void 0;
+    return `[${label}] Waited ${age(w.waitedMs)} for ${this.describe(w.waitedFor, chatId, { verb: false, age: false })} to finish its command in this chat's files before bringing back what this one changed there.`;
+  }
+  /** The pull-back gave up waiting. */
+  notBack(w, chatId, label) {
+    return `[${label}] What the command changed there isn't brought back yet: ${this.describe(w.still, chatId)} still running a command in this chat's files. It comes back before the next command here.`;
+  }
+  /** `terminal "build" on this computer (for 12 s) is`: the first, what it runs when known, how long, and how many more. */
+  describe(runs, chatId, o = {}) {
+    const [r] = runs;
+    if (!r) return "";
+    const whose = r.chatId !== chatId ? " of another chat" : "";
+    const facts = [r.command ? `\`${short(r.command)}\`` : "", o.age === false ? "" : `for ${age(Date.now() - r.startedAt)}`].filter(Boolean);
+    const what = facts.length ? ` (${facts.join(", ")})` : "";
+    const more = runs.length > 1 ? ` and ${runs.length - 1} more` : "";
+    const verb = o.verb === false ? "" : more ? " are" : " is";
+    return `terminal "${r.terminal}"${whose} on ${this.d.where(r.backend)}${what}${more}${verb}`;
+  }
+  /** The next run to end, or `ms`, or the abort: whichever is first. */
+  next(signal, ms) {
+    return new Promise((resolve2) => {
+      let off;
+      let over = false;
+      const done = () => {
+        if (over) return;
+        over = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", done);
+        try {
+          off?.();
+        } catch {
+        }
+        resolve2();
+      };
+      const timer = setTimeout(done, ms);
+      signal.addEventListener("abort", done, { once: true });
+      try {
+        off = this.d.runs.onRun?.((e) => {
+          if (e.kind === "ended") done();
+        });
+      } catch {
+      }
+      if (over) off?.();
+    });
+  }
+}
+async function inFiles(root, cwd) {
+  if (!cwd || !isAbsolute(cwd)) return false;
+  const real = await realpath(cwd).catch(() => cwd);
+  return [cwd, real].some((p) => {
+    const rel = relative(root, p);
+    return rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+  });
+}
+function older(r, me) {
+  if (!me) return true;
+  return r.startedAt < me.startedAt || r.startedAt === me.startedAt && r.runId < me.runId;
+}
+function short(cmd) {
+  const one = cmd.replace(/\s+/g, " ").trim();
+  return one.length > 60 ? `${one.slice(0, 57)}...` : one;
+}
+function age(ms) {
+  const s = Math.max(0, Math.round(ms / 1e3));
+  return s < 90 ? `${s} s` : `${Math.round(s / 60)} min`;
 }
 function linkRemote(link) {
   return {
@@ -25685,7 +25823,16 @@ class HostBackend {
       remote: this.remote,
       log: this.deps.log,
       ...this.deps.kv ? { kv: this.deps.kv } : {},
+      ...this.deps.runs ? { lock: this.lock(this.deps.runs) } : {},
       ...this.deps.sync
+    });
+  }
+  lock(runs) {
+    return new CheckoutLock({
+      runs,
+      self: this.id,
+      where: (backend) => backend === "local" ? "this computer" : this.deps.where?.(backend) ?? backend,
+      ...this.deps.lockWaitMs !== void 0 ? { afterWaitMs: this.deps.lockWaitMs } : {}
     });
   }
   agentNote(info) {
@@ -25700,7 +25847,7 @@ class HostBackend {
       ...probe?.brew ? [brewNote(probe.brew)] : [],
       rootNote(host.label, this.elevation.state),
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB aren't sent.`,
-      `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command; one that timed out holds every terminal until it ends (Ctrl-C it). Outside a git repository nothing is synced.`,
+      `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command; one that timed out holds every terminal until it ends (Ctrl-C it). Likewise while a terminal on this computer (or this chat's terminal on another machine) runs a command in the same files: a command in this terminal is refused, so run them one after the other, not side by side. Outside a git repository nothing is synced.`,
       `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started from this chat's terminals; nothing else on the machine is.`,
       mcpNote(host.label, this.mcpLocalDir(info.chatId)),
       `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its checkout there.`,
@@ -25871,6 +26018,7 @@ class HostRegistry {
     });
     const approvals = this.deps.approvals ?? approvalsOf(ctx);
     const reservedPorts = reservedPortsOf(ctx);
+    const runs = runsOf(ctx);
     entry.backend = new HostBackend(id, {
       host: () => entry.host,
       link: entry.link,
@@ -25881,6 +26029,8 @@ class HostRegistry {
       ...this.deps.shell ? { shell: this.deps.shell } : {},
       ...this.deps.portPollMs ? { portPollMs: this.deps.portPollMs } : {},
       ...reservedPorts ? { reservedPorts } : {},
+      ...runs ? { runs, where: (backend) => this.labelOf(backend) } : {},
+      ...this.deps.lockWaitMs !== void 0 ? { lockWaitMs: this.deps.lockWaitMs } : {},
       ...approvals ? { approvals } : {},
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || void 0,
       ...this.deps.elevationConnect ? { elevationConnect: this.deps.elevationConnect } : {}
@@ -25894,6 +26044,11 @@ class HostRegistry {
     this.entries.set(host.slug, entry);
     entry.link.start();
     ctx.log.info(`remote-host: registered ${id} (${host.label})`);
+  }
+  /** A location's name, by backend id: one of these machines by its label, anything else by its id. */
+  labelOf(backend) {
+    for (const e of this.entries.values()) if (backendId(e.host.slug) === backend) return e.host.label;
+    return backend;
   }
   get(slug) {
     return this.entries.get(slug);
