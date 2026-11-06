@@ -95,6 +95,19 @@ A server a chat starts in its terminal there (`pnpm dev`, say) is reachable on t
 
 Dispatch never asks the machine to reach back to this computer (no reverse forwards).
 
+## Root, with your approval
+
+The account Dispatch logs in as has no sudo password, and never gets one. Instead, `sudo <command>` (or `dispatch-elevate <command>`) in a chat's terminal there asks **you**:
+
+- **What you see.** A card in Dispatch's attention queue, like a tool permission request: the exact command, its directory, the machine and the chat. Approve runs it once. Deny, or no answer within 5 minutes, runs nothing, and the command fails with the reason.
+- **How it runs.** Only on approval, Dispatch logs in to the machine a second time, with a separate key only it holds (`REMOTE_HOST_ELEVATE_KEY_<NAME>`). That login can do one thing: hand the request to a root-owned helper, which logs it and runs it as root in the same directory, with root's own environment and no input. Its output and exit code come back to the terminal.
+- **One at a time per machine.** A second request waits for the first to finish before you're asked.
+- **Waiting doesn't use up the command's time.** While it waits on you, the terminal shows as stalled and the command's timeout is paused.
+- **Interrupting it** (Ctrl-C, the terminal ending) withdraws the card, or stops the command on the machine.
+- **What `sudo` can't do here** is refused with the reason: another user (`-u`), keeping the environment (`-E`), a root shell (`-s`, `-i`), `-n`. `-v` and `-k` succeed and do nothing.
+
+It needs a Dispatch that can ask for approval (core's approval requests). Without that, or until elevation is set up on the machine, `sudo` there says so and fails, and the agent is told to ask you instead.
+
 ## When a chat ends
 
 - **Idle.** When Dispatch retires an idle chat's session, its shells on the machine end, and whatever they were running (a dev server, a watcher) with them. Its checkout stays, so it picks up where it was when the chat is used again.

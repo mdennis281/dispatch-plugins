@@ -6,7 +6,7 @@
  *
  * Skipped on Windows; CI runs it on Linux and macOS.
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { get } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,8 +16,9 @@ import type { TerminalBackendHandle, TerminalExitReason } from "@dispatch/plugin
 import { createTestContext, type TestContext } from "@dispatch/plugin-sdk/testing";
 import { NODE_RUNTIME, sq } from "@dispatch-plugins/host-agent";
 import { generateKeyPair } from "@dispatch-plugins/remote-core";
-import { runLocally, startTestSshServer, type TestSshServer } from "@dispatch-plugins/remote-core/testing";
+import { runLocally, startTestSshServer, type ExecRequest, type TestSshServer } from "@dispatch-plugins/remote-core/testing";
 import { bundledAgent } from "../src/agent.js";
+import { ELEVATE_USER, type ApprovalRequest, type ApprovalResult } from "../src/elevation.js";
 import type { HostConfig } from "../src/hosts.js";
 import { HostRegistry } from "../src/registry.js";
 
@@ -54,6 +55,9 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
   let server: TestSshServer;
   let t: TestContext;
   let registry: HostRegistry;
+  /** What the user was asked to approve, and how the test answers. */
+  const approvalsAsked: Array<{ chatId: string; req: ApprovalRequest }> = [];
+  let decide: (req: ApprovalRequest) => Promise<ApprovalResult["decision"]> = async () => "approved";
 
   beforeAll(async () => {
     // Short on purpose: dispatch-host's sockets live under it, and a unix
@@ -69,21 +73,29 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       { mode: 0o755 },
     );
     const kp = generateKeyPair("e2e@test");
+    const elevateKp = generateKeyPair("e2e-elevate@test");
+    const asUser = runLocally({
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      HOME: home,
+      SHELL: "/bin/bash",
+      USER: process.env.USER ?? "test",
+      LOGNAME: process.env.LOGNAME ?? process.env.USER ?? "test",
+      TMPDIR: process.env.TMPDIR ?? "/tmp",
+      LANG: "C.UTF-8",
+    });
     server = await startTestSshServer({
-      authorizedKeys: () => [kp.publicKey],
+      authorizedKeys: () => [kp.publicKey, elevateKp.publicKey],
       // sshd's default: a connection past ten sessions has channels refused.
       maxSessions: 10,
-      exec: runLocally({
-        PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: home,
-        SHELL: "/bin/bash",
-        USER: process.env.USER ?? "test",
-        LOGNAME: process.env.LOGNAME ?? process.env.USER ?? "test",
-        TMPDIR: process.env.TMPDIR ?? "/tmp",
-        LANG: "C.UTF-8",
-      }),
+      // The elevation account's forced command is the root helper; here a
+      // stand-in that runs the request as this user (CI has no root).
+      exec: (req) => (req.username === ELEVATE_USER ? fakeHelper(req) : asUser(req)),
     });
-    t = createTestContext({ id: "remote-host", secrets: { REMOTE_HOST_KEY_E2E: kp.privateKey }, instance: { id: INSTANCE } });
+    t = createTestContext({
+      id: "remote-host",
+      secrets: { REMOTE_HOST_KEY_E2E: kp.privateKey, REMOTE_HOST_ELEVATE_KEY_E2E: elevateKp.privateKey },
+      instance: { id: INSTANCE },
+    });
     registry = new HostRegistry({
       ctx: t.ctx,
       instanceId: INSTANCE,
@@ -96,6 +108,12 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       timing: { tickMs: 100, helloEveryMs: 1_000, backoffMs: [100] },
       shell: { heartbeatMs: 200, stallAfterMs: 5_000, retryMs: [100] },
       portPollMs: 300,
+      approvals: {
+        request: async (chatId, req) => {
+          approvalsAsked.push({ chatId, req });
+          return { decision: await decide(req), by: "Tester", at: Date.now() };
+        },
+      },
     });
     const host: HostConfig = {
       slug: "e2e",
@@ -294,6 +312,66 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     for (const h of shells) h.kill();
     expect(ws.every((w) => w.exit?.reason?.kind === "killed")).toBe(true);
   });
+
+  it("sudo in a chat shell asks the user, and only then runs the command over the elevation login", { timeout: 60_000 }, async () => {
+    const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "root" });
+    const w = watch(h);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    decide = async () => {
+      await held;
+      return "approved";
+    };
+    h.stdin.write(`sudo sh -c 'echo elevated-$((6*7)) in $(pwd)' ; echo "rc=$?"\n`);
+    await until(() => approvalsAsked.length === 1, 20_000, "the approval request");
+    // Waiting on the user: the shell is stalled (core pauses the command's timeout), and nothing ran yet.
+    await until(() => w.events.includes("stalled"), 5_000, "stalled");
+    expect(w.out).not.toContain("elevated-42");
+    expect(approvalsAsked[0]).toMatchObject({
+      chatId: "chat-elev",
+      req: { title: "Run as root on E2E", command: "sh -c 'echo elevated-$((6*7)) in $(pwd)'", machine: "E2E", cwd: h.cwd },
+    });
+    release();
+    await until(() => w.out.includes("rc="), 20_000, "the command's end");
+    expect(w.out).toContain(`elevated-42 in ${h.cwd}`);
+    expect(w.out).toContain("rc=0");
+    expect(w.err).toMatch(/approved by Tester; running as root on E2E/);
+    expect(w.events.lastIndexOf("resumed")).toBeGreaterThan(w.events.indexOf("stalled"));
+    // Over its own login, as the elevation account.
+    expect(server.attempts.some((a) => a.username === ELEVATE_USER && a.method === "publickey")).toBe(true);
+    h.kill();
+  });
+
+  it("a denial runs nothing and fails the command; one that runs exits with its own code", { timeout: 60_000 }, async () => {
+    const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "deny" });
+    const w = watch(h);
+    decide = async (req) => (req.command?.includes("touch") ? "denied" : "approved");
+    h.stdin.write(`dispatch-elevate touch ${home}/should-not-exist ; echo "first=$?"; sudo sh -c 'exit 7'; echo "second=$?"\n`);
+    await until(() => w.out.includes("second="), 30_000, "both commands");
+    expect(w.out).toContain("first=1");
+    expect(w.out).toContain("second=7");
+    expect(w.err).toMatch(/the user denied running this as root by Tester; nothing ran/);
+    expect(existsSync(join(home, "should-not-exist"))).toBe(false);
+    h.kill();
+  });
+
+  it("Ctrl-C while it waits withdraws the request", { timeout: 60_000 }, async () => {
+    const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "cancel" });
+    const w = watch(h);
+    let seen: ApprovalRequest | undefined;
+    decide = (req) =>
+      new Promise((resolve) => {
+        seen = req;
+        req.signal?.addEventListener("abort", () => resolve("cancelled"), { once: true });
+      });
+    const before = approvalsAsked.length;
+    h.stdin.write(`sudo id ; echo "rc=$?"\n`);
+    await until(() => approvalsAsked.length === before + 1, 20_000, "the approval request");
+    h.kill("SIGINT");
+    await until(() => seen?.signal?.aborted === true, 20_000, "the request withdrawn");
+    expect(w.out).not.toContain("rc=0");
+    h.kill();
+  });
 });
 
 function fetchText(url: string): Promise<string> {
@@ -314,4 +392,37 @@ function alive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/**
+ * The root helper's stand-in, for the elevation account's connection: reads
+ * `run <id> <base64>` as the forced command reads SSH_ORIGINAL_COMMAND, runs
+ * the decoded argv in the decoded directory (as this user: CI has no root),
+ * and stops it when the channel goes, as the real one does on stdin's EOF.
+ */
+function fakeHelper({ command, channel }: ExecRequest): void {
+  const m = command.match(/^run ([A-Za-z0-9-]{1,64}) ([A-Za-z0-9+/=]+)$/);
+  if (!m) {
+    channel.stderr.write("dispatch-elevate: not a request\n");
+    channel.exit(125);
+    channel.end();
+    return;
+  }
+  const parts = Buffer.from(m[2]!, "base64").toString("utf8").split("\0").slice(0, -1);
+  const [cwd, file, ...args] = parts;
+  const child = spawn(file!, args, { cwd: cwd!, stdio: ["ignore", "pipe", "pipe"] });
+  child.stdout.pipe(channel, { end: false });
+  child.stderr.pipe(channel.stderr, { end: false });
+  channel.on("error", () => {});
+  channel.on("close", () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  });
+  child.on("close", (code) => {
+    try {
+      channel.exit(code ?? 1);
+      channel.end();
+    } catch {
+      /* the client went away */
+    }
+  });
 }

@@ -38,8 +38,14 @@ export const F = {
   detach: 0x06,
   /** End the session now: kill its whole tree. */
   kill: 0x07,
+  /** u8 stream (1 out, 2 err) + u8 id length + id + bytes: output of an elevated command, for `dispatch-elevate`. */
+  elevateOutput: 0x08,
+  /** JSON {@link ElevateEndMsg}: the elevated command is over (or never ran). */
+  elevateEnd: 0x09,
   /** JSON {@link AttachMsg}. Written by the relay, first, on every connection. */
   attach: 0x10,
+  /** JSON {@link ElevateMsg}. Written first by `dispatch-elevate` on its own connection to the owner's socket. */
+  elevate: 0x11,
 
   /** JSON {@link ReadyMsg}: attached; replay follows. */
   ready: 0x81,
@@ -55,6 +61,14 @@ export const F = {
   error: 0x86,
   /** JSON {@link RunEndMsg}: the journal saw a run's sentinel. */
   runEnd: 0x87,
+  /** JSON {@link ElevateRequestMsg}: a command in the shell asks to run something as root. */
+  elevateRequest: 0x88,
+  /** JSON {@link ElevateCancelMsg}: whoever asked has gone (Ctrl-C); stop asking, stop running. */
+  elevateCancel: 0x89,
+  /** Owner → `dispatch-elevate`: u8 stream (1 out, 2 err) + bytes. */
+  elevateData: 0x8a,
+  /** Owner → `dispatch-elevate`: JSON {@link ElevateEndMsg} without the id. */
+  elevateDone: 0x8b,
 } as const;
 
 export type FrameType = (typeof F)[keyof typeof F];
@@ -135,6 +149,79 @@ export interface RunEndMsg {
   runId: string;
   exitCode: number;
   cwd: string;
+}
+
+/**
+ * Elevation: `dispatch-elevate` (or the `sudo` shim) in a chat shell asks to
+ * run a command as root. It connects to its session's owner and sends
+ * {@link ElevateMsg}; the owner gives it an id and passes it up the session's
+ * channel as {@link ElevateRequestMsg}. The plugin asks the human, and only on
+ * approval runs it over a separate connection the agent's account has no key
+ * for. Nothing here can elevate anything: it only carries the question and
+ * the answer.
+ */
+export interface ElevateMsg {
+  argv: string[];
+  cwd: string;
+}
+
+export interface ElevateRequestMsg extends ElevateMsg {
+  id: string;
+}
+
+export interface ElevateCancelMsg {
+  id: string;
+}
+
+export interface ElevateEndMsg {
+  id: string;
+  /** The command's exit code; null when it never ran or was killed. */
+  code: number | null;
+  signal?: string | null;
+  /** Why it didn't run, or didn't finish: denied, timed out, not set up. Printed by `dispatch-elevate`. */
+  error?: string;
+}
+
+/** Most argv (bytes, all arguments together) an elevation may carry. */
+export const MAX_ELEVATE_ARGV = 32 * 1024;
+
+/** Ids the owner hands out: also safe in a forced command's argument list. */
+export const ELEVATE_ID = /^[A-Za-z0-9-]{1,64}$/;
+
+/** An {@link ElevateMsg} as the owner accepts it, or a throw naming what is wrong. */
+export function checkElevate(m: unknown): ElevateMsg {
+  const o = m as Partial<ElevateMsg> | null;
+  if (!o || typeof o !== "object") throw new Error("not an elevation request");
+  if (!Array.isArray(o.argv) || !o.argv.length || !o.argv.every((a) => typeof a === "string")) throw new Error("argv must be a non-empty list of strings");
+  if (o.argv.some((a) => a.includes("\0"))) throw new Error("an argument holds a NUL byte");
+  if (!o.argv[0]) throw new Error("the command is empty");
+  if (Buffer.byteLength(o.argv.join("\0"), "utf8") > MAX_ELEVATE_ARGV) throw new Error(`the command is longer than ${MAX_ELEVATE_ARGV} bytes`);
+  if (typeof o.cwd !== "string" || !o.cwd.startsWith("/") || o.cwd.includes("\0")) throw new Error("cwd must be an absolute path");
+  return { argv: [...o.argv], cwd: o.cwd };
+}
+
+/** An elevateOutput frame: which request, which stream, what bytes. */
+export function encodeElevateOutput(id: string, stream: 1 | 2, data: Buffer): Buffer[] {
+  const idBytes = Buffer.from(id, "utf8");
+  if (idBytes.length > 255) throw new Error("elevation id too long");
+  const head = Buffer.concat([Buffer.from([stream, idBytes.length]), idBytes]);
+  const room = MAX_FRAME - head.length;
+  const frames: Buffer[] = [];
+  let at = 0;
+  do {
+    frames.push(encodeFrame(F.elevateOutput, Buffer.concat([head, data.subarray(at, at + room)])));
+    at += room;
+  } while (at < data.length);
+  return frames;
+}
+
+export function decodeElevateOutput(payload: Buffer): { id: string; stream: 1 | 2; data: Buffer } {
+  if (payload.length < 2) throw new Error("elevation output frame too short");
+  const stream = payload.readUInt8(0);
+  const len = payload.readUInt8(1);
+  if (stream !== 1 && stream !== 2) throw new Error(`elevation output for stream ${stream}`);
+  if (payload.length < 2 + len) throw new Error("elevation output frame shorter than its id");
+  return { id: payload.subarray(2, 2 + len).toString("utf8"), stream, data: payload.subarray(2 + len) };
 }
 
 /** One frame. `payload` may be bytes, text, or an object sent as JSON. */

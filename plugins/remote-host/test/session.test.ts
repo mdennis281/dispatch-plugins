@@ -4,7 +4,7 @@
  * from the right offsets, no byte twice, no byte lost silently).
  */
 import { describe, expect, it } from "vitest";
-import { F, encodeFrame, encodeOutput } from "@dispatch-plugins/host-agent";
+import { F, decodeElevateOutput, encodeFrame, encodeOutput } from "@dispatch-plugins/host-agent";
 import type { TerminalExitReason } from "@dispatch/plugin-sdk";
 import { HostShell } from "../src/session.js";
 import { fakeOpener } from "./fake-channel.js";
@@ -255,5 +255,64 @@ describe("races and garbage", () => {
     }
     await until(() => t.exit() !== undefined);
     expect(t.exit()?.reason).toEqual({ kind: "transport-lost", detail: expect.stringMatching(/garbled/) });
+  });
+});
+
+describe("elevation requests through the shell", () => {
+  const ask = { id: "e-1", argv: ["installer", "-pkg", "/tmp/x.pkg", "-target", "/"], cwd: "/w" };
+
+  it("passes a request and a cancel on, and sends output and the end back down", async () => {
+    const { ch, sh } = await started();
+    const asked: unknown[] = [];
+    const cancelled: string[] = [];
+    sh.on("elevate", (m: unknown) => asked.push(m));
+    sh.on("elevateCancel", (id: string) => cancelled.push(id));
+    ch.emit("data", encodeFrame(F.elevateRequest, ask));
+    ch.emit("data", encodeFrame(F.elevateCancel, { id: "e-1" }));
+    expect(asked).toEqual([ask]);
+    expect(cancelled).toEqual(["e-1"]);
+    sh.elevateOutput("e-1", 1, Buffer.from("ok\n"));
+    sh.elevateEnd({ id: "e-1", code: 0 });
+    const out = ch.sent.find((f) => f.type === F.elevateOutput)!;
+    expect(decodeElevateOutput(out.payload)).toEqual({ id: "e-1", stream: 1, data: Buffer.from("ok\n") });
+    expect(ch.sent.find((f) => f.type === F.elevateEnd)?.json).toEqual({ id: "e-1", code: 0 });
+  });
+
+  it("is stalled while an elevation waits on the user, and resumes once none does", async () => {
+    const { sh, events } = await started();
+    const details: string[] = [];
+    sh.on("stalled", (i: { detail?: string }) => details.push(i.detail ?? ""));
+    sh.hold("e-1", "waiting for the user to approve: sudo id");
+    sh.hold("e-2", "waiting for another root command on CVX Mac to finish");
+    sh.release("e-1");
+    // e-2 still holds it: what core shows moves to it, without a resume in between.
+    expect(events).toEqual(["stalled", "stalled"]);
+    expect(details).toEqual(["waiting for the user to approve: sudo id", "waiting for another root command on CVX Mac to finish"]);
+    sh.release("e-2");
+    expect(events).toEqual(["stalled", "stalled", "resumed"]);
+    sh.release("e-2"); // twice is nothing
+    expect(events).toHaveLength(3);
+  });
+
+  it("a connection that recovers doesn't resume a shell still waiting on the user", async () => {
+    const { ch, sh, events, o } = await started();
+    sh.hold("e-1", "waiting for the user to approve: sudo id");
+    ch.drop();
+    const again = await o.nth(2);
+    again.ready({ resumed: true });
+    // Stalled for the drop (its reason shown), then back to the approval: never resumed while it waits.
+    await until(() => events.filter((e) => e === "stalled").length >= 3);
+    expect(events).not.toContain("resumed");
+    sh.release("e-1");
+    expect(events.at(-1)).toBe("resumed");
+  });
+
+  it("output for an elevation queued while detached goes out once it re-attaches", async () => {
+    const { ch, sh, o } = await started();
+    ch.drop();
+    sh.elevateEnd({ id: "e-1", code: null, error: "denied" });
+    const again = await o.nth(2);
+    again.ready({ resumed: true });
+    expect(again.sent.find((f) => f.type === F.elevateEnd)?.json).toEqual({ id: "e-1", code: null, error: "denied" });
   });
 });

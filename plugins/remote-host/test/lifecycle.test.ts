@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestContext } from "@dispatch/plugin-sdk/testing";
 import type { HostConfig } from "../src/hosts.js";
+import type { Approvals } from "../src/elevation.js";
 import { HostRegistry } from "../src/registry.js";
 import { AGENT, FakeMachine, PROBE, fakeRuntime, type AddressBehaviour } from "./fake-machine.js";
 
@@ -37,11 +38,11 @@ const until = async (cond: () => boolean, ms = 5_000, what = "condition") => {
   }
 };
 
-function setup(opts: { address?: AddressBehaviour; kv?: Record<string, unknown>; previous?: string } = {}) {
+function setup(opts: { address?: AddressBehaviour; kv?: Record<string, unknown>; previous?: string; approvals?: Approvals; elevateKey?: string } = {}) {
   const m = new FakeMachine({ [ADDR]: opts.address ?? "ok" });
   const t = createTestContext({
     id: "remote-host",
-    secrets: { REMOTE_HOST_KEY_STUDIO: "PRIVATE" },
+    secrets: { REMOTE_HOST_KEY_STUDIO: "PRIVATE", ...(opts.elevateKey ? { REMOTE_HOST_ELEVATE_KEY_STUDIO: opts.elevateKey } : {}) },
     instance: { id: INSTANCE },
     kv: opts.kv ?? {},
   });
@@ -53,6 +54,7 @@ function setup(opts: { address?: AddressBehaviour; kv?: Record<string, unknown>;
     runtime: fakeRuntime(),
     connect: m.connect,
     timing: { tickMs: 10, helloEveryMs: 1_000, backoffMs: [20] },
+    ...(opts.approvals ? { approvals: opts.approvals } : {}),
   });
   r.sync([HOST]);
   registries.push(r);
@@ -265,6 +267,30 @@ describe("the agent's note", () => {
     expect(note).toContain("Homebrew is installed there (`/opt/homebrew/bin/brew`) but won't run");
     expect(note).toContain("`sudo xcode-select -s /Library/Developer/CommandLineTools` once");
     expect(note).not.toContain("brew install");
+  });
+
+  it("with elevation set up, says sudo asks the user, once per command, and what it can't do", async () => {
+    const approvals: Approvals = { request: async () => ({ decision: "denied", at: 0 }) };
+    const { r, connected } = setup({ approvals, elevateKey: "ELEVATE" });
+    await connected();
+    await r.get("studio")!.backend.elevation.refresh();
+    const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
+    expect(note).toContain("- Root: `sudo <command>` (or `dispatch-elevate <command>`) there asks the user to approve");
+    expect(note).toMatch(/your command's timeout is paused meanwhile/);
+    expect(note).toMatch(/no input, so it can't prompt/);
+    expect(note).toMatch(/A denial is final/);
+  });
+
+  it("without the key, or without approvals in this Dispatch, says nothing can run as root and to tell the user", async () => {
+    const approvals: Approvals = { request: async () => ({ decision: "denied", at: 0 }) };
+    const off = setup({ approvals });
+    await off.connected();
+    await off.r.get("studio")!.backend.elevation.refresh();
+    expect(off.r.get("studio")!.backend.agentNote({ chatId: "chat-1" })).toMatch(/nothing can run as root on Studio: elevation isn't set up there/);
+    const old = setup({ elevateKey: "ELEVATE" });
+    await old.connected();
+    await old.r.get("studio")!.backend.elevation.refresh();
+    expect(old.r.get("studio")!.backend.agentNote({ chatId: "chat-1" })).toMatch(/this Dispatch can't ask the user for\s+approval/);
   });
 
   it("says nothing of Homebrew when there is none", async () => {

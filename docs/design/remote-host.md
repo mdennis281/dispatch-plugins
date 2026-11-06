@@ -105,6 +105,25 @@ through each plugin's rebuilt bundle.
     - There is one shared bare repo per (instance, repo) on the machine, with `git worktree add` per chat.
     - Untracked files over a size cap are excluded and reported.
     - LFS: check out on the machine with the smudge filter disabled and ship the objects from local. Submodules are snapshotted recursively.
+11. **Root only with the user's approval, enforced off the machine** (Michael, 2026-11-06: "do elevation with my approval").
+    - Nothing `dispatch` can do elevates anything. Its password is never stored, it gets no NOPASSWD rule, and there is no sudo credential cache in its sessions: its shell controls `SUDO_ASKPASS`, `~/.zshenv` and the rest, so any of those could be captured.
+    - **In a chat shell:**
+      - `sudo <cmd>` is a PATH shim (shims.ts) that hands the command to `dispatch-elevate`.
+      - That sends `{argv, cwd}` to the session's owner on its unix socket.
+      - The owner passes it up the session's channel (frames `elevate*`, protocol.ts), and asks again after a reconnect until it is answered.
+      - Interrupting it withdraws the request.
+      - Options sudo can't honour here (`-u other`, `-E`, `-s`, `-i`, `-n`) are refused with the reason.
+    - **In the plugin** (elevation.ts):
+      1. `ctx.approvals.request` (core E31) shows the exact command, its directory, the machine and the chat. It is feature-detected; without it, `sudo` fails and says why.
+      2. Only on approval does the plugin open a SEPARATE SSH connection, with a per-machine elevation key (`REMOTE_HOST_ELEVATE_KEY_<SLUG>`) that only the plugin holds.
+      3. That key logs in as the hidden account `_dispatchelevate`. Its single key line is `restrict,command="/usr/local/libexec/dispatch-elevate",from="…"`.
+      4. The root-owned helper takes `run <id> <base64 of NUL-ended cwd and argv>` from `SSH_ORIGINAL_COMMAND`, logs it to `/var/log/dispatch-elevate.log`, and runs it with `sudo -n` (that account's sudoers rule allows the helper only) in the cwd, with no stdin. It stops the command when the channel closes.
+      5. Output and the exit code go back down to the waiting `dispatch-elevate`.
+    - **Settled choices:**
+      - **Approval vs. the run timeout:** a request waiting on the user (or its turn) holds its shell `stalled`, so core pauses the command's timeout, up to core's 10-min cap. The approval itself times out after 5 min.
+      - **Cancelling:** Ctrl-C or the shell ending withdraws the approval card (its signal aborts), or closes the helper's channel, which stops the command there.
+      - **Concurrency:** one at a time per machine. A second request waits its turn, and is asked only after the first is over.
+    - **Setup** (one-liner from the Remote hosts pane, run once with sudo at the Mac): the hidden account, the root-owned helper in `/usr/local/libexec` (every directory above it must be root-owned and writable by no one else), `/etc/sudoers.d/dispatch-elevate` (checked with `visudo -c`), and the key line. Turning it off, or removing the machine, runs the helper's `uninstall` over the elevation login itself.
 
 ## 3. Pairing flow
 1. On the Mac: create the `dispatch` user, then turn on Remote Login for that user only.

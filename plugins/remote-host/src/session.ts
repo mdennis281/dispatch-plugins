@@ -24,7 +24,11 @@ import {
   MAX_FRAME,
   decodeJson,
   decodeOutput,
+  encodeElevateOutput,
   encodeFrame,
+  type ElevateCancelMsg,
+  type ElevateEndMsg,
+  type ElevateRequestMsg,
   type ErrorMsg,
   type ExitMsg,
   type Frame,
@@ -89,7 +93,12 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
   private readonly text: Record<Stream, StringDecoder> = { out: new StringDecoder("utf8"), err: new StringDecoder("utf8") };
   private queue: Buffer[] = [];
   private queued = 0;
-  private stalled = false;
+  /** Why the connection is stalled, while it is. The first reason sticks until it resumes. */
+  private connStall?: string;
+  /** Elevations holding the shell while they wait on the user (or their turn): id → what core shows. */
+  private readonly holds = new Map<string, string>();
+  /** The stall core has been told about, if any: one stall, whichever of the above caused it. */
+  private shownStall?: string;
   private lastFrameAt: number;
   private detachedAt?: number;
   private attempts = 0;
@@ -175,6 +184,33 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
   /** Tell the supervisor a command is about to be written, so its journal can mark the run. */
   runBegin(runId: string, background: boolean): void {
     if (this.phase !== "exited") this.send(encodeFrame(F.runBegin, { runId, background }));
+  }
+
+  /** Output of elevated command `id`, for the `dispatch-elevate` waiting on it in this shell. Held while detached. */
+  elevateOutput(id: string, stream: 1 | 2, data: Buffer): void {
+    if (this.phase === "exited") return;
+    for (const frame of encodeElevateOutput(id, stream, data)) this.send(frame);
+  }
+
+  /** Elevation `id` is over: ran (its exit code), or didn't (why). */
+  elevateEnd(m: ElevateEndMsg): void {
+    if (this.phase !== "exited") this.send(encodeFrame(F.elevateEnd, m));
+  }
+
+  /**
+   * Show the shell as stalled while elevation `id` waits on the user. Core
+   * pauses the running command's timeout meanwhile, so an approval that takes
+   * minutes doesn't use up the command's own time. Calling it again with
+   * another `detail` updates what is shown.
+   */
+  hold(id: string, detail: string): void {
+    if (this.phase === "exited") return;
+    this.holds.set(id, detail);
+    this.refreshStall();
+  }
+
+  release(id: string): void {
+    if (this.holds.delete(id)) this.refreshStall();
   }
 
   /**
@@ -270,9 +306,9 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
       }
       this.lastFrameAt = this.o.now();
       // Quiet, not gone: a stall from unanswered heartbeats ends with the next frame.
-      if (this.stalled && this.phase === "attached") {
-        this.stalled = false;
-        this.deliver(() => this.emit("resumed"));
+      if (this.connStall !== undefined && this.phase === "attached") {
+        this.connStall = undefined;
+        this.refreshStall();
       }
       for (const f of frames) {
         if (this.ch !== ch) break;
@@ -346,6 +382,16 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
         this.deliver(() => this.emit("runEnd", m));
         return;
       }
+      case F.elevateRequest: {
+        const m = json<ElevateRequestMsg>(f.payload, (x) => typeof x.id === "string" && Array.isArray(x.argv) && typeof x.cwd === "string");
+        this.deliver(() => this.emit("elevate", m));
+        return;
+      }
+      case F.elevateCancel: {
+        const m = json<ElevateCancelMsg>(f.payload, (x) => typeof x.id === "string");
+        this.deliver(() => this.emit("elevateCancel", m.id));
+        return;
+      }
       default:
         return; // heartbeat acks; anything newer than this plugin knows
     }
@@ -364,9 +410,9 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     for (const frame of queue) this.ch?.write(frame);
     this.startHeartbeat();
     if (this.starting) this.settleStart();
-    if (this.stalled) {
-      this.stalled = false;
-      this.deliver(() => this.emit("resumed"));
+    if (this.connStall !== undefined) {
+      this.connStall = undefined;
+      this.refreshStall();
     }
   }
 
@@ -450,9 +496,26 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
   }
 
   private stall(detail: string): void {
-    if (this.stalled) return;
-    this.stalled = true;
-    this.deliver(() => this.emit("stalled", { detail }));
+    if (this.connStall !== undefined) return;
+    this.connStall = detail;
+    this.refreshStall();
+  }
+
+  /**
+   * Tell core what it should show now: stalled while the connection is, or
+   * while an elevation waits on the user; resumed once neither holds. The
+   * connection's reason wins: it is why nothing at all is moving.
+   */
+  private refreshStall(): void {
+    const detail = this.connStall ?? this.holds.values().next().value;
+    if (detail !== undefined) {
+      if (this.shownStall === detail) return;
+      this.shownStall = detail;
+      this.deliver(() => this.emit("stalled", { detail }));
+    } else if (this.shownStall !== undefined) {
+      this.shownStall = undefined;
+      this.deliver(() => this.emit("resumed"));
+    }
   }
 
   private scheduleReattach(): void {
@@ -527,6 +590,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     this.retry = undefined;
     this.queue = [];
     this.queued = 0;
+    this.holds.clear();
     for (const stream of ["out", "err"] as const) {
       const rest = this.text[stream].end();
       if (rest) this.deliver(() => (stream === "out" ? this.stdout : this.stderr).emit("data", rest));

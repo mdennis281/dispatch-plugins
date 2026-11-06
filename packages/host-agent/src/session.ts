@@ -11,15 +11,19 @@
  * shell's stdin so a watcher never sees EOF, keeps running too. A foreground
  * command reads /dev/null: core writes it as `eval '…' </dev/null`.
  */
+import { randomBytes } from "node:crypto";
 import type { EventEmitter } from "node:events";
 import { SentinelScanner, type RunEntry, type StreamLog } from "./journal.js";
 import {
   F,
   PROTOCOL_VERSION,
+  decodeElevateOutput,
   decodeJson,
   encodeFrame,
   encodeOutput,
   type AttachMsg,
+  type ElevateEndMsg,
+  type ElevateMsg,
   type ExitMsg,
   type ExitReason,
   type Frame,
@@ -28,6 +32,11 @@ import {
   type RunEndMsg,
   type SignalMsg,
 } from "./protocol.js";
+
+/** Elevations one session may have open at once. More is a runaway loop, not a human's work. */
+const MAX_ELEVATIONS = 8;
+/** Cancels kept to say again on every attach: one sent as the link dropped may never have arrived. */
+const KEEP_CANCELS = 32;
 
 /** The shell, as `child_process.spawn` returns it. */
 export interface ShellProc extends EventEmitter {
@@ -75,6 +84,8 @@ export interface SessionDeps {
   /** Dispatch was heard from (throttled by the caller). */
   onContact?(): void;
   log?(line: string): void;
+  /** Ids for elevation requests. Tests make them predictable. */
+  newId?(): string;
 }
 
 /** Signals a client may ask for by name. Anything else is refused. */
@@ -103,6 +114,10 @@ export class Session {
   private readonly scanner = new SentinelScanner();
   /** Recent run ends, so a client that was away when one landed still gets its RUN_END. */
   private readonly ends: Array<RunEndMsg & { out: number }> = [];
+  /** Open elevation requests: the `dispatch-elevate` waiting on each, and what it asked. */
+  private readonly elevations = new Map<string, { client: Client; msg: ElevateMsg }>();
+  /** Recently cancelled elevations, said again on every attach (see {@link KEEP_CANCELS}). */
+  private readonly cancels: string[] = [];
 
   constructor(private readonly d: SessionDeps) {
     this.lastBeat = d.now();
@@ -168,6 +183,45 @@ export class Session {
       client.write(encodeFrame(F.exit, this.exitMsg));
       client.end();
       this.client = undefined;
+      return;
+    }
+    // Every open request again: one made while Dispatch was away has never
+    // been seen, and the plugin ignores one it already has. Cancels likewise.
+    for (const [id, e] of this.elevations) client.write(encodeFrame(F.elevateRequest, { id, ...e.msg }));
+    for (const id of this.cancels) client.write(encodeFrame(F.elevateCancel, { id }));
+  }
+
+  /**
+   * `dispatch-elevate` connected to the owner and asked to run `msg` as root.
+   * Passed up to Dispatch now, or when it next attaches. Its answer (output,
+   * then the end) comes back down to `client` alone.
+   */
+  elevate(client: Client, msg: ElevateMsg): string | undefined {
+    const refuse = (error: string) => {
+      client.write(encodeFrame(F.elevateDone, { code: null, error }));
+      client.end();
+      return undefined;
+    };
+    if (this.exitMsg || this.ending) return refuse("the shell is ending");
+    if (this.elevations.size >= MAX_ELEVATIONS) return refuse(`${MAX_ELEVATIONS} elevations are already waiting in this shell`);
+    const id = this.d.newId?.() ?? randomBytes(9).toString("base64url").replace(/_/g, "-");
+    this.elevations.set(id, { client, msg });
+    this.client?.write(encodeFrame(F.elevateRequest, { id, ...msg }));
+    return id;
+  }
+
+  /**
+   * A `dispatch-elevate` connection closed (it was interrupted, or killed).
+   * Its request, if still open, is withdrawn: never run something nobody is
+   * waiting for.
+   */
+  elevateGone(client: Client): void {
+    for (const [id, e] of this.elevations) {
+      if (e.client !== client) continue;
+      this.elevations.delete(id);
+      this.cancels.push(id);
+      if (this.cancels.length > KEEP_CANCELS) this.cancels.shift();
+      this.client?.write(encodeFrame(F.elevateCancel, { id }));
     }
   }
 
@@ -234,6 +288,27 @@ export class Session {
       case F.kill:
         void this.terminate("killed");
         break;
+      case F.elevateOutput: {
+        const m = decodeElevateOutput(frame.payload);
+        // Gone (cancelled, or answered already): its output has nowhere to go.
+        this.elevations.get(m.id)?.client.write(encodeFrame(F.elevateData, Buffer.concat([Buffer.from([m.stream]), m.data])));
+        break;
+      }
+      case F.elevateEnd: {
+        const m = decodeJson<ElevateEndMsg>(frame.payload);
+        const id = typeof m?.id === "string" ? m.id : "";
+        const e = this.elevations.get(id);
+        if (!e) break;
+        this.elevations.delete(id);
+        const done: Omit<ElevateEndMsg, "id"> = {
+          code: typeof m.code === "number" && Number.isInteger(m.code) ? m.code : null,
+          ...(typeof m.signal === "string" ? { signal: m.signal } : {}),
+          ...(typeof m.error === "string" && m.error ? { error: m.error.slice(0, 2_000) } : {}),
+        };
+        e.client.write(encodeFrame(F.elevateDone, done));
+        e.client.end();
+        break;
+      }
       default:
         break; // unknown frames are ignored: a newer plugin may send more than this agent knows
     }
@@ -351,8 +426,15 @@ export class Session {
       ...(this.ending?.detail ? { detail: this.ending.detail } : {}),
     };
     this.exitMsg = exit;
+    // Whatever still waits for an answer gets one (it was most likely killed with the shell anyway).
+    for (const e of this.elevations.values()) {
+      e.client.write(encodeFrame(F.elevateDone, { code: null, error: "the shell ended" }));
+      e.client.end();
+    }
+    this.elevations.clear();
     const c = this.client;
     if (c) {
+      for (const id of this.cancels) c.write(encodeFrame(F.elevateCancel, { id }));
       c.write(encodeFrame(F.exit, exit));
       c.end();
       this.client = undefined;

@@ -2,7 +2,7 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: remote-host
 name: Remote host
-version: 0.5.13
+version: 0.6.0
 dispatch: ">=1"
 description: >-
   Run a chat's managed terminals on your own machines over SSH. Each paired
@@ -17,9 +17,13 @@ server: ./server/index.js
 client: ./client/index.js
 settings: ./settings.schema.json
 # One private key per paired machine, REMOTE_HOST_KEY_<NAME>, made and stored
-# by the plugin when you pair it and deleted when you remove it.
+# by the plugin when you pair it and deleted when you remove it. A machine
+# with elevation turned on has a second one, REMOTE_HOST_ELEVATE_KEY_<NAME>:
+# it logs in only to the root helper there, and only after you approve a
+# command. Neither ever reaches the machine's chat shells.
 secrets:
   - REMOTE_HOST_KEY_*
+  - REMOTE_HOST_ELEVATE_KEY_*
 capabilities:
   - terminals
   - secrets

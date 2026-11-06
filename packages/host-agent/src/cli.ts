@@ -14,6 +14,7 @@
  *   forget   --instance I (--chat C | --all)   the chat was deleted / the plugin uninstalled (lifecycle.ts)
  *   chats    --instance I              print the instance's chat directories
  *   gc       --instance I [--repo-idle-days N]
+ *   elevate  <command…>                 ask the user to run a command as root (elevate.ts); chat shells call it `dispatch-elevate`
  *   version
  *
  * Query commands print one line of JSON. `--root` (or DISPATCH_HOST_ROOT)
@@ -28,6 +29,7 @@ import { runOwner } from "./owner.js";
 import { collectGarbage, forgetChat, forgetInstance, listChats } from "./lifecycle.js";
 import { probe } from "./probe.js";
 import { decodeEnvArg } from "./env.js";
+import { processSignals, runElevate } from "./elevate.js";
 import { attribute, hostKillIo, killTree, listListeners, listProcs, type KillTarget } from "./procs.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import { listRecords, ownerLive, readRecord, touchContact, writeRecord } from "./records.js";
@@ -92,6 +94,16 @@ function print(value: unknown): void {
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
+  // Its arguments are a command line of its own, not `--key value` options.
+  if (argv[0] === "elevate") {
+    return runElevate(argv.slice(1), {
+      env: process.env,
+      cwd: process.cwd(),
+      stdout: process.stdout,
+      stderr: process.stderr,
+      onSignal: processSignals,
+    });
+  }
   const { cmd, opts, flags } = parseArgs(argv);
   const root = opts.root ?? process.env.DISPATCH_HOST_ROOT ?? rootDir(homedir());
   const instance = () => assertId("instance", need(opts, "instance"));
@@ -312,7 +324,9 @@ if (isEntry()) {
     (code) => {
       if (code < 0) return; // `serve` stays up
       process.exitCode = code;
-      process.stdout.write("", () => process.exit(code));
+      // Both drained first: on macOS a pipe is written asynchronously, and an
+      // elevated command's last lines (or why it was refused) would be lost.
+      process.stdout.write("", () => process.stderr.write("", () => process.exit(code)));
     },
     (err: unknown) => {
       process.stderr.write(`dispatch-host: ${err instanceof Error ? err.message : String(err)}\n`);
