@@ -22814,12 +22814,16 @@ const PRELUDE = [
   "export GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1",
   "export GIT_AUTHOR_NAME=Dispatch GIT_AUTHOR_EMAIL=dispatch@localhost GIT_COMMITTER_NAME=Dispatch GIT_COMMITTER_EMAIL=dispatch@localhost"
 ].join("\n");
+const CHECKOUT_ID_FILE = ".git/dispatch-checkout";
+const CHECKOUT_ID = /^[A-Za-z0-9-]{8,64}$/;
 async function checkoutStatus(remote, p, baseTree) {
   const script = [
     PRELUDE,
     `W=${sq(p.work)}; B=${sq(baseTree ?? "")}`,
     `cd "$W" 2>/dev/null || { echo missing; exit 0; }`,
     `[ -d .git ] || { echo nogit; exit 0; }`,
+    // Shell builtins, not a process: this runs before and after every command.
+    `CID=; [ -f ${CHECKOUT_ID_FILE} ] && read -r CID < ${CHECKOUT_ID_FILE}; echo "id $CID"`,
     `I=.git/dispatch-status.$$`,
     // -p: the copy keeps the index's mtime, which git's racy check needs (see remote-core's copyIndex).
     `cp -p .git/index "$I" 2>/dev/null || rm -f "$I"`,
@@ -22856,7 +22860,14 @@ async function checkoutStatus(remote, p, baseTree) {
   if (!tree) throw new Error(`reading the checkout failed: unexpected answer ${JSON.stringify(out.slice(0, 120))}`);
   const head = out.match(/^head ([0-9a-f]{40})$/m)?.[1];
   const b = out.match(/^base ([0-9a-f]{40}) ([0-9a-f]{40})$/m);
-  const known = { state: "ok", tree, ...head ? { head } : {}, ...b ? { base: { commit: b[1], tree: b[2] } } : {} };
+  const id = out.match(/^id (\S+)$/m)?.[1];
+  const known = {
+    state: "ok",
+    tree,
+    ...head ? { head } : {},
+    ...id && CHECKOUT_ID.test(id) ? { id } : {},
+    ...b ? { base: { commit: b[1], tree: b[2] } } : {}
+  };
   const sizes = /* @__PURE__ */ new Map();
   if (/^nobase$/m.test(out)) return { ...known, sizes };
   const at = out.indexOf("\ndiff\n");
@@ -22875,7 +22886,8 @@ async function checkoutHasFiles(remote, p) {
   if (r.code !== 0) throw new Error(`looking at the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
   return /^files\s*$/m.test(r.stdout);
 }
-async function initCheckout(remote, p) {
+async function initCheckout(remote, p, id) {
+  if (id !== void 0 && !CHECKOUT_ID.test(id)) throw new Error(`not a checkout id: ${JSON.stringify(id)}`);
   const script = [
     PRELUDE,
     "set -e",
@@ -22884,10 +22896,42 @@ async function initCheckout(remote, p) {
     `mkdir -p "$W"; cd "$W"`,
     `if [ ! -d .git ]; then git init -q .; git config core.autocrlf false; git config gc.auto 0; fi`,
     `mkdir -p .git/objects/info`,
-    `printf '%s\\n' "$A" > .git/objects/info/alternates`
+    `printf '%s\\n' "$A" > .git/objects/info/alternates`,
+    ...id ? [`printf '%s\\n' ${sq(id)} > ${CHECKOUT_ID_FILE}`] : []
   ].join("\n");
   const r = await remote.run(script, { timeoutMs: 6e4 });
   if (r.code !== 0) throw new Error(`setting up the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+async function setCheckoutId(remote, p, id) {
+  if (!CHECKOUT_ID.test(id)) throw new Error(`not a checkout id: ${JSON.stringify(id)}`);
+  const script = [PRELUDE, `cd ${sq(p.work)} || exit 1`, `printf '%s\\n' ${sq(id)} > ${CHECKOUT_ID_FILE}`].join("\n");
+  const r = await remote.run(script, { timeoutMs: 3e4 });
+  if (r.code !== 0) throw new Error(`marking the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+async function dropCheckoutGit(remote, p) {
+  const r = await remote.run([PRELUDE, `cd ${sq(p.work)} 2>/dev/null || exit 0`, `rm -rf .git`].join("\n"), { timeoutMs: 6e4 });
+  if (r.code !== 0) throw new Error(`clearing the checkout's .git failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+async function shellDir(remote, p, sub) {
+  const script = [
+    PRELUDE,
+    `cd ${sq(p.work)} 2>/dev/null && [ -d .git ] || { echo missing; exit 0; }`,
+    ...sub && sub !== "." ? [`mkdir -p -- ${sq(sub)} || exit 1`] : [],
+    `echo ready`
+  ].join("\n");
+  const r = await remote.run(script, { timeoutMs: 3e4 });
+  if (r.code !== 0) throw new Error(`could not make ${posix.join(p.work, sub)}: ${r.stderr.trim() || `exit ${r.code}`}`);
+  return /^missing\s*$/m.test(r.stdout) ? "missing" : "ready";
+}
+async function restoreThere(remote, p, commit, paths) {
+  if (!paths.length) return;
+  const script = [
+    PRELUDE,
+    `cd ${sq(p.work)} || exit 1`,
+    `GIT_LITERAL_PATHSPECS=1 git checkout ${sq(commit)} --pathspec-from-file=- --pathspec-file-nul`
+  ].join("\n");
+  const r = await remote.run(script, { input: paths.join("\0") + "\0", timeoutMs: 5 * 6e4 });
+  if (r.code !== 0) throw new Error(`putting the files back there failed: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
 async function missingObjects(remote, p, shas) {
   if (!shas.length) return [];
@@ -23022,6 +23066,7 @@ async function setBase(remote, p, chatId, commit) {
 const DEFAULT_CAP_BYTES = 50 * 1024 * 1024;
 const BATCH_BYTES = 32 * 1024 * 1024;
 const LIST_MAX = 15;
+const MASS_DELETE_MAX = 50;
 class ChatSync {
   constructor(d) {
     this.d = d;
@@ -23035,6 +23080,10 @@ class ChatSync {
   chain = Promise.resolve();
   holder;
   cap;
+  /** Said with the next command: what a new terminal's setup found. */
+  pending = [];
+  /** The paths of the bulk delete last held back, for its notice (the record keeps only counts). */
+  heldPaths = [];
   /** The local worktree this keeps in step. */
   get root() {
     return this.d.root;
@@ -23043,7 +23092,7 @@ class ChatSync {
     return this.serial(async () => {
       const h = this.holder;
       if (h && (h.terminal !== info.terminal || h.ended)) return { refuse: this.busyText(h) };
-      const notices = [];
+      const notices = this.pending.splice(0);
       try {
         await this.prepare();
         try {
@@ -23054,6 +23103,7 @@ class ChatSync {
             `[${this.d.label}] Could not check for changes made there (${errText(err)}). Whatever changed there stays, and isn't overwritten.`
           );
         }
+        if (this.rec.held) return { refuse: `Not run: ${this.heldText(void 0)}`, notices };
         await this.resolved(notices);
         if (!this.rec.conflicts.length) await this.push(notices, info.signal);
         if (this.rec.conflicts.length) return { refuse: `Not run: ${this.conflictText()}`, notices };
@@ -23063,7 +23113,7 @@ class ChatSync {
           notices
         };
       }
-      if (info.signal.aborted) return { refuse: "Not run: cancelled while syncing." };
+      if (info.signal.aborted) return { refuse: "Not run: cancelled while syncing.", notices };
       if (!info.background) this.holder = { runId: info.runId, terminal: info.terminal, command: info.command };
       return notices.length ? { notices } : {};
     });
@@ -23085,8 +23135,32 @@ class ChatSync {
           `[${this.d.label}] Could not check for changes the command made there (${errText(err)}). They are brought back before the next command.`
         );
       }
+      if (this.rec.held) notices.push(this.heldText(info.command));
       if (this.rec.conflicts.length) notices.push(`The next command won't run until this is settled: ${this.conflictText()}`);
       return notices.length ? { notices } : {};
+    });
+  }
+  /**
+   * For a new shell: the directory it starts in, `sub` within the checkout.
+   * A checkout that isn't there is set up (with a new id) rather than made by
+   * a bare `mkdir -p`. If it had synced before, it is gone, so the record
+   * starts again from your files and the next command says so.
+   */
+  async ensureCheckout(sub) {
+    return this.serial(async () => {
+      const p = await this.prepare();
+      if (await shellDir(this.d.remote, p, sub) === "ready") return;
+      const id = newCheckoutId();
+      await initCheckout(this.d.remote, p, id);
+      if (this.rec.base) {
+        this.pending.push(`[${this.d.label}] This chat's checkout there was gone; it is set up again from your files. Nothing was deleted here.`);
+      }
+      this.rec.base = void 0;
+      this.rec.conflicts = [];
+      this.rec.held = void 0;
+      this.rec.checkout = id;
+      await this.save();
+      if (await shellDir(this.d.remote, p, sub) !== "ready") throw new Error(`the checkout there could not be set up (${p.work})`);
     });
   }
   /** A terminal's shell ended: whatever it was running is over, and its lock goes. */
@@ -23130,26 +23204,35 @@ class ChatSync {
    * command, for the notice (absent before a command: something running in
    * the background made the change).
    */
-  async pullBack(notices, by, signal) {
+  async pullBack(notices, by, signal, restored = false) {
     const p = this.paths;
     const root = this.d.root;
     let base = this.rec.base;
     let st = await checkoutStatus(this.d.remote, p, base?.tree);
-    const broken = st.state === "nogit" || st.state === "ok" && !!base && !st.head;
-    const wiped = st.state === "missing" || broken && !!base && !await checkoutHasFiles(this.d.remote, p);
-    if (wiped || st.state === "nogit" && !base) {
-      if (!base) return;
+    if (!base && st.state !== "ok") return;
+    let foreign = st.state !== "ok";
+    if (base && st.state === "ok") {
+      if (this.rec.checkout) foreign = st.id !== this.rec.checkout;
+      else await this.adoptCheckout(p, st.id);
+      if (!foreign && !st.head && !await checkoutHasFiles(this.d.remote, p)) foreign = true;
+    }
+    if (foreign && base) {
+      if (st.state === "ok") await dropCheckoutGit(this.d.remote, p);
       this.rec.base = void 0;
+      this.rec.checkout = void 0;
       this.rec.conflicts = [];
-      notices.push(`[${this.d.label}] This chat's checkout there was gone; it is set up again from your files.`);
+      this.rec.held = void 0;
+      notices.push(
+        `[${this.d.label}] This chat's checkout there was gone, or isn't the one last synced; it is set up again from your files. Nothing was deleted here.`
+      );
       await this.save();
       return;
     }
-    if (broken) {
+    if (base && st.state === "ok" && !st.head) {
       await initCheckout(this.d.remote, p);
       await this.sendObjects(await objectsFor(root, base.commit, base.tree), signal);
       await setBase(this.d.remote, p, this.d.chatId, base.commit);
-      notices.push(`[${this.d.label}] The checkout's .git there was gone or broken (a command removed it?); it was rebuilt, and the files there kept.`);
+      notices.push(`[${this.d.label}] The checkout's HEAD there was gone or broken; it was rebuilt on the last sync, and the files there kept.`);
       st = await checkoutStatus(this.d.remote, p, base.tree);
       if (st.state !== "ok") throw new Error("the machine's checkout could not be rebuilt");
     }
@@ -23157,10 +23240,11 @@ class ChatSync {
     if (!base) {
       if (!st.base) return;
       base = this.rec.base = st.base;
+      await this.adoptCheckout(p, st.id);
       st = await checkoutStatus(this.d.remote, p, base.tree);
       if (st.state !== "ok") return;
     }
-    if (st.tree === base.tree) return;
+    if (st.tree === base.tree) return this.unhold();
     if (!st.changes) {
       await initCheckout(this.d.remote, p);
       await this.sendObjects(await objectsFor(root, base.commit, base.tree), signal);
@@ -23168,7 +23252,7 @@ class ChatSync {
       if (st.state !== "ok" || !st.changes) throw new Error("the machine's checkout has lost track of the last sync");
     }
     const host = st.changes;
-    if (!host.length) return;
+    if (!host.length) return this.unhold();
     await this.ensureLocal(base.commit, signal);
     const was = await treeMap(root, base.tree);
     const off = host.find((c) => !sameEntry(was.get(c.path) ?? ABSENT, c.from));
@@ -23238,6 +23322,24 @@ class ChatSync {
       if (isAbsent(c.from) && await holdsOnly(root, c.path, deleting)) take(c, "dir");
       else aside.push({ c, why: DIR_HERE });
     }
+    const total = [...was.values()].filter((e) => e.mode !== "160000").length;
+    if (deletes.length > MASS_DELETE_MAX || deletes.length * 2 > total) {
+      const held = this.rec.held;
+      if (!restored && held?.base === base.commit) {
+        await restoreThere(this.d.remote, p, base.commit, deletes);
+        this.rec.held = void 0;
+        await this.save();
+        notices.push(
+          `[${this.d.label}] Put back there, from the last sync, the ${deletes.length} files deleted there that you didn't delete here: ${list(deletes)}`
+        );
+        return this.pullBack(notices, by, signal, true);
+      }
+      this.rec.held = { base: base.commit, count: deletes.length, total };
+      this.heldPaths = deletes;
+      await this.save();
+      return;
+    }
+    if (this.rec.held) this.rec.held = void 0;
     await this.fetchMissing([...writes.map((w) => w.sha), ...copies.map((x) => x.c.to.sha)], signal);
     const failed = await writeWorktree(root, writes, deletes);
     const lost = new Set(failed.map((f) => f.path));
@@ -23277,6 +23379,12 @@ class ChatSync {
     await this.save();
     const from = by ? ` by \`${short(by)}\`` : " (by something still running there)";
     if (said.back.length) notices.push(`[${this.d.label}] Brought back the changes made there${from}: ${list(said.back)}`);
+    const gone = deletes.filter((d) => !lost.has(d));
+    if (gone.length) {
+      notices.push(
+        `[${this.d.label}] Deleted here, as they were deleted there${from}: ${list(gone)}. Your files from just before are in commit ${snap.commit}. To get these back: ${await restoreLine(root, snap.commit, gone)}`
+      );
+    }
     if (said.kept.length) notices.push(`[${this.d.label}] Deleted there${from} but changed here, so your version was kept and goes back: ${list(said.kept)}`);
     if (fresh.length) {
       notices.push(
@@ -23289,6 +23397,31 @@ class ChatSync {
         `[${this.d.label}] Something there moved the checkout's HEAD (a commit or checkout there). Its files came back as changes; commit on this computer — the machine's checkout follows yours.`
       );
     }
+  }
+  /** A held bulk delete settled outside the sync (put back there by hand): nothing left to hold. */
+  async unhold() {
+    if (!this.rec.held) return;
+    this.rec.held = void 0;
+    await this.save();
+  }
+  /**
+   * A record from before checkout ids, or one Dispatch lost and took back from
+   * the machine: take the checkout's id, or give it one now.
+   */
+  async adoptCheckout(p, id) {
+    if (id) {
+      this.rec.checkout = id;
+      return;
+    }
+    const mine = newCheckoutId();
+    await setCheckoutId(this.d.remote, p, mine);
+    this.rec.checkout = mine;
+  }
+  heldText(by) {
+    const h = this.rec.held;
+    const why = h.count > MASS_DELETE_MAX ? `more than ${MASS_DELETE_MAX}` : "more than half of them";
+    const what = this.heldPaths.length ? `: ${list(this.heldPaths)}` : "";
+    return `${by ? `\`${short(by)}\` deleted` : "Something deleted"} ${h.count} of the ${h.total} files in this chat's checkout on ${this.d.label}${what}. That is ${why}, so none of it was deleted here${by ? "" : ", and the command didn't run"}. If that is what you meant, delete them here too, then run the next command. If not, just run the next command: they are put back there from your files.`;
   }
   /** Conflicts whose copy is gone are settled: what the local file says now wins. */
   async resolved(notices) {
@@ -23336,7 +23469,11 @@ class ChatSync {
     }
     const first = !base;
     const started = Date.now();
-    if (first) await initCheckout(this.d.remote, p);
+    if (first) {
+      const id = this.rec.checkout ?? newCheckoutId();
+      await initCheckout(this.d.remote, p, id);
+      this.rec.checkout = id;
+    }
     const sent = await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, base?.tree), signal);
     if (signal.aborted) throw new Error("cancelled");
     for (let attempt = 0; ; attempt++) {
@@ -23523,6 +23660,22 @@ function legacySyncKey(chatId) {
 function empty(root) {
   return { v: 1, root, overlay: {}, pins: {}, conflicts: [], skippedHost: {}, skippedLocal: {} };
 }
+function newCheckoutId() {
+  return randomUUID();
+}
+async function restoreLine(root, commit, paths) {
+  const cmd = `git restore --source=${commit} --worktree`;
+  if (paths.length <= 5 && paths.every((x) => /^[\w.@+/-]+$/.test(x) && !x.startsWith("-"))) {
+    return `\`${cmd} -- ${paths.map((x) => `'${x}'`).join(" ")}\``;
+  }
+  try {
+    const file = resolve(root, await git(root, ["rev-parse", "--git-path", `dispatch-restore-${commit.slice(0, 12)}`])).replace(/\\/g, "/");
+    await writeFile(file, paths.map((x) => `:(literal)${x}\0`).join(""));
+    return `\`${cmd} --pathspec-file-nul --pathspec-from-file=${file}\``;
+  } catch {
+    return `\`${cmd} -- <path>\`, for each of the files above`;
+  }
+}
 function tag(c) {
   if (isAbsent(c.from)) return "A";
   if (isAbsent(c.to)) return "D";
@@ -23646,8 +23799,12 @@ class HostBackend {
     const local = root ? await realpath(info.cwd).catch(() => info.cwd) : info.cwd;
     const cwd = root ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, local)) : chatDir(linked.paths, this.deps.instanceId, chatId);
     if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
-    const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 3e4 });
-    if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
+    if (root) {
+      await this.syncs.get(chatId).ensureCheckout(within(root, local));
+    } else {
+      const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 3e4 });
+      if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
+    }
     const sid = newSid();
     const instance = this.deps.instanceId;
     const opener = {

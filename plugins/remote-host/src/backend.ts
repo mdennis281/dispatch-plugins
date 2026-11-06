@@ -124,8 +124,14 @@ export class HostBackend implements TerminalBackend {
       ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, local))
       : chatDir(linked.paths, this.deps.instanceId, chatId);
     if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
-    const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 30_000 });
-    if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
+    if (root) {
+      // Only setup makes the checkout: a bare `mkdir -p` of a wiped one passed
+      // for a checkout whose .git a command had removed.
+      await this.syncs.get(chatId)!.ensureCheckout(within(root, local));
+    } else {
+      const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 30_000 });
+      if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
+    }
 
     const sid = newSid();
     const instance = this.deps.instanceId;

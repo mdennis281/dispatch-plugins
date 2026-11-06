@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TerminalAfterRunInfo, TerminalRunInfo } from "@dispatch/plugin-sdk";
 import { repoTop, within } from "../src/backend.js";
-import { ChatSync, type ChatSyncDeps } from "../src/sync/chat-sync.js";
+import { ChatSync, restoreLine, type ChatSyncDeps } from "../src/sync/chat-sync.js";
 import { batches, parseRawDiff, pathProblem } from "../src/sync/local.js";
 import { SH, localRemote } from "./local-remote.js";
 
@@ -705,7 +705,7 @@ describe.skipIf(!SH)("never losing a file", () => {
     expect(existsSync(join(t.local, "a.txt.from-test-mac"))).toBe(false);
     const b2 = await s.beforeRun(run());
     expect(b2.refuse).toBeUndefined();
-    expect(text(b2)).toMatch(/\.git there was gone or broken .* rebuilt/);
+    expect(text(b2)).toMatch(/HEAD there was gone or broken; it was rebuilt/);
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("mine\n");
   });
 
@@ -720,7 +720,7 @@ describe.skipIf(!SH)("never losing a file", () => {
     writeFileSync(join(t.local, "a.txt"), "mine\n");
     const b = await s.beforeRun(run());
     expect(b.refuse).toBeUndefined();
-    expect(text(b)).toMatch(/\.git there was gone or broken .* rebuilt/);
+    expect(text(b)).toMatch(/HEAD there was gone or broken; it was rebuilt/);
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("mine\n");
     expect(g(t.work, "rev-parse", "HEAD")).not.toBe(bogus);
     expect(await s.beforeRun(run())).toEqual({});
@@ -755,16 +755,29 @@ describe.skipIf(!SH)("never losing a file", () => {
     expect(await s.beforeRun(run())).toEqual({});
   });
 
-  it("rebuilds a checkout whose .git a command removed, keeping what changed there", async () => {
+  it("sets up again a checkout whose .git a command removed: nothing deleted here, a file changed there kept beside yours", async () => {
     const t = setup();
     const s = t.mk();
     const r1 = run();
     await s.beforeRun(r1);
     writeFileSync(`${t.work}/a.txt`, "edited there\n");
+    rmSync(`${t.work}/src/b.ts`);
     rmSync(`${t.work}/.git`, { recursive: true, force: true });
     const a = await s.afterRun(after(r1));
-    expect(text(a)).toMatch(/\.git there was gone .* rebuilt/);
-    expect(read(join(t.local, "a.txt"))).toBe("edited there\n");
+    // Without its .git it can't say which checkout it is: never read against the base.
+    expect(text(a)).toMatch(/isn't the one last synced; it is set up again from your files\. Nothing was deleted here/);
+    expect(text(a)).not.toMatch(/Brought back|Deleted here/);
+    expect(read(join(t.local, "a.txt"))).toBe("one\ntwo\n");
+    expect(read(join(t.local, "src", "b.ts"))).toBe("export const b = 1;\n");
+    // The next command sets it up as a first sync: theirs is kept beside yours until you settle it.
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toMatch(/a conflict with Test Mac/);
+    expect(read(join(t.local, "a.txt.from-test-mac"))).toBe("edited there\n");
+    rmSync(join(t.local, "a.txt.from-test-mac"));
+    const c = await s.beforeRun(run());
+    expect(c.refuse).toBeUndefined();
+    expect(read(`${t.work}/a.txt`)).toBe("one\ntwo\n");
+    expect(read(`${t.work}/src/b.ts`)).toBe("export const b = 1;\n");
   });
 });
 
@@ -841,7 +854,7 @@ describe.skipIf(!SH)("restarts and lost state", () => {
     await s.afterRun(after(r1));
     rmSync(t.work, { recursive: true, force: true });
     const b = await s.beforeRun(run());
-    expect(text(b)).toMatch(/checkout there was gone; it is set up again/);
+    expect(text(b)).toMatch(/checkout there was gone, or isn.t the one last synced; it is set up again/);
     expect(text(b)).toMatch(/Set up this chat's files there/);
     expect(readFileSync(`${t.work}/a.txt`, "utf8")).toBe("one\ntwo\n");
   });
@@ -859,7 +872,7 @@ describe.skipIf(!SH)("restarts and lost state", () => {
     // What a new terminal does before the first sync: make the directory it starts in.
     mkdirSync(join(t.work, "src"), { recursive: true });
     const b = await s.beforeRun(run());
-    expect(text(b)).toMatch(/checkout there was gone; it is set up again/);
+    expect(text(b)).toMatch(/checkout there was gone, or isn.t the one last synced; it is set up again/);
     expect(text(b)).not.toMatch(/Brought back|rebuilt/);
     expect(read(join(t.local, "a.txt"))).toBe("one\ntwo\n");
     expect(read(join(t.local, "src", "b.ts"))).toBe("export const b = 1;\n");
@@ -902,6 +915,212 @@ describe.skipIf(!SH)("restarts and lost state", () => {
     expect(text(b)).toMatch(/Brought back .*M a\.txt/);
     expect(text(b)).not.toMatch(/Set up/);
     expect([...t.kv.keys()]).toEqual(["sync:test-mac:chat-1"]);
+  });
+});
+
+describe.skipIf(!SH)("which checkout it is", () => {
+  const ID_FILE = (t: ReturnType<typeof setup>) => `${t.work}/.git/dispatch-checkout`;
+  const recorded = (t: ReturnType<typeof setup>) => (t.kv.get("sync:test-mac:chat-1") as { checkout?: string }).checkout;
+
+  it("gives the checkout an id at setup and keeps it in the record", async () => {
+    const t = setup();
+    const s = t.mk();
+    await s.beforeRun(run());
+    const id = readFileSync(ID_FILE(t), "utf8").trim();
+    expect(id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(recorded(t)).toBe(id);
+  });
+
+  it("never reads a checkout with another id against the base: a partial wipe deletes nothing here", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    // Half wiped, and git made again there: the same layout, not the same checkout.
+    rmSync(`${t.work}/a.txt`);
+    writeFileSync(ID_FILE(t), "some-other-checkout\n");
+    const b = await s.beforeRun(run());
+    expect(text(b)).toMatch(/isn't the one last synced; it is set up again from your files\. Nothing was deleted here/);
+    expect(text(b)).not.toMatch(/Brought back|Deleted here/);
+    expect(read(join(t.local, "a.txt"))).toBe("one\ntwo\n");
+    expect(b.refuse).toBeUndefined();
+    expect(read(`${t.work}/a.txt`)).toBe("one\ntwo\n");
+    // Set up again with an id of its own.
+    expect(readFileSync(ID_FILE(t), "utf8").trim()).toBe(recorded(t));
+    expect(recorded(t)).not.toBe("some-other-checkout");
+  });
+
+  it("gives a checkout set up before ids one, and carries on as before", async () => {
+    const t = setup();
+    const s1 = t.mk();
+    const r1 = run();
+    await s1.beforeRun(r1);
+    await s1.afterRun(after(r1));
+    rmSync(ID_FILE(t));
+    const rec = t.kv.get("sync:test-mac:chat-1") as { checkout?: string };
+    delete rec.checkout;
+    writeFileSync(`${t.work}/a.txt`, "changed there\n");
+    const b = await t.mk().beforeRun(run());
+    expect(text(b)).toMatch(/Brought back .*M a\.txt/);
+    expect(text(b)).not.toMatch(/set up again/);
+    expect(readFileSync(ID_FILE(t), "utf8").trim()).toBe(recorded(t));
+  });
+
+  it("a new terminal sets a missing checkout up instead of making a bare directory, and the next command starts from your files", async () => {
+    const t = setup();
+    writeFileSync(join(t.local, "untracked.txt"), "only here\n");
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    rmSync(t.work, { recursive: true, force: true });
+    await s.ensureCheckout("src");
+    // Made by setup: a .git with a new id the record keeps, and the shell's directory in it.
+    expect(existsSync(`${t.work}/src`)).toBe(true);
+    expect(readFileSync(ID_FILE(t), "utf8").trim()).toBe(recorded(t));
+    const b = await s.beforeRun(run());
+    expect(text(b)).toMatch(/checkout there was gone; it is set up again from your files\. Nothing was deleted here/);
+    expect(text(b)).not.toMatch(/Brought back|Deleted here/);
+    expect(read(join(t.local, "a.txt"))).toBe("one\ntwo\n");
+    expect(read(join(t.local, "untracked.txt"))).toBe("only here\n");
+    expect(read(`${t.work}/untracked.txt`)).toBe("only here\n");
+  });
+
+  it("says a new terminal set it up again even when that command is cancelled", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    rmSync(t.work, { recursive: true, force: true });
+    await s.ensureCheckout("");
+    const b = await s.beforeRun(run({ signal: AbortSignal.abort() }));
+    expect(b.refuse).toBeDefined();
+    expect(text(b)).toMatch(/checkout there was gone; it is set up again from your files/);
+  });
+
+  it("a new terminal in a checkout that is there only makes its directory", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    const id = recorded(t);
+    await s.ensureCheckout("deep/new/dir");
+    expect(existsSync(`${t.work}/deep/new/dir`)).toBe(true);
+    expect(recorded(t)).toBe(id);
+    expect(text(await s.beforeRun(run()))).not.toMatch(/set up again/);
+  });
+});
+
+describe.skipIf(!SH)("bulk deletes there", () => {
+  /** A worktree of `n` more tracked files, f0.txt … */
+  function withFiles(n: number) {
+    const t = setup();
+    for (let i = 0; i < n; i++) writeFileSync(join(t.local, `f${i}.txt`), `${i}\n`);
+    g(t.local, "add", "-A");
+    g(t.local, "commit", "-qm", "more");
+    return t;
+  }
+
+  it("deletes nothing here when a command deletes more than half the files there, and puts them back there on the next command", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run({ command: "rm a.txt src/b.ts" });
+    await s.beforeRun(r1);
+    rmSync(`${t.work}/a.txt`);
+    rmSync(`${t.work}/src/b.ts`);
+    const a = await s.afterRun(after(r1));
+    expect(text(a)).toMatch(/`rm a\.txt src\/b\.ts` deleted 2 of the 3 files in this chat's checkout on Test Mac: a\.txt, src\/b\.ts\. That is more than half of them, so none of it was deleted here/);
+    expect(read(join(t.local, "a.txt"))).toBe("one\ntwo\n");
+    expect(read(join(t.local, "src", "b.ts"))).toBe("export const b = 1;\n");
+    // Not meant: the next command puts them back there, and runs.
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toBeUndefined();
+    expect(text(b)).toMatch(/Put back there, from the last sync, the 2 files deleted there that you didn't delete here/);
+    expect(read(`${t.work}/a.txt`)).toBe("one\ntwo\n");
+    expect(read(`${t.work}/src/b.ts`)).toBe("export const b = 1;\n");
+  });
+
+  it("refuses the command when it finds a bulk delete before it, and syncs it once you delete them here too", async () => {
+    const t = setup();
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    await s.afterRun(after(r1));
+    rmSync(`${t.work}/a.txt`);
+    rmSync(`${t.work}/src/b.ts`);
+    const b = await s.beforeRun(run());
+    expect(b.refuse).toMatch(/^Not run: Something deleted 2 of the 3 files .* none of it was deleted here, and the command didn't run/);
+    expect(read(join(t.local, "a.txt"))).toBe("one\ntwo\n");
+    // Meant: delete them here too, and the next command syncs as usual.
+    rmSync(join(t.local, "a.txt"));
+    rmSync(join(t.local, "src", "b.ts"));
+    const c = await s.beforeRun(run());
+    expect(c.refuse).toBeUndefined();
+    expect(text(c)).not.toMatch(/Put back/);
+    expect(existsSync(`${t.work}/a.txt`)).toBe(false);
+  });
+
+  it("holds back more than 50 deletes even when that is less than half", async () => {
+    const t = withFiles(120);
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    for (let i = 0; i < 51; i++) rmSync(`${t.work}/f${i}.txt`);
+    const a = await s.afterRun(after(r1));
+    expect(text(a)).toMatch(/deleted 51 of the 123 files .* That is more than 50, so none of it was deleted here/);
+    expect(existsSync(join(t.local, "f0.txt"))).toBe(true);
+    // 50 is fine.
+    const t2 = withFiles(120);
+    const s2 = t2.mk();
+    const r2 = run();
+    await s2.beforeRun(r2);
+    for (let i = 0; i < 50; i++) rmSync(`${t2.work}/f${i}.txt`);
+    const a2 = await s2.afterRun(after(r2));
+    expect(text(a2)).toMatch(/Deleted here, as they were deleted there/);
+    expect(existsSync(join(t2.local, "f0.txt"))).toBe(false);
+  });
+
+  it("names the snapshot of every delete it brings back, with the one line that undoes it", async () => {
+    const t = withFiles(20);
+    const s = t.mk();
+    const r1 = run();
+    await s.beforeRun(r1);
+    rmSync(`${t.work}/a.txt`);
+    const a = await s.afterRun(after(r1));
+    const m = text(a).match(/Deleted here, as they were deleted there.*: a\.txt\. Your files from just before are in commit ([0-9a-f]{40})\. To get these back: `([^`]+)`/);
+    expect(m).not.toBeNull();
+    expect(m![2]).toBe(`git restore --source=${m![1]} --worktree -- 'a.txt'`);
+    expect(existsSync(join(t.local, "a.txt"))).toBe(false);
+    g(t.local, "restore", `--source=${m![1]}`, "--worktree", "--", "a.txt");
+    expect(read(join(t.local, "a.txt"))).toBe("one\ntwo\n");
+
+    // Many, or odd names: a pathspec file in the git directory, each taken literally.
+    const t2 = withFiles(20);
+    writeFileSync(join(t2.local, "odd name [1].txt"), "odd\n");
+    g(t2.local, "add", "-A");
+    g(t2.local, "commit", "-qm", "odd");
+    const s2 = t2.mk();
+    const r2 = run();
+    await s2.beforeRun(r2);
+    for (const f of ["odd name [1].txt", "f1.txt", "f2.txt"]) rmSync(`${t2.work}/${f}`);
+    const a2 = await s2.afterRun(after(r2));
+    const m2 = text(a2).match(/To get these back: `git restore --source=([0-9a-f]{40}) --worktree --pathspec-file-nul --pathspec-from-file=([^`]+)`/);
+    expect(m2).not.toBeNull();
+    g(t2.local, "restore", `--source=${m2![1]}`, "--worktree", "--pathspec-file-nul", `--pathspec-from-file=${m2![2]}`);
+    expect(read(join(t2.local, "odd name [1].txt"))).toBe("odd\n");
+    expect(read(join(t2.local, "f2.txt"))).toBe("2\n");
+  });
+
+  it("still names the snapshot when the pathspec file can't be written", async () => {
+    // Not a repository: git can't say where its directory is, so no file.
+    const nowhere = mkdtempSync(join(tmpdir(), "rh-norepo-"));
+    dirs.push(nowhere);
+    const sha = "a".repeat(40);
+    const line = await restoreLine(nowhere, sha, ["odd name.txt", "b"]);
+    expect(line).toBe(`\`git restore --source=${sha} --worktree -- <path>\`, for each of the files above`);
   });
 });
 
