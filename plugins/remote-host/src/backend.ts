@@ -11,8 +11,9 @@
  * starts there, and a command whose files can't be synced doesn't run.
  */
 import { randomBytes } from "node:crypto";
-import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, posix, relative, resolve } from "node:path";
+import { realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import type {
   PluginContext,
   PluginLog,
@@ -23,15 +24,33 @@ import type {
   TerminalBeforeRunResult,
   TerminalChatEvent,
   TerminalPortForwardInput,
+  TerminalProcessHandle,
+  TerminalProcessSpawnInfo,
   TerminalRunInfo,
   TerminalSpawnInfo,
 } from "@dispatch/plugin-sdk";
-import type { Attribution, ChatDir, ElevateRequestMsg, ForgetResult } from "@dispatch-plugins/host-agent";
-import { CLT_DEVELOPER_DIR, XCODE_DEVELOPER_DIR, assertId, chatWorktreePath, instanceLayout, sq, type ProbeResult } from "@dispatch-plugins/host-agent";
+import type { Attribution, ChatDir, ElevateRequestMsg, ForgetResult, ProvisionResult, ProvisionSpec } from "@dispatch-plugins/host-agent";
+import {
+  CLT_DEVELOPER_DIR,
+  XCODE_DEVELOPER_DIR,
+  assertId,
+  chatMcpPath,
+  chatWorktreePath,
+  encodeEnvArg,
+  encodeExecArg,
+  instanceLayout,
+  mcpDirName,
+  mcpTmpPath,
+  sq,
+  type ProbeResult,
+} from "@dispatch-plugins/host-agent";
 import { errText, git } from "@dispatch-plugins/remote-core";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
-import type { HostLink } from "./link.js";
+import { withAbort, type HostLink } from "./link.js";
+import { McpBridge } from "./mcp/bridge.js";
+import { remoteFiles } from "./mcp/files.js";
+import { planProcess, type PlanPaths } from "./mcp/plan.js";
 import { PortForwards, type ReservedPort } from "./ports.js";
 import { Elevation, type Approvals, type ElevationDeps, type ElevationState } from "./elevation.js";
 import { HostShell, type HostShellOptions, type SessionOpener } from "./session.js";
@@ -69,6 +88,8 @@ export interface HostBackendDeps {
   elevateKey?: () => Promise<string | undefined>;
   /** Tests: the elevation login. */
   elevationConnect?: ElevationDeps["connect"];
+  /** Where copies of what MCP servers there write go here. Default: the OS temp directory's `dispatch-remote-host`. */
+  mcpLocalRoot?: string;
 }
 
 export class HostBackend implements TerminalBackend {
@@ -108,6 +129,14 @@ export class HostBackend implements TerminalBackend {
   private forgetting = false;
   /** Running commands as root there, with the user's approval (elevation.ts). */
   readonly elevation: Elevation;
+  /** MCP servers running there for chats (core's E7 placement), by chat + server name. */
+  private readonly processes = new Map<string, McpBridge>();
+  /**
+   * Installs under way there, by package set. Not tied to the spawn that
+   * asked: a first install (npm, a 150 MB browser) can outlast core's spawn
+   * timeout, and the agent's next call then waits for the same one.
+   */
+  private readonly provisions = new Map<string, Promise<ProvisionResult>>();
 
   constructor(
     readonly id: string,
@@ -142,24 +171,7 @@ export class HostBackend implements TerminalBackend {
     const linked = await this.deps.link.ready(info.signal);
     // Before anything is made there, so a delete always knows to clean up here.
     await this.markServed(chatId);
-    // In a repository, the shell starts at the same place in the chat's
-    // checkout there. The checkout itself is filled by the first command's
-    // sync, not here: spawn stays quick.
-    const root = await repoTop(info.worktreePath ?? info.repoPath);
-    // git reports the top as a real path (macOS's /var is /private/var): compare like with like.
-    const local = root ? await realpath(info.cwd).catch(() => info.cwd) : info.cwd;
-    const cwd = root
-      ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, local))
-      : chatDir(linked.paths, this.deps.instanceId, chatId);
-    if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
-    if (root) {
-      // Only setup makes the checkout: a bare `mkdir -p` of a wiped one passed
-      // for a checkout whose .git a command had removed.
-      await this.syncs.get(chatId)!.ensureCheckout(within(root, local));
-    } else {
-      const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 30_000 });
-      if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
-    }
+    const { cwd } = await this.place(chatId, info.worktreePath ?? info.repoPath, info.cwd, linked.paths, true);
 
     const sid = newSid();
     const instance = this.deps.instanceId;
@@ -195,13 +207,180 @@ export class HostBackend implements TerminalBackend {
   }
 
   /**
+   * Where a chat's work happens there. In a repository, the same place in the
+   * chat's checkout; the checkout itself is filled by the first command's
+   * sync, not here, so a spawn stays quick. Elsewhere, the chat's directory.
+   * `ensure` makes it (a shell starts in it); without it only the paths are worked out.
+   */
+  private async place(
+    chatId: string,
+    repoDir: string | undefined,
+    localCwd: string,
+    paths: HostPaths,
+    ensure: boolean,
+  ): Promise<{ cwd: string; checkout?: { remote: string; local: string } }> {
+    const root = await repoTop(repoDir);
+    // git reports the top as a real path (macOS's /var is /private/var): compare like with like.
+    const local = root ? await realpath(localCwd).catch(() => localCwd) : localCwd;
+    const checkout = root ? chatWorktreePath(paths.root, this.deps.instanceId, chatId, repoName(root)) : undefined;
+    const cwd = checkout ? posix.join(checkout, within(root!, local)) : chatDir(paths, this.deps.instanceId, chatId);
+    if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
+    if (ensure && root) {
+      // Only setup makes the checkout: a bare `mkdir -p` of a wiped one passed
+      // for a checkout whose .git a command had removed.
+      await this.syncs.get(chatId)!.ensureCheckout(within(root, local));
+    } else if (ensure) {
+      const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 30_000 });
+      if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
+    }
+    return { cwd, ...(checkout && root ? { checkout: { remote: checkout, local: root } } : {}) };
+  }
+
+  /**
+   * Run an MCP server there for a chat (core's E7 placement). The process is a
+   * dispatch-host session like a shell, with its journal, heartbeat and kill,
+   * so a dropped link stalls it and re-attaches to the SAME process. Dispatch's
+   * bundled browser servers are installed there first (mcp/plan.ts), and an
+   * {@link McpBridge} maps the files and roots that cross machines.
+   */
+  async spawnProcess(info: TerminalProcessSpawnInfo): Promise<TerminalProcessHandle> {
+    const chatId = assertId("chat", info.chatId);
+    // Refused before anything is installed or started: a headed browser, WebKit.
+    const plan = planProcess(info, { label: this.label, desktop: false });
+    const linked = await this.deps.link.ready(info.signal);
+    await this.markServed(chatId);
+    const paths = linked.paths;
+    const dir = chatMcpPath(paths.root, this.deps.instanceId, chatId, info.name);
+    const out = posix.join(dir, "out");
+    // Not under `dir`: browsers put unix sockets in TMPDIR, and macOS caps their paths at 104 bytes.
+    const tmp = mcpTmpPath(paths.root, this.deps.instanceId, chatId, mcpDirName(info.name));
+    const mk = await this.deps.link.exec(`umask 077 && mkdir -p ${sq(out)} ${sq(tmp)}`, { timeoutMs: 30_000 });
+    if (mk.code !== 0) throw new Error(`could not make ${dir} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
+    // A configured server starts where a shell would, so it is made; a bundled one starts in its own directory.
+    const where = await this.place(chatId, info.worktreePath ?? info.cwd, info.cwd, paths, !plan.ownRoots);
+    const prov = plan.provision ? await withAbort(this.provisioned(plan.provision), info.signal) : undefined;
+    const pp: PlanPaths = {
+      node: paths.node,
+      dir,
+      out,
+      tmp,
+      ...(prov?.entry ? { entry: prov.entry } : {}),
+      ...(prov?.browsersPath ? { browsersPath: prov.browsersPath } : {}),
+      ...(prov?.executablePath ? { executablePath: prov.executablePath } : {}),
+    };
+    const exec = plan.argv(pp);
+    const env = plan.env(pp);
+    const cwd = plan.ownRoots ? dir : where.cwd;
+
+    const sid = newSid();
+    const instance = this.deps.instanceId;
+    // The environment goes in a file only dispatch can read, which the session
+    // removes as it starts: a configured server's env may hold a token, and an
+    // argv there is anyone's to read in `ps`.
+    let envFile: string | undefined;
+    if (Object.keys(env).length) {
+      envFile = posix.join(dir, `.env-${sid}`);
+      const payload = encodeEnvArg(env);
+      const w = await this.deps.link.exec(`umask 077 && cat > ${sq(envFile)}`, {
+        timeoutMs: 30_000,
+        stdin: (ch) => new Promise<void>((res, rej) => ch.end(payload, (err?: Error | null) => (err ? rej(err) : res()))),
+      });
+      if (w.code !== 0) throw new Error(`could not pass ${info.name} its environment on ${this.label}: ${w.stderr.trim() || `exit ${w.code}`}`);
+    }
+    const opener: SessionOpener = {
+      open: async (resume) => {
+        const l = await this.deps.link.ready();
+        // Only a fresh start reads the file (and removes it); a resume finds the process running.
+        const file = resume ? undefined : envFile;
+        return this.deps.link.openSession(`exec ${sessionCommand(l.paths, { instance, chatId, sid, cwd, resume, exec, envFile: file })}`);
+      },
+      killDetached: () => {
+        void this.deps.link.agent(["kill", "--instance", instance, "--sid", sid], 15_000).catch((err: unknown) => {
+          this.deps.log.info(`remote-host ${this.deps.host().slug}: could not end MCP server ${info.name} (${sid}): ${errText(err)}`);
+        });
+      },
+    };
+    let sh: HostShell;
+    try {
+      sh = await HostShell.start(opener, { label: this.label, log: this.deps.log, ...this.deps.shell, lossIsFatal: true }, info.signal);
+    } catch (err) {
+      // The session may never have run to remove it.
+      if (envFile) void this.deps.link.exec(`rm -f ${sq(envFile)}`, { timeoutMs: 15_000 }).catch(() => undefined);
+      throw err;
+    }
+    this.remote ??= linkRemote(this.deps.link);
+    const bridge = new McpBridge(sh, {
+      label: this.label,
+      dir,
+      out,
+      ...(where.checkout ? { checkout: where.checkout } : {}),
+      localDir: join(this.mcpLocalDir(chatId), mcpDirName(info.name)),
+      ownRoots: plan.ownRoots,
+      files: remoteFiles(this.remote),
+      log: this.deps.log,
+    });
+    const key = shellKey(chatId, info.name);
+    const old = this.processes.get(key);
+    this.processes.set(key, bridge);
+    old?.kill();
+    bridge.on("exit", () => {
+      if (this.processes.get(key) === bridge) this.processes.delete(key);
+    });
+    this.deps.log.info(
+      `remote-host ${this.deps.host().slug}: MCP server ${info.name} for chat ${chatId} runs there` +
+        (info.bundled ? ` (${info.bundled.package}@${info.bundled.version})` : "") +
+        (plan.notes.length ? `; ${plan.notes.join("; ")}` : ""),
+    );
+    return bridge;
+  }
+
+  /**
+   * Make sure a package set is installed there. Each spawn asks (quick when it
+   * is: a file check, and Playwright's own check of its browser), so a
+   * machine whose `~/.dispatch-host` was wiped is repaired, not left failing.
+   * Spawns asking while an install runs wait for that one.
+   */
+  private provisioned(spec: ProvisionSpec): Promise<ProvisionResult> {
+    const key = JSON.stringify(spec);
+    let p = this.provisions.get(key);
+    if (!p) {
+      const what = spec.packages.map((x) => `${x.name}@${x.version}`).join(", ");
+      this.deps.log.info(`remote-host ${this.deps.host().slug}: making sure ${what}${spec.browser ? ` and ${spec.browser}` : ""} are installed there`);
+      p = this.deps.link
+        .agent<ProvisionResult>(["mcp-provision", "--spec", Buffer.from(JSON.stringify(spec), "utf8").toString("base64")], PROVISION_MS)
+        .then(
+          (r) => {
+            if (r.installed.length) this.deps.log.info(`remote-host ${this.deps.host().slug}: installed ${r.installed.join(", ")} there`);
+            return r;
+          },
+          (err: unknown) => {
+            throw new Error(`installing ${what} on ${this.label} failed: ${errText(err)}`);
+          },
+        )
+        .finally(() => this.provisions.delete(key));
+      this.provisions.set(key, p);
+    }
+    return p;
+  }
+
+  /** This chat's local folder for copies of what its MCP servers there wrote. */
+  private mcpLocalDir(chatId: string): string {
+    return join(this.mcpLocalHostDir(), assertId("chat", chatId));
+  }
+
+  private mcpLocalHostDir(): string {
+    return join(this.deps.mcpLocalRoot ?? join(tmpdir(), "dispatch-remote-host"), this.deps.instanceId, this.deps.host().slug);
+  }
+
+  /**
    * End every shell this backend holds, KILL down each channel, and wait
    * (briefly) for the channels to close, so the KILLs are out before the
    * connections go. For teardown: removing the machine, the plugin stopping.
    */
   async killAll(waitMs = 1_500): Promise<void> {
-    const shells = [...this.shells.values()];
+    const shells = [...this.shells.values(), ...this.processes.values()];
     this.shells.clear();
+    this.processes.clear();
     this.ports.dispose();
     for (const sh of shells) sh.kill();
     if (shells.length) await new Promise((r) => setTimeout(r, waitMs).unref?.());
@@ -241,6 +420,8 @@ export class HostBackend implements TerminalBackend {
     this.endShells(chatId);
     this.syncs.delete(chatId);
     this.live?.delete(chatId);
+    // The copies of what its MCP servers there wrote.
+    await rm(this.mcpLocalDir(chatId), { recursive: true, force: true }).catch(() => {});
     if (!(await this.wasServed(chatId))) return;
     try {
       await this.forget(chatId);
@@ -292,6 +473,7 @@ export class HostBackend implements TerminalBackend {
   /** The plugin is being uninstalled: end every session of this instance there and remove its files. */
   async forgetAll(timeoutMs: number): Promise<void> {
     await this.killAll(0);
+    await rm(this.mcpLocalHostDir(), { recursive: true, force: true }).catch(() => {});
     if (!this.deps.link.connected) return;
     await this.deps.link.agent<ForgetResult>(["forget", "--instance", this.deps.instanceId, "--all"], timeoutMs);
   }
@@ -349,7 +531,7 @@ export class HostBackend implements TerminalBackend {
     }
   }
 
-  /** End this backend's shells for one chat, and its forwards. Returns how many shells there were. */
+  /** End this backend's shells for one chat, its MCP servers there, and its forwards. Returns how many shells there were. */
   private endShells(chatId: string): number {
     let n = 0;
     for (const [k, sh] of [...this.shells]) {
@@ -357,6 +539,11 @@ export class HostBackend implements TerminalBackend {
       this.shells.delete(k);
       sh.kill();
       n++;
+    }
+    for (const [k, p] of [...this.processes]) {
+      if (k.slice(0, k.indexOf("\u0000")) !== chatId) continue;
+      this.processes.delete(k);
+      p.kill();
     }
     this.ports.dropChat(chatId);
     return n;
@@ -458,9 +645,10 @@ export class HostBackend implements TerminalBackend {
         `side. Outside a git repository nothing is synced.`,
       `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: ` +
         `on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on ` +
-        `another, which the terminal result and Ports & processes give. Open ` +
-        `that URL, not the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those ` +
-        `started from this chat's terminals; nothing else on the machine is.`,
+        `another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never ` +
+        `the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started ` +
+        `from this chat's terminals; nothing else on the machine is.`,
+      mcpNote(host.label, this.mcpLocalDir(info.chatId)),
       `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its ` +
         `checkout there.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
@@ -506,9 +694,21 @@ export function within(root: string, cwd: string): string {
   return rel.split(/[\\/]+/).join("/");
 }
 
+/** How long installing an MCP server's packages and browser there may take. */
+const PROVISION_MS = 20 * 60_000;
+
 export function sessionCommand(
   paths: HostPaths,
-  s: { instance: string; chatId: string; sid: string; cwd: string; resume?: { out: number; err: number } },
+  s: {
+    instance: string;
+    chatId: string;
+    sid: string;
+    cwd: string;
+    resume?: { out: number; err: number };
+    /** A hosted process: run this instead of bash, with the extra environment in this file there. */
+    exec?: readonly string[];
+    envFile?: string;
+  },
 ): string {
   return agentCommand(paths, [
     "session",
@@ -522,6 +722,8 @@ export function sessionCommand(
     s.cwd,
     "--heartbeat-ms",
     String(HEARTBEAT_TIMEOUT_MS),
+    ...(s.exec ? ["--exec", encodeExecArg(s.exec)] : []),
+    ...(s.envFile ? ["--env-file", s.envFile] : []),
     ...(s.resume ? ["--resume-out", String(s.resume.out), "--resume-err", String(s.resume.err)] : []),
   ]);
 }
@@ -605,6 +807,24 @@ function rootNote(label: string, state: ElevationState | undefined): string {
     );
   }
   return `- Root: if elevation is set up on ${label}, ${how} If it isn't, \`sudo\` says so and fails: then tell the user.`;
+}
+
+/**
+ * Browser tools placed on the machine (core's E7: by default the browser
+ * MCPs follow the chat's terminal), for the agent. Core's own "Where your MCP
+ * servers run" section says WHICH run there; this says what that means.
+ */
+function mcpNote(label: string, localDir: string): string {
+  return (
+    `- Browser tools that run on ${label} (core lists which, under "Where your MCP servers run") drive a headless ` +
+    `Chromium (Chrome for Testing) THERE, not a browser on this computer. In them \`localhost\` is the machine: open a dev ` +
+    `server you started in a terminal there by its \`there:\` URL (http://localhost:<its port>), not the forwarded \`here:\` ` +
+    `one. Files they save (screenshots, snapshots, traces) are copied back here, under ${localDir}, and their results name ` +
+    `the copies; a path you give one to save to is where its copy lands. A local file you pass to an upload, or open as a ` +
+    `file:// page, is copied there first (just that file, not the folder around it). The browser sees the chat's files there ` +
+    `as of the last terminal command's sync. Headed browsers and WebKit need a desktop session on ${label}, which isn't set ` +
+    `up yet: they fail and say so. Their first use there installs the browser, which takes a minute or two.`
+  );
 }
 
 /**

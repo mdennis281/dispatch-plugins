@@ -8,13 +8,14 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { get } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { TerminalBackendHandle, TerminalExitReason } from "@dispatch/plugin-sdk";
 import { createTestContext, type TestContext } from "@dispatch/plugin-sdk/testing";
-import { NODE_RUNTIME, sq } from "@dispatch-plugins/host-agent";
+import { NODE_RUNTIME, mcpTmpPath, prefixFor, sq } from "@dispatch-plugins/host-agent";
 import { generateKeyPair } from "@dispatch-plugins/remote-core";
 import { runLocally, startTestSshServer, type ExecRequest, type TestSshServer } from "@dispatch-plugins/remote-core/testing";
 import { HELPER_VERSION, helperScript, removeElevation, verifyElevation, type HelperPaths } from "../src/elevation-setup.js";
@@ -28,6 +29,9 @@ const posix = process.platform !== "win32";
 const hasLsof = posix && spawnSync("sh", ["-c", "command -v lsof"]).status === 0;
 const INSTANCE = "e2e-instance";
 const ID = "remote-host/e2e";
+/** A stand-in MCP server. The "machine" is this computer, so it runs from the fixtures. */
+const FAKE_MCP = fileURLToPath(new URL("./fixtures/fake-mcp.mjs", import.meta.url));
+type Content = { content: Array<{ type: string; text: string }> };
 
 const until = async (cond: () => boolean, ms = 20_000, what = "condition") => {
   const end = Date.now() + ms;
@@ -343,6 +347,102 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     expect([...t.kv.keys()]).not.toContain("served:e2e:chat-del");
     const rows = await registry.get("e2e")!.link.agent<Array<{ chat: string }>>(["list", "--instance", INSTANCE]);
     expect(rows.filter((r) => r.chat === "chat-del")).toEqual([]);
+  });
+
+  it("hosts a configured MCP server there and keeps it across a dropped connection", { timeout: 90_000 }, async () => {
+    const p = await t.terminals.spawnProcess(ID, { chatId: "chat-mcp", name: "fake", command: process.execPath, args: [FAKE_MCP] });
+    const init = await p.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+    expect(init.result).toMatchObject({ serverInfo: { name: "fake" } });
+    const who = async () => JSON.parse(((await p.request("tools/call", { name: "whoami" }, { timeoutMs: 20_000 })).result as Content).content[0]!.text);
+    const before = await who();
+    expect(before.inits).toBe(1);
+    // A configured server's roots are left alone, and it starts where a shell would.
+    expect(before.initParams.capabilities).toEqual({});
+    expect(before.cwd).toBe(join(home, ".dispatch-host", INSTANCE, "chats", "chat-mcp"));
+
+    server.dropClients();
+    await p.next("stalled");
+    await p.next("resumed");
+    const after = await who();
+    expect(after.pid).toBe(before.pid); // the SAME process
+    expect(after.inits).toBe(1); // and no second initialize
+    expect(p.garbage).toEqual([]);
+
+    p.handle.kill();
+    await p.next("exit");
+    await until(() => !alive(before.pid), 10_000, `the MCP server (pid ${before.pid}) to end`);
+  });
+
+  it("runs Dispatch's playwright there: its own directory and roots, files copied back, uploads sent", { timeout: 90_000 }, async () => {
+    const root = join(home, ".dispatch-host");
+    // Installed already (a stand-in), so nothing is downloaded: the spec core's bundled playwright makes.
+    const prefix = prefixFor(root, { packages: [{ name: "@playwright/mcp", version: "0.0.79" }] });
+    mkdirSync(join(prefix, "node_modules", "@playwright", "mcp"), { recursive: true });
+    mkdirSync(join(prefix, "node_modules", "playwright-core"), { recursive: true });
+    copyFileSync(FAKE_MCP, join(prefix, "node_modules", "@playwright", "mcp", "cli.js"));
+    writeFileSync(join(prefix, "node_modules", "playwright-core", "cli.js"), "process.exit(0)\n");
+    writeFileSync(join(prefix, ".ready"), "{}\n");
+
+    const chat = "chat-pw";
+    const p = await t.terminals.spawnProcess(ID, {
+      chatId: chat,
+      name: "playwright",
+      bundled: {
+        server: "playwright",
+        package: "@playwright/mcp",
+        version: "0.0.79",
+        bin: "cli.js",
+        args: ["--isolated", "--browser", "chrome", "--viewport-size", "1280x800", "--headless"],
+      },
+    });
+    await p.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+    const call = async (name: string, args: object = {}) => ((await p.request("tools/call", { name, arguments: args }, { timeoutMs: 20_000 })).result as Content).content[0]!.text;
+    const dir = join(root, INSTANCE, "mcp", chat, "playwright");
+    const who = JSON.parse(await call("whoami"));
+    expect(who.cwd).toBe(dir);
+    expect(who.initParams.capabilities.roots).toEqual({ listChanged: false });
+    expect(who.argv).toEqual(["--isolated", "--viewport-size", "1280x800", "--browser", "chromium", "--output-dir", `${dir}/out`, "--headless"]);
+    const tmp = mcpTmpPath(root, INSTANCE, chat, "playwright");
+    expect(who.env).toEqual({ PLAYWRIGHT_BROWSERS_PATH: join(root, "browsers"), TMPDIR: tmp });
+    expect(existsSync(tmp)).toBe(true);
+
+    // A file it writes there comes back here, and the result names the copy.
+    const local = join(tmpdir(), "dispatch-remote-host", INSTANCE, "e2e", chat, "playwright");
+    // The whole content: a copy that failed adds a note after the text, and that must not hide behind it.
+    const saved = ((await p.request("tools/call", { name: "save", arguments: {} }, { timeoutMs: 20_000 })).result as Content).content;
+    expect(saved).toEqual([{ type: "text", text: `- [Screenshot of viewport](${join(local, "out", "shot-1.png")})` }]);
+    expect(readFileSync(join(local, "out", "shot-1.png"), "utf8")).toBe("PNG-BYTES");
+
+    // A local file it is handed goes there first.
+    const mine = mkdtempSync(join(tmpdir(), "rh-e2e-up-"));
+    try {
+      writeFileSync(join(mine, "in.txt"), "uploaded-content");
+      expect(await call("read", { paths: [join(mine, "in.txt")] })).toBe("uploaded-content");
+      // And a file it is asked to save lands at that local path.
+      const want = join(mine, "saved.txt");
+      expect(await call("write", { filePath: want })).toBe(`Saved to ${want}`);
+      expect(readFileSync(want, "utf8")).toBe("SAVED");
+    } finally {
+      rmSync(mine, { recursive: true, force: true });
+    }
+
+    // Deleting the chat takes its server, its files there and the copies here.
+    await t.terminals.chatDeleted(chat);
+    await p.next("exit");
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(tmp)).toBe(false);
+    expect(existsSync(local)).toBe(false);
+    await until(() => !alive(who.pid), 10_000, `the MCP server (pid ${who.pid}) to end`);
+  });
+
+  it("refuses a headed browser there until it has a desktop session", async () => {
+    await expect(
+      t.terminals.spawnProcess(ID, {
+        chatId: "chat-pw2",
+        name: "playwright",
+        bundled: { server: "playwright", package: "@playwright/mcp", version: "0.0.79", bin: "cli.js", args: ["--browser", "webkit", "--headless"] },
+      }),
+    ).rejects.toThrow(/WebKit needs a desktop session on E2E/);
   });
 
   it("runs more shells than one connection has sessions for, and still answers", { timeout: 90_000 }, async () => {

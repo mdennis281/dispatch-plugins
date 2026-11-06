@@ -659,7 +659,7 @@ export class HostLink {
   }
 }
 
-function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+export function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return p;
   return new Promise<T>((resolve, reject) => {
     if (signal.aborted) return reject(new Error("cancelled"));

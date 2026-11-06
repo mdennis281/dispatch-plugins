@@ -29,7 +29,7 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { gitEnv } from "./git-env.js";
-import { assertId, instanceLayout, type SessionRecord } from "./layout.js";
+import { assertId, instanceLayout, mcpTmpPath, type SessionRecord } from "./layout.js";
 import { listRecords, readRecord } from "./records.js";
 
 /** Where removed directories wait to be deleted. Machine-wide: garbage is garbage, whoever empties it. */
@@ -82,7 +82,7 @@ export interface ForgetResult {
 /** The chat was deleted: everything this instance keeps for it here goes. Idempotent. */
 export async function forgetChat(o: { root: string; instance: string; chat: string; kill: KillSession }): Promise<ForgetResult> {
   const chat = assertId("chat", o.chat);
-  const { reposDir, chatsDir } = instanceLayout(o.root, o.instance);
+  const { reposDir, chatsDir, mcpDir } = instanceLayout(o.root, o.instance);
   const killed: string[] = [];
   for (const { dir, rec } of listRecords(o.root, o.instance)) {
     if (rec.chat !== chat || rec.state === "exited") continue;
@@ -125,7 +125,10 @@ export async function forgetChat(o: { root: string; instance: string; chat: stri
     if (dropped) refs++;
   }
   const removed = discard(o.root, join(chatsDir, chat), `${o.instance}.chat-${chat}`);
-  return { killed, sessions, refs, removed, ...(errors.length ? { errors } : {}) };
+  // What its MCP servers here wrote: screenshots, uploads, browser profiles.
+  discardMcpTmp(o.root, o.instance, chat);
+  const mcp = discard(o.root, join(mcpDir, chat), `${o.instance}.mcp-${chat}`);
+  return { killed, sessions, refs, removed: removed || mcp, ...(errors.length ? { errors } : {}) };
 }
 
 /** git's own first line of complaint, or how it ended. */
@@ -142,9 +145,21 @@ export async function forgetInstance(o: { root: string; instance: string; kill: 
     await o.kill(join(dir, "session.json"), rec);
     killed.push(rec.sid);
   }
+  for (const chat of entries(instanceLayout(o.root, o.instance).mcpDir)) discardMcpTmp(o.root, o.instance, chat);
   const removed = discard(o.root, instanceLayout(o.root, o.instance).dir, `${o.instance}.instance`);
   return { killed, sessions: 0, refs: 0, removed };
 }
+
+/** A chat's MCP servers' short temp directories (`t/<hash>`), found from their directories under mcp/<chat>/. */
+function discardMcpTmp(root: string, instance: string, chat: string): void {
+  if (!ID_RE.test(chat)) return;
+  for (const name of entries(join(instanceLayout(root, instance).mcpDir, chat))) {
+    // Named apart: two discards in one millisecond would otherwise collide in the trash.
+    discard(root, mcpTmpPath(root, instance, chat, name), `${instance}.mcp-tmp-${chat}-${name}`);
+  }
+}
+
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export interface ChatDir {
   chat: string;
@@ -154,17 +169,21 @@ export interface ChatDir {
 
 /** The chats this instance has a directory for. */
 export function listChats(root: string, instance: string): ChatDir[] {
-  const { chatsDir } = instanceLayout(root, instance);
-  const out: ChatDir[] = [];
-  for (const chat of entries(chatsDir)) {
-    try {
-      assertId("chat", chat);
-      out.push({ chat, mtimeMs: statSync(join(chatsDir, chat)).mtimeMs });
-    } catch {
-      /* not one of ours */
+  const { chatsDir, mcpDir } = instanceLayout(root, instance);
+  // A chat that only ever had an MCP server here has no checkout, only files under mcp/.
+  const seen = new Map<string, number>();
+  for (const dir of [chatsDir, mcpDir]) {
+    for (const chat of entries(dir)) {
+      try {
+        assertId("chat", chat);
+        const mtimeMs = statSync(join(dir, chat)).mtimeMs;
+        seen.set(chat, Math.max(seen.get(chat) ?? 0, mtimeMs));
+      } catch {
+        /* not one of ours */
+      }
     }
   }
-  return out;
+  return [...seen].map(([chat, mtimeMs]) => ({ chat, mtimeMs }));
 }
 
 export interface InstanceInfo {

@@ -8,11 +8,15 @@
  *     agent/<version>-<hash>/dispatch-host.mjs   side by side, one per agent build (install.ts)
  *     install.lock/                 held while anything installs (see install.ts)
  *     run/<hash>.sock               session sockets (short: macOS caps a socket path at 104 bytes)
+ *     mcp-packages/<hash>/          an MCP server's npm packages, one prefix per exact set (provision.ts)
+ *     browsers/                     the browsers they drive (PLAYWRIGHT_BROWSERS_PATH)
+ *     t/<hash>/                     a chat's MCP server's TMPDIR (short: browsers put sockets there)
  *     <instance>/                   one Dispatch instance (ctx.instance.id)
  *       contact                     touched whenever that instance talks to the host
  *       repos/<repoKey>.git         a bare repo shared by the instance's chats
  *       chats/<chatId>/<repo>       a `git worktree` of it per chat
- *       sessions/<sid>/             one shell: record, journal, owner log
+ *       sessions/<sid>/             one shell (or hosted process): record, journal, owner log
+ *       mcp/<chatId>/<name>/        a chat's MCP server here: its output, uploads and temp files
  *
  * Everything per-instance sits under the instance id. Stable and dev share
  * Dispatch's config/ but not data/, and each has its own instance id, so
@@ -65,6 +69,8 @@ export interface InstanceLayout {
   reposDir: string;
   chatsDir: string;
   sessionsDir: string;
+  /** Per chat, per MCP server: what a server placed here writes and reads. */
+  mcpDir: string;
 }
 
 export function instanceLayout(root: string, instance: string): InstanceLayout {
@@ -75,7 +81,41 @@ export function instanceLayout(root: string, instance: string): InstanceLayout {
     reposDir: posix.join(dir, "repos"),
     chatsDir: posix.join(dir, "chats"),
     sessionsDir: posix.join(dir, "sessions"),
+    mcpDir: posix.join(dir, "mcp"),
   };
+}
+
+/** Where a chat's MCP server `name` keeps its files here. `name` is any MCP server name: it is made path-safe. */
+export function chatMcpPath(root: string, instance: string, chatId: string, name: string): string {
+  return posix.join(instanceLayout(root, instance).mcpDir, assertId("chat", chatId), mcpDirName(name));
+}
+
+/**
+ * The TMPDIR a chat's MCP server gets: short, because browsers put unix
+ * sockets in it (Playwright's `pw-…/browser/…sock`) and macOS caps a socket
+ * path at 104 bytes. Measured on cvx-mac: under the chat's mcp/ directory it
+ * was 117 and Chromium never started. Found again from the chat and the
+ * server's directory name when the chat is forgotten (lifecycle.ts).
+ */
+export function mcpTmpPath(root: string, instance: string, chatId: string, dirName: string): string {
+  const h = createHash("sha256").update(`${assertId("instance", instance)}\0${assertId("chat", chatId)}\0${dirName}`).digest("hex").slice(0, 12);
+  return posix.join(root, "t", h);
+}
+
+/** An MCP server's name as one path component: `playwright` stays, anything odd becomes `_` plus a hash. */
+export function mcpDirName(name: string): string {
+  if (ID.test(name)) return name;
+  const safe = name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 40);
+  return `${safe}-${createHash("sha256").update(name).digest("hex").slice(0, 8)}`;
+}
+
+/** Shared by every instance: npm prefixes keyed by the exact packages in them, and the browsers they use. */
+export function mcpPackagesDir(root: string): string {
+  return posix.join(root, "mcp-packages");
+}
+
+export function browsersDir(root: string): string {
+  return posix.join(root, "browsers");
 }
 
 /** The bare repository a local repository's chats share on this host. */
@@ -137,6 +177,12 @@ export interface SessionRecord {
   /** The shell's start time (`ps -o lstart=`). A shell pid alive with another start time was reused: not ours. */
   shellStart?: string;
   state: "starting" | "running" | "exited";
+  /**
+   * `process`: not a shell but a long-lived program (an MCP server) run for
+   * the chat, with the same journal, heartbeat and kill. Its listeners are
+   * never forwarded as the chat's dev servers.
+   */
+  kind?: "process";
   startedAt: string;
   exit?: { code: number | null; signal: string | null; reason: string; detail?: string; at: string };
   /**

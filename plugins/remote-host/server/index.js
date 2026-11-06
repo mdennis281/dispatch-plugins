@@ -2,7 +2,7 @@ import { fileURLToPath as __pt_fileURLToPath } from "node:url";
 import { dirname as __pt_dirname } from "node:path";
 const __filename = __pt_fileURLToPath(import.meta.url);
 const __dirname = __pt_dirname(__filename);
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { createServer, connect, isIP } from "node:net";
 import require$$0$4 from "net";
 import require$$1$1 from "stream";
@@ -24,11 +24,12 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:c
 import { execFile, spawn } from "node:child_process";
 import { stat, copyFile, utimes, mkdir, readFile, rename, rm, lstat, readdir, writeFile, chmod, mkdtemp, rmdir, access, realpath } from "node:fs/promises";
 import { tmpdir, hostname, networkInterfaces } from "node:os";
-import { posix, join, basename, resolve, dirname, sep, isAbsolute, relative } from "node:path";
+import { posix, join, dirname, basename, relative, isAbsolute, sep, resolve } from "node:path";
 import { createWriteStream, createReadStream } from "node:fs";
 import { Readable, PassThrough } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { gzipSync } from "node:zlib";
+import { fileURLToPath, pathToFileURL } from "node:url";
 function definePlugin(mod) {
   return mod;
 }
@@ -6181,15 +6182,15 @@ function requireCrypto() {
           if (this._blockPos < this._block.length)
             return;
           let decrypted;
-          let need;
+          let need2;
           if (this._macETM) {
-            this._len = need = readUInt32BE(this._block, 0);
+            this._len = need2 = readUInt32BE(this._block, 0);
           } else {
             decrypted = this._decipherInstance.update(this._block);
             this._len = readUInt32BE(decrypted, 0);
-            need = 4 + this._len - this._blockSize;
+            need2 = 4 + this._len - this._blockSize;
           }
-          if (this._len > MAX_PACKET_SIZE || this._len < 5 || (need & this._blockSize - 1) !== 0) {
+          if (this._len > MAX_PACKET_SIZE || this._len < 5 || (need2 & this._blockSize - 1) !== 0) {
             throw new Error("Bad packet length");
           }
           this._macInstance = createHmac(this._macSSLName, this._macKey);
@@ -6336,15 +6337,15 @@ function requireCrypto() {
           this._blockPos += nb;
           if (this._blockPos < this._block.length)
             return;
-          let need;
+          let need2;
           if (this._macETM) {
-            this._len = need = readUInt32BE(this._block, 0);
+            this._len = need2 = readUInt32BE(this._block, 0);
           } else {
             this._instance.decryptBlock(this._block);
             this._len = readUInt32BE(this._block, 0);
-            need = 4 + this._len - this._block.length;
+            need2 = 4 + this._len - this._block.length;
           }
-          if (this._len > MAX_PACKET_SIZE || this._len < 5 || (need & this._block.length - 1) !== 0) {
+          if (this._len > MAX_PACKET_SIZE || this._len < 5 || (need2 & this._block.length - 1) !== 0) {
             throw new Error("Bad packet length");
           }
           if (!this._macETM) {
@@ -7802,7 +7803,7 @@ function requireAgent() {
     writeUInt32BE,
     writeUInt32LE
   } = requireUtils$1();
-  function once(cb) {
+  function once2(cb) {
     let called = false;
     return (...args) => {
       if (called)
@@ -7837,7 +7838,7 @@ function requireAgent() {
       this.socketPath = socketPath;
     }
     getStream(cb) {
-      cb = once(cb);
+      cb = once2(cb);
       const sock = new Socket();
       sock.on("connect", () => {
         cb(null, sock);
@@ -7853,7 +7854,7 @@ function requireAgent() {
       }
     }
     getIdentities(cb) {
-      cb = once(cb);
+      cb = once2(cb);
       this.getStream((err, stream) => {
         function onFail(err2) {
           if (stream) {
@@ -7890,7 +7891,7 @@ function requireAgent() {
       } else if (typeof options !== "object" || options === null) {
         options = void 0;
       }
-      cb = once(cb);
+      cb = once2(cb);
       this.getStream((err, stream) => {
         function onFail(err2) {
           if (stream) {
@@ -8008,7 +8009,7 @@ function requireAgent() {
     const RE_CYGWIN_SOCK = /^!<socket >(\d+) s ([A-Z0-9]{8}-[A-Z0-9]{8}-[A-Z0-9]{8}-[A-Z0-9]{8})/;
     return class CygwinAgent extends OpenSSHAgent {
       getStream(cb) {
-        cb = once(cb);
+        cb = once2(cb);
         let socketPath = this.socketPath;
         let triedCygpath = false;
         readFile2(socketPath, function readCygsocket(err, data) {
@@ -8546,7 +8547,7 @@ function requireAgent() {
                 cb2(...args);
             });
           };
-          this[SYM_AGENT].getIdentities(once((err, keys) => {
+          this[SYM_AGENT].getIdentities(once2((err, keys) => {
             if (err)
               return doCbs(err);
             if (!Array.isArray(keys)) {
@@ -20604,7 +20605,7 @@ async function copyIndex(from, to) {
   await copyFile(from, to);
   await utimes(to, st.atime, st.mtime);
 }
-function errText(err) {
+function errText$1(err) {
   return err instanceof Error ? err.message : String(err);
 }
 const MAX_FRAME = 1 << 20;
@@ -20714,9 +20715,9 @@ class FrameDecoder {
   }
 }
 const ID$1 = /^[A-Za-z0-9_-]{1,64}$/;
-function assertId(kind, value) {
+function assertId(kind2, value) {
   if (typeof value !== "string" || !ID$1.test(value)) {
-    throw new Error(`${kind} must match ${ID$1.source}, got ${JSON.stringify(value)}`);
+    throw new Error(`${kind2} must match ${ID$1.source}, got ${JSON.stringify(value)}`);
   }
   return value;
 }
@@ -20730,8 +20731,21 @@ function instanceLayout(root, instance) {
     contactFile: posix.join(dir, "contact"),
     reposDir: posix.join(dir, "repos"),
     chatsDir: posix.join(dir, "chats"),
-    sessionsDir: posix.join(dir, "sessions")
+    sessionsDir: posix.join(dir, "sessions"),
+    mcpDir: posix.join(dir, "mcp")
   };
+}
+function chatMcpPath(root, instance, chatId, name) {
+  return posix.join(instanceLayout(root, instance).mcpDir, assertId("chat", chatId), mcpDirName(name));
+}
+function mcpTmpPath(root, instance, chatId, dirName) {
+  const h = createHash("sha256").update(`${assertId("instance", instance)}\0${assertId("chat", chatId)}\0${dirName}`).digest("hex").slice(0, 12);
+  return posix.join(root, "t", h);
+}
+function mcpDirName(name) {
+  if (ID$1.test(name)) return name;
+  const safe = name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 40);
+  return `${safe}-${createHash("sha256").update(name).digest("hex").slice(0, 8)}`;
 }
 function repoPath(root, instance, repoKey) {
   return posix.join(instanceLayout(root, instance).reposDir, `${assertId("repoKey", repoKey)}.git`);
@@ -20742,6 +20756,12 @@ function chatWorktreePath(root, instance, chatId, repo) {
 const CLT_DEVELOPER_DIR = "/Library/Developer/CommandLineTools";
 const XCODE_DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer";
 const GIT_SH_ENV = `if [ -x '${CLT_DEVELOPER_DIR}/usr/bin/git' ]; then export DEVELOPER_DIR='${CLT_DEVELOPER_DIR}'; else unset DEVELOPER_DIR; fi; export LC_ALL=C`;
+function encodeExecArg(argv) {
+  return Buffer.from(JSON.stringify(argv), "utf8").toString("base64");
+}
+function encodeEnvArg(env) {
+  return Buffer.from(JSON.stringify(env), "utf8").toString("base64");
+}
 const NODE_RUNTIME = {
   version: "24.22.2",
   sha256: {
@@ -20762,9 +20782,9 @@ function nodeTarball(platform, arch, dist = NODE_RUNTIME) {
   return { url: `https://nodejs.org/dist/v${dist.version}/${dir}.tar.gz`, file: `${dir}.tar.gz`, dir, sha256: sha2562, version: dist.version };
 }
 function compareVersions(a, b) {
-  const parse = (v) => v.replace(/^v/, "").split(/[-+]/)[0].split(".").map((n) => Number(n) || 0);
-  const x = parse(a);
-  const y = parse(b);
+  const parse2 = (v) => v.replace(/^v/, "").split(/[-+]/)[0].split(".").map((n) => Number(n) || 0);
+  const x = parse2(a);
+  const y = parse2(b);
   for (let i = 0; i < Math.max(x.length, y.length); i++) {
     const d = (x[i] ?? 0) - (y[i] ?? 0);
     if (d) return d > 0 ? 1 : -1;
@@ -20864,8 +20884,8 @@ function installAgentScript(root, version2, sha2562) {
 function nodePath(root) {
   return posix.join(root, "runtime", "node", "bin", "node");
 }
-const AGENT_VERSION = "0.3.0";
-const agentSource = 'import { existsSync, readdirSync, openSync, fstatSync, closeSync, mkdirSync, rmSync, writeSync, readSync, appendFileSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, statfsSync, accessSync, constants, realpathSync } from "node:fs";\nimport { homedir, userInfo, release } from "node:os";\nimport { posix, join, dirname, resolve, basename } from "node:path";\nimport { fileURLToPath } from "node:url";\nimport { createHash, randomBytes } from "node:crypto";\nimport { spawn, execFile } from "node:child_process";\nimport { createServer, connect } from "node:net";\nimport { performance } from "node:perf_hooks";\nimport { StringDecoder } from "node:string_decoder";\nconst ID = /^[A-Za-z0-9_-]{1,64}$/;\nfunction assertId(kind, value) {\n  if (typeof value !== "string" || !ID.test(value)) {\n    throw new Error(`${kind} must match ${ID.source}, got ${JSON.stringify(value)}`);\n  }\n  return value;\n}\nfunction rootDir(home) {\n  return posix.join(home, ".dispatch-host");\n}\nfunction instanceLayout(root, instance) {\n  const dir = posix.join(root, assertId("instance", instance));\n  return {\n    dir,\n    contactFile: posix.join(dir, "contact"),\n    reposDir: posix.join(dir, "repos"),\n    chatsDir: posix.join(dir, "chats"),\n    sessionsDir: posix.join(dir, "sessions")\n  };\n}\nfunction sessionPaths(root, instance, sid) {\n  const dir = posix.join(instanceLayout(root, instance).sessionsDir, assertId("sid", sid));\n  return {\n    dir,\n    record: posix.join(dir, "session.json"),\n    runs: posix.join(dir, "runs.jsonl"),\n    ownerLog: posix.join(dir, "owner.log"),\n    socket: socketPath(root, instance, sid)\n  };\n}\nfunction socketPath(root, instance, sid) {\n  const h = createHash("sha256").update(`${instance}\\0${sid}`).digest("hex").slice(0, 20);\n  return posix.join(root, "run", `${h}.sock`);\n}\nclass StreamLog {\n  constructor(dir, name, opts) {\n    this.dir = dir;\n    this.name = name;\n    this.segmentBytes = opts.segmentBytes ?? 8 * 1024 * 1024;\n    this.keep = Math.max(1, opts.keep ?? 2);\n  }\n  segments = [];\n  fd;\n  /** The offset of the next byte. Ahead of the segments after a failed write. */\n  next = 0;\n  /** The last write failed: start a fresh segment rather than append after a hole. */\n  broken = false;\n  segmentBytes;\n  keep;\n  /** Open (or create) the journal in `dir`, picking up whatever segments are there. */\n  static open(dir, name, opts = {}) {\n    const log = new StreamLog(dir, name, opts);\n    const re = new RegExp(`^${name}\\\\.(\\\\d+)\\\\.log$`);\n    if (existsSync(dir)) {\n      for (const f of readdirSync(dir)) {\n        const m = re.exec(f);\n        if (!m) continue;\n        const file = join(dir, f);\n        const fd = openSync(file, "r");\n        const size = fstatSync(fd).size;\n        closeSync(fd);\n        log.segments.push({ base: Number(m[1]), file, size });\n      }\n    }\n    log.segments.sort((a, b) => a.base - b.base);\n    const last = log.segments.at(-1);\n    log.next = last ? last.base + last.size : 0;\n    return log;\n  }\n  /** The offset the next byte will have: how many bytes the stream has ever had. */\n  get offset() {\n    return this.next;\n  }\n  /** The oldest offset still held. */\n  get start() {\n    return this.segments[0]?.base ?? this.offset;\n  }\n  /**\n   * Append `data`; returns the offset of its first byte. Never throws: a\n   * failed write is reported to `onError` and leaves a hole.\n   */\n  append(data, onError) {\n    const at = this.next;\n    if (!data.length) return at;\n    this.next += data.length;\n    try {\n      let cur = this.segments.at(-1);\n      if (!cur || cur.size >= this.segmentBytes || this.broken) {\n        this.closeFd();\n        mkdirSync(this.dir, { recursive: true });\n        cur = { base: at, file: join(this.dir, `${this.name}.${at}.log`), size: 0 };\n        this.segments.push(cur);\n        this.broken = false;\n        while (this.segments.length > this.keep) rmSync(this.segments.shift().file, { force: true });\n      }\n      if (this.fd === void 0) this.fd = openSync(cur.file, "a");\n      for (let done = 0; done < data.length; ) {\n        const n = writeSync(this.fd, data, done);\n        done += n;\n        cur.size += n;\n      }\n    } catch (err) {\n      this.broken = true;\n      this.closeFd();\n      onError?.(err);\n    }\n    return at;\n  }\n  closeFd() {\n    if (this.fd === void 0) return;\n    try {\n      closeSync(this.fd);\n    } catch {\n    }\n    this.fd = void 0;\n  }\n  /**\n   * Everything from `from` on, in pieces of at most `maxChunk` bytes. Starts\n   * at {@link start} when `from` is older than what is held.\n   */\n  *read(from, maxChunk = 256 * 1024) {\n    let at = Math.max(from, this.start);\n    for (const seg of this.segments) {\n      const end = seg.base + seg.size;\n      if (end <= at) continue;\n      if (seg.base > at) at = seg.base;\n      const fd = openSync(seg.file, "r");\n      try {\n        while (at < end) {\n          const n = Math.min(maxChunk, end - at);\n          const buf = Buffer.alloc(n);\n          const got = readSync(fd, buf, 0, n, at - seg.base);\n          if (got <= 0) break;\n          yield { offset: at, data: buf.subarray(0, got) };\n          at += got;\n        }\n      } finally {\n        closeSync(fd);\n      }\n    }\n  }\n  close() {\n    this.closeFd();\n  }\n}\nfunction appendRun(file, entry) {\n  appendFileSync(file, JSON.stringify(entry) + "\\n");\n}\nfunction readRuns(file) {\n  if (!existsSync(file)) return [];\n  const out2 = [];\n  for (const line of readFileSync(file, "utf8").split("\\n")) {\n    if (!line.trim()) continue;\n    try {\n      out2.push(JSON.parse(line));\n    } catch {\n    }\n  }\n  return out2;\n}\nconst SENTINEL = /^CMTERMSENTINEL_[A-Za-z0-9_-]+\\|(-?\\d+)\\|(?:True|False)\\|(.*)$/;\nconst MAX_LINE = 64 * 1024;\nclass SentinelScanner {\n  decoder = new StringDecoder("utf8");\n  line = "";\n  /** Inside a line longer than {@link MAX_LINE}: skip to its end. */\n  skipping = false;\n  push(data) {\n    const found = [];\n    let text = this.decoder.write(data);\n    while (text) {\n      const nl = text.indexOf("\\n");\n      if (nl < 0) {\n        if (!this.skipping) {\n          this.line += text;\n          if (this.line.length > MAX_LINE) {\n            this.line = "";\n            this.skipping = true;\n          }\n        }\n        break;\n      }\n      if (!this.skipping) {\n        const m = SENTINEL.exec((this.line + text.slice(0, nl)).replace(/\\r$/, ""));\n        if (m) found.push({ exitCode: Number(m[1]), cwd: m[2] });\n      }\n      this.line = "";\n      this.skipping = false;\n      text = text.slice(nl + 1);\n    }\n    return found;\n  }\n}\nconst CLT_DEVELOPER_DIR = "/Library/Developer/CommandLineTools";\nconst XCODE_DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer";\nfunction hasCommandLineTools() {\n  return existsSync(`${CLT_DEVELOPER_DIR}/usr/bin/git`);\n}\nfunction gitEnv(base = process.env, clt = hasCommandLineTools()) {\n  const env = { ...base, LC_ALL: "C" };\n  if (clt) env.DEVELOPER_DIR = CLT_DEVELOPER_DIR;\n  else delete env.DEVELOPER_DIR;\n  return env;\n}\nconst LOGIN_ENV_ALLOW = [\n  /^PATH$/,\n  /^HOMEBREW_[A-Z0-9_]+$/,\n  /^LANG$/,\n  /^LC_[A-Z_]+$/,\n  /^DEVELOPER_DIR$/,\n  /^JAVA_HOME$/\n];\nconst BASE_ENV = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR"];\nconst FALLBACK_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";\nconst NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;\nfunction filterLoginEnv(env) {\n  const out2 = {};\n  for (const [k, v] of Object.entries(env)) {\n    if (v !== void 0 && LOGIN_ENV_ALLOW.some((re) => re.test(k))) out2[k] = v;\n  }\n  return out2;\n}\nfunction shellEnv(opts) {\n  const env = {};\n  for (const k of BASE_ENV) {\n    const v = opts.agentEnv[k];\n    if (v !== void 0) env[k] = v;\n  }\n  Object.assign(env, opts.login ? filterLoginEnv(opts.login) : {});\n  if (!env.PATH) env.PATH = FALLBACK_PATH;\n  if (opts.clt && !env.DEVELOPER_DIR) env.DEVELOPER_DIR = CLT_DEVELOPER_DIR;\n  for (const [k, v] of Object.entries(opts.extra ?? {})) {\n    if (!NAME.test(k)) throw new Error(`not an environment variable name: ${JSON.stringify(k)}`);\n    env[k] = String(v);\n  }\n  if (opts.elevate) {\n    env.PATH = `${opts.elevate.binDir}:${env.PATH}`;\n    env[ELEVATE_SOCKET_ENV] = opts.elevate.socket;\n  }\n  return env;\n}\nconst ELEVATE_SOCKET_ENV = "DISPATCH_ELEVATE_SOCK";\nfunction decodeEnvArg(b64) {\n  if (!b64) return {};\n  let parsed;\n  try {\n    parsed = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));\n  } catch {\n    throw new Error("--env must be base64 JSON of an object");\n  }\n  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("--env must be base64 JSON of an object");\n  const out2 = {};\n  for (const [k, v] of Object.entries(parsed)) {\n    if (!NAME.test(k)) throw new Error(`not an environment variable name: ${JSON.stringify(k)}`);\n    out2[k] = String(v);\n  }\n  return out2;\n}\nconst MARK = "__DISPATCH_HOST_ENV__";\nfunction parseCapturedEnv(stdout) {\n  const at = stdout.lastIndexOf(`${MARK}\n`);\n  if (at < 0) throw new Error("the login shell printed no environment");\n  const parsed = JSON.parse(stdout.slice(at + MARK.length + 1).trim());\n  if (!parsed || typeof parsed !== "object") throw new Error("the login shell\'s environment was not an object");\n  const out2 = {};\n  for (const [k, v] of Object.entries(parsed)) if (typeof v === "string") out2[k] = v;\n  return out2;\n}\nfunction captureLoginEnv(opts) {\n  const script = `printf \'\\\\n%s\\\\n\' ${MARK}; exec "$0" -e \'process.stdout.write(JSON.stringify(process.env))\'`;\n  return new Promise((resolve2, reject) => {\n    const child = spawn(opts.shell, ["-l", "-c", script, opts.node], {\n      stdio: ["ignore", "pipe", "ignore"],\n      env: opts.env\n    });\n    const chunks = [];\n    const timer = setTimeout(() => {\n      child.kill("SIGKILL");\n      reject(new Error(`${opts.shell} -l took longer than ${(opts.timeoutMs ?? 1e4) / 1e3}s`));\n    }, opts.timeoutMs ?? 1e4);\n    child.stdout.on("data", (c) => chunks.push(c));\n    child.on("error", (err) => {\n      clearTimeout(timer);\n      reject(err);\n    });\n    child.on("close", (code) => {\n      clearTimeout(timer);\n      if (code !== 0) return reject(new Error(`${opts.shell} -l exited ${code}`));\n      try {\n        resolve2(parseCapturedEnv(Buffer.concat(chunks).toString("utf8")));\n      } catch (err) {\n        reject(err);\n      }\n    });\n  });\n}\nfunction loginShell(env, platform) {\n  const s = env.SHELL;\n  if (s && s.startsWith("/")) return s;\n  return platform === "darwin" ? "/bin/zsh" : "/bin/bash";\n}\nconst PROTOCOL_VERSION = 1;\nconst MAX_FRAME = 1 << 20;\nconst F = {\n  /** Raw bytes for the shell\'s stdin. */\n  stdin: 1,\n  /** Close the shell\'s stdin (core\'s teardown). */\n  stdinEnd: 2,\n  /** "Dispatch is still here." Any frame counts, this one carries nothing else. */\n  heartbeat: 3,\n  /** JSON {@link SignalMsg}: deliver a signal to the session. */\n  signal: 4,\n  /** JSON {@link RunBeginMsg}: a command is about to be written. Journaled. */\n  runBegin: 5,\n  /** Leaving on purpose. The session keeps running until the heartbeat lapses. */\n  detach: 6,\n  /** End the session now: kill its whole tree. */\n  kill: 7,\n  /** u8 stream (1 out, 2 err) + u8 id length + id + bytes: output of an elevated command, for `dispatch-elevate`. */\n  elevateOutput: 8,\n  /** JSON {@link ElevateEndMsg}: the elevated command is over (or never ran). */\n  elevateEnd: 9,\n  /** JSON {@link AttachMsg}. Written by the relay, first, on every connection. */\n  attach: 16,\n  /** JSON {@link ElevateMsg}. Written first by `dispatch-elevate` on its own connection to the owner\'s socket. */\n  elevate: 17,\n  /** JSON {@link ReadyMsg}: attached; replay follows. */\n  ready: 129,\n  /** u64 offset + bytes the shell wrote to stdout. */\n  stdout: 130,\n  /** u64 offset + bytes the shell wrote to stderr. */\n  stderr: 131,\n  /** JSON {@link ExitMsg}: the session is over. */\n  exit: 132,\n  /** Answer to a heartbeat. */\n  heartbeatAck: 133,\n  /** JSON {@link ErrorMsg}: the session could not start or attach. The relay exits after it. */\n  error: 134,\n  /** JSON {@link RunEndMsg}: the journal saw a run\'s sentinel. */\n  runEnd: 135,\n  /** JSON {@link ElevateRequestMsg}: a command in the shell asks to run something as root. */\n  elevateRequest: 136,\n  /** JSON {@link ElevateCancelMsg}: whoever asked has gone (Ctrl-C); stop asking, stop running. */\n  elevateCancel: 137,\n  /** Owner → `dispatch-elevate`: u8 stream (1 out, 2 err) + bytes. */\n  elevateData: 138,\n  /** Owner → `dispatch-elevate`: JSON {@link ElevateEndMsg} without the id. */\n  elevateDone: 139\n};\nconst MAX_ELEVATE_ARGV = 32 * 1024;\nfunction checkElevate(m) {\n  const o = m;\n  if (!o || typeof o !== "object") throw new Error("not an elevation request");\n  if (!Array.isArray(o.argv) || !o.argv.length || !o.argv.every((a) => typeof a === "string")) throw new Error("argv must be a non-empty list of strings");\n  if (o.argv.some((a) => a.includes("\\0"))) throw new Error("an argument holds a NUL byte");\n  if (!o.argv[0]) throw new Error("the command is empty");\n  if (Buffer.byteLength(o.argv.join("\\0"), "utf8") > MAX_ELEVATE_ARGV) throw new Error(`the command is longer than ${MAX_ELEVATE_ARGV} bytes`);\n  if (typeof o.cwd !== "string" || !o.cwd.startsWith("/") || o.cwd.includes("\\0")) throw new Error("cwd must be an absolute path");\n  return { argv: [...o.argv], cwd: o.cwd };\n}\nfunction decodeElevateOutput(payload) {\n  if (payload.length < 2) throw new Error("elevation output frame too short");\n  const stream = payload.readUInt8(0);\n  const len = payload.readUInt8(1);\n  if (stream !== 1 && stream !== 2) throw new Error(`elevation output for stream ${stream}`);\n  if (payload.length < 2 + len) throw new Error("elevation output frame shorter than its id");\n  return { id: payload.subarray(2, 2 + len).toString("utf8"), stream, data: payload.subarray(2 + len) };\n}\nfunction encodeFrame(type, payload = Buffer.alloc(0)) {\n  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload), "utf8");\n  if (body.length > MAX_FRAME) throw new Error(`frame of ${body.length} bytes is over the ${MAX_FRAME}-byte limit`);\n  const head = Buffer.alloc(5);\n  head.writeUInt8(type, 0);\n  head.writeUInt32BE(body.length, 1);\n  return Buffer.concat([head, body]);\n}\nfunction encodeOutput(type, offset2, data) {\n  const frames = [];\n  const room = MAX_FRAME - 8;\n  let at = 0;\n  do {\n    const head = Buffer.alloc(8);\n    head.writeBigUInt64BE(BigInt(offset2 + at), 0);\n    frames.push(encodeFrame(type, Buffer.concat([head, data.subarray(at, at + room)])));\n    at += room;\n  } while (at < data.length);\n  return frames;\n}\nfunction decodeJson(payload) {\n  return JSON.parse(payload.toString("utf8"));\n}\nclass FrameDecoder {\n  buf = Buffer.alloc(0);\n  push(chunk) {\n    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;\n    const frames = [];\n    while (this.buf.length >= 5) {\n      const len = this.buf.readUInt32BE(1);\n      if (len > MAX_FRAME) throw new Error(`frame of ${len} bytes is over the ${MAX_FRAME}-byte limit`);\n      if (this.buf.length < 5 + len) break;\n      frames.push({ type: this.buf.readUInt8(0), payload: this.buf.subarray(5, 5 + len) });\n      this.buf = this.buf.subarray(5 + len);\n    }\n    return frames;\n  }\n  /** Bytes held back waiting for the rest of a frame. */\n  get pending() {\n    return this.buf.length;\n  }\n}\nfunction sq(s) {\n  return `\'${s.replace(/\'/g, `\'\\\\\'\'`)}\'`;\n}\nfunction elevateShim(node, script) {\n  return [\n    "#!/bin/sh",\n    "# Run a command as root on this machine once the user approves it in Dispatch.",\n    "# Usage: dispatch-elevate <command> [args...]",\n    `exec ${sq(node)} ${sq(script)} elevate "$@"`,\n    ""\n  ].join("\\n");\n}\nfunction sudoShim(elevate) {\n  return [\n    "#!/bin/bash",\n    "# sudo in a Dispatch chat shell: the command goes to dispatch-elevate, which asks",\n    "# the user to approve it. No password is ever asked for or kept here.",\n    "me=sudo",\n    \'refuse() { printf "%s: %s\\\\n" "$me" "$1" >&2; exit 1; }\',\n    "while [ $# -gt 0 ]; do",\n    \'  case "$1" in\',\n    "    --) shift; break ;;",\n    \'    -v|--validate) echo "$me: nothing to validate here: each command is approved by the user on its own" >&2; exit 0 ;;\',\n    "    -k|-K|--reset-timestamp|--remove-timestamp) exit 0 ;;",\n    `    -n|--non-interactive) refuse "-n: every command here needs the user\'s approval, which -n rules out" ;;`,\n    \'    -u|--user) [ "${2:-}" = root ] || [ "${2:-}" = 0 ] || [ "${2:-}" = "#0" ] || refuse "-u ${2:-}: only root is possible here"; shift 2 ;;\',\n    "    -uroot|--user=root) shift ;;",\n    `    -E|--preserve-env|--preserve-env=*) refuse "$1: the command runs with root\'s own environment; set what it needs on its command line (env NAME=value cmd)" ;;`,\n    \'    -s|--shell|-i|--login) refuse "$1: no interactive root shell here; pass the command itself" ;;\',\n    \'    -S|--stdin|-A|--askpass) refuse "$1: there is no password to give; the user approves each command in Dispatch" ;;\',\n    \'    -b|--background) refuse "$1: run it in the background yourself (with &)" ;;\',\n    \'    -*) refuse "$1: not supported here; run sudo <command>, or dispatch-elevate <command>" ;;\',\n    "    *) break ;;",\n    "  esac",\n    "done",\n    \'[ $# -gt 0 ] || refuse "usage: sudo <command> [args...] (the user approves it in Dispatch)"\',\n    `exec ${sq(elevate)} "$@"`,\n    ""\n  ].join("\\n");\n}\nfunction ensureShims(binDir, node, script) {\n  mkdirSync(binDir, { recursive: true, mode: 493 });\n  const elevate = posix.join(binDir, "dispatch-elevate");\n  write$1(elevate, elevateShim(node, script));\n  write$1(posix.join(binDir, "sudo"), sudoShim(elevate));\n}\nfunction write$1(file, content) {\n  try {\n    if (readFileSync(file, "utf8") === content) return;\n  } catch {\n  }\n  const tmp = `${file}.${process.pid}.tmp`;\n  writeFileSync(tmp, content, { mode: 493 });\n  renameSync(tmp, file);\n}\nconst PS_ARGS = ["-A", "-o", "pid=,ppid=,pgid=,lstart=,command="];\nfunction parsePs(out2) {\n  const rows = [];\n  for (const line of out2.split("\\n")) {\n    const w = line.trim().split(/\\s+/);\n    if (w.length < 8) continue;\n    const [pid, ppid, pgid] = w.slice(0, 3).map(Number);\n    if (!Number.isInteger(pid) || !Number.isInteger(ppid) || !Number.isInteger(pgid)) continue;\n    rows.push({ pid, ppid, pgid, start: w.slice(3, 8).join(" "), command: w.slice(8).join(" ") });\n  }\n  return rows;\n}\nfunction descendantsOf(rows, roots) {\n  const children = /* @__PURE__ */ new Map();\n  const alive = /* @__PURE__ */ new Set();\n  for (const r of rows) {\n    alive.add(r.pid);\n    const list = children.get(r.ppid);\n    if (list) list.push(r.pid);\n    else children.set(r.ppid, [r.pid]);\n  }\n  const out2 = /* @__PURE__ */ new Set();\n  const stack = [...roots].filter((p) => alive.has(p));\n  while (stack.length) {\n    const pid = stack.pop();\n    if (out2.has(pid) || pid <= 1) continue;\n    out2.add(pid);\n    for (const c of children.get(pid) ?? []) stack.push(c);\n  }\n  return out2;\n}\nfunction sameProcess(rows, pid, start) {\n  if (!pid) return false;\n  const r = rows.find((x) => x.pid === pid);\n  return Boolean(r) && (!start || r.start === start);\n}\nfunction rootReused(rows, root, rootStart) {\n  if (!root || !rootStart) return false;\n  const r = rows.find((x) => x.pid === root);\n  return Boolean(r) && r.start !== rootStart;\n}\nfunction groupOf(rows, root, rootStart) {\n  if (!root || rootReused(rows, root, rootStart)) return [];\n  return rows.filter((r) => r.pgid === root).map((r) => r.pid);\n}\nfunction liveTracked(rows, tracked) {\n  const byPid = new Map(rows.map((r) => [r.pid, r]));\n  return tracked.filter((t) => byPid.get(t.pid)?.start === t.start).map((t) => t.pid);\n}\nfunction killPlan(rows, opts) {\n  const selfPgid = rows.find((r) => r.pid === opts.self)?.pgid;\n  const reused = rootReused(rows, opts.root, opts.rootStart);\n  const seeds = /* @__PURE__ */ new Set([\n    ...opts.root && !reused ? [opts.root] : [],\n    ...groupOf(rows, opts.root, opts.rootStart),\n    ...reused ? [] : opts.sessionMembers ?? [],\n    ...liveTracked(rows, opts.tracked ?? [])\n  ]);\n  const pids = descendantsOf(rows, seeds);\n  pids.delete(opts.self);\n  const pgid = new Map(rows.map((r) => [r.pid, r.pgid]));\n  const pgids = /* @__PURE__ */ new Set();\n  for (const p of pids) {\n    const g = pgid.get(p);\n    if (g !== void 0 && g > 1 && g !== selfPgid && g !== opts.self) pgids.add(g);\n  }\n  return { pids: [...pids].sort((a, b) => a - b), pgids: [...pgids].sort((a, b) => a - b) };\n}\nfunction escapees(rows, root, sessionMembers2) {\n  const plain = descendantsOf(rows, [root]);\n  const all = descendantsOf(rows, [root, ...groupOf(rows, root), ...sessionMembers2]);\n  const byPid = new Map(rows.map((r) => [r.pid, r]));\n  const out2 = [];\n  for (const pid of all) {\n    const r = byPid.get(pid);\n    if (!r) continue;\n    if (r.pgid !== root || !plain.has(pid)) out2.push({ pid, start: r.start });\n  }\n  return out2;\n}\nconst LSOF_ARGS = ["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"];\nfunction parseLsof(out2) {\n  const found = /* @__PURE__ */ new Map();\n  let pid = 0;\n  let command = "";\n  for (const raw of out2.split("\\n")) {\n    const line = raw.replace(/\\r$/, "");\n    const tag = line[0];\n    const val = line.slice(1);\n    if (tag === "p") {\n      pid = Number(val);\n      command = "";\n    } else if (tag === "c") {\n      command = val;\n    } else if (tag === "n" && pid) {\n      const cut = val.lastIndexOf(":");\n      if (cut < 0) continue;\n      const port = Number(val.slice(cut + 1));\n      if (!Number.isInteger(port) || port < 1 || port > 65535) continue;\n      const addr = val.slice(0, cut).replace(/^\\[|\\]$/g, "").replace(/%.*$/, "");\n      const host = addr === "*" || addr === "0.0.0.0" || addr === "::" ? "127.0.0.1" : addr;\n      const key = `${pid}:${port}`;\n      const prev = found.get(key);\n      if (!prev || host === "127.0.0.1") found.set(key, { pid, command, host, port });\n    }\n  }\n  return [...found.values()].sort((a, b) => a.port - b.port || a.pid - b.pid);\n}\nfunction attribute(listeners, rows, sessions) {\n  const owner = /* @__PURE__ */ new Map();\n  sessions.forEach((s, i) => {\n    const root = s.root && !rootReused(rows, s.root, s.rootStart) ? [s.root] : [];\n    const seeds = [...root, ...groupOf(rows, s.root, s.rootStart), ...liveTracked(rows, s.tracked ?? [])];\n    for (const pid of descendantsOf(rows, seeds)) if (!owner.has(pid)) owner.set(pid, i);\n  });\n  const out2 = { sessions: sessions.map((s) => ({ sid: s.sid, chat: s.chat, ports: [] })), unattributed: [] };\n  for (const l of listeners) {\n    const i = owner.get(l.pid);\n    if (i === void 0) out2.unattributed.push(l);\n    else out2.sessions[i].ports.push(l);\n  }\n  return out2;\n}\nfunction run(file, args, okCodes = [0]) {\n  return new Promise((resolve2, reject) => {\n    execFile(file, args, { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {\n      const code = err ? typeof err.code === "number" ? err.code : -1 : 0;\n      if (okCodes.includes(code)) resolve2(stdout);\n      else reject(err);\n    });\n  });\n}\nasync function listProcs() {\n  return parsePs(await run("ps", PS_ARGS));\n}\nasync function sessionMembers(sid) {\n  const out2 = await run("pgrep", ["-s", String(sid)], [0, 1]).catch(() => "");\n  return out2.split(/\\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 1);\n}\nasync function listListeners() {\n  return parseLsof(await run("lsof", LSOF_ARGS, [0, 1]));\n}\nconst hostKillIo = {\n  listProcs,\n  sessionMembers,\n  kill: (pid, signal) => {\n    try {\n      process.kill(pid, signal);\n    } catch {\n    }\n  },\n  sleep: (ms) => new Promise((r) => setTimeout(r, ms))\n};\nasync function killTree(io, target) {\n  let signalled = 0;\n  for (let pass = 0; pass < 3; pass++) {\n    const rows = await io.listProcs();\n    const members = target.root && !rootReused(rows, target.root, target.rootStart) ? await io.sessionMembers(target.root) : [];\n    const plan = killPlan(rows, { ...target, sessionMembers: members });\n    if (!plan.pids.length) break;\n    for (const g of plan.pgids) io.kill(-g, "SIGKILL");\n    for (const p of plan.pids) io.kill(p, "SIGKILL");\n    signalled += plan.pids.length;\n    await io.sleep(100);\n  }\n  return signalled;\n}\nasync function signalTree(io, target, signal) {\n  const rows = await io.listProcs();\n  const members = target.root && !rootReused(rows, target.root, target.rootStart) ? await io.sessionMembers(target.root) : [];\n  for (const p of killPlan(rows, { ...target, sessionMembers: members }).pids) io.kill(p, signal);\n}\nfunction readRecord(file) {\n  try {\n    return JSON.parse(readFileSync(file, "utf8"));\n  } catch {\n    return void 0;\n  }\n}\nfunction writeRecord(file, rec) {\n  mkdirSync(dirname(file), { recursive: true, mode: 448 });\n  const tmp = `${file}.${process.pid}.tmp`;\n  writeFileSync(tmp, JSON.stringify(rec, null, 2) + "\\n", { mode: 384 });\n  renameSync(tmp, file);\n}\nfunction listRecords(root, instance) {\n  const { sessionsDir } = instanceLayout(root, instance);\n  if (!existsSync(sessionsDir)) return [];\n  const out2 = [];\n  for (const name of readdirSync(sessionsDir)) {\n    const dir = join(sessionsDir, name);\n    const rec = readRecord(join(dir, "session.json"));\n    if (rec) out2.push({ dir, rec });\n  }\n  return out2;\n}\nfunction touchContact(root, instance, now = /* @__PURE__ */ new Date()) {\n  const { dir, contactFile } = instanceLayout(root, instance);\n  mkdirSync(dir, { recursive: true, mode: 448 });\n  writeFileSync(contactFile, now.toISOString() + "\\n", { mode: 384 });\n}\nfunction lastContact(root, instance) {\n  try {\n    return statSync(instanceLayout(root, instance).contactFile).mtimeMs;\n  } catch {\n    return void 0;\n  }\n}\nfunction ownerLive(rows, rec) {\n  return rec.state !== "exited" && sameProcess(rows, rec.ownerPid, rec.ownerStart);\n}\nfunction claimRecord(file, rec) {\n  mkdirSync(dirname(file), { recursive: true, mode: 448 });\n  try {\n    writeFileSync(file, JSON.stringify(rec, null, 2) + "\\n", { mode: 384, flag: "wx" });\n    return true;\n  } catch (e) {\n    if (e.code === "EEXIST") return false;\n    throw e;\n  }\n}\nconst MAX_ELEVATIONS = 8;\nconst KEEP_CANCELS = 32;\nconst SIGNALS = /* @__PURE__ */ new Set(["HUP", "INT", "QUIT", "KILL", "TERM", "USR1", "USR2", "STOP", "CONT", "TSTP", "WINCH"]);\nclass Session {\n  constructor(d) {\n    this.d = d;\n    this.lastBeat = d.now();\n    d.shell.stdout?.on("data", (c) => this.output(F.stdout, c));\n    d.shell.stderr?.on("data", (c) => this.output(F.stderr, c));\n    d.shell.on("exit", (code, signal) => this.shellExited(code, signal));\n    d.shell.on("close", (code, signal) => {\n      this.closed = true;\n      this.onClosed?.();\n      this.shellExited(code, signal);\n    });\n    d.shell.on("error", (err) => {\n      this.ending ??= { reason: "start-failed", detail: err.message };\n      this.closed = true;\n      this.shellExited(null, null);\n    });\n  }\n  client;\n  lastBeat;\n  activeRun;\n  exitMsg;\n  /** Why we are killing the shell, so its exit is reported as that and not as `exited`. */\n  ending;\n  /** When the last kill was sent while ending, so `tick` can send another. */\n  lastKill = 0;\n  /** The shell\'s own exit, once it happened. */\n  shellExit;\n  closed = false;\n  onClosed;\n  /**\n   * Replay bytes queued to the current client, which may exceed the backlog\n   * limit on their own. Forgiven until the client has caught up.\n   */\n  allowance = 0;\n  /** The journal\'s last write failed (a full disk). Logged once, not per chunk. */\n  journalFailing = false;\n  scanner = new SentinelScanner();\n  /** Recent run ends, so a client that was away when one landed still gets its RUN_END. */\n  ends = [];\n  /** Open elevation requests: the `dispatch-elevate` waiting on each, and what it asked. */\n  elevations = /* @__PURE__ */ new Map();\n  /** Recently cancelled elevations, said again on every attach (see {@link KEEP_CANCELS}). */\n  cancels = [];\n  get exited() {\n    return this.exitMsg;\n  }\n  get hasClient() {\n    return Boolean(this.client);\n  }\n  /**\n   * A client connected and sent its ATTACH. A newer client replaces an older\n   * one: the old one is a half-open connection Dispatch has already given up\n   * on. It gets READY, then everything after its resume point, then live\n   * output. That all happens in this one call, so no byte can fall between the\n   * replay and the live stream.\n   */\n  attach(client, msg) {\n    if (this.client && this.client !== client) this.client.destroy();\n    this.client = client;\n    this.lastBeat = this.d.now();\n    const from = msg.resume ?? { out: 0, err: 0 };\n    const gap = {};\n    if (this.d.out.start > from.out) gap.out = this.d.out.start;\n    if (this.d.err.start > from.err) gap.err = this.d.err.start;\n    const ready = {\n      v: PROTOCOL_VERSION,\n      sid: this.d.sid,\n      pid: this.d.shell.pid ?? 0,\n      agentVersion: this.d.agentVersion,\n      cwd: this.d.cwd,\n      out: this.d.out.offset,\n      err: this.d.err.offset,\n      resumed: Boolean(msg.resume),\n      ...gap.out !== void 0 || gap.err !== void 0 ? { gap } : {}\n    };\n    client.write(encodeFrame(F.ready, ready));\n    let replayed = 0;\n    for (const frame of replay(this.d.out, from.out, F.stdout)) replayed += write(client, frame);\n    for (const frame of replay(this.d.err, from.err, F.stderr)) replayed += write(client, frame);\n    this.allowance = Math.max(replayed, client.writableLength);\n    for (const e of this.ends) if (e.out > from.out) client.write(encodeFrame(F.runEnd, { runId: e.runId, exitCode: e.exitCode, cwd: e.cwd }));\n    if (this.exitMsg) {\n      client.write(encodeFrame(F.exit, this.exitMsg));\n      client.end();\n      this.client = void 0;\n      return;\n    }\n    for (const [id, e] of this.elevations) client.write(encodeFrame(F.elevateRequest, { id, ...e.msg }));\n    for (const id of this.cancels) client.write(encodeFrame(F.elevateCancel, { id }));\n  }\n  /**\n   * `dispatch-elevate` connected to the owner and asked to run `msg` as root.\n   * Passed up to Dispatch now, or when it next attaches. Its answer (output,\n   * then the end) comes back down to `client` alone.\n   */\n  elevate(client, msg) {\n    const refuse = (error) => {\n      client.write(encodeFrame(F.elevateDone, { code: null, error }));\n      client.end();\n      return void 0;\n    };\n    if (this.exitMsg || this.ending) return refuse("the shell is ending");\n    if (this.elevations.size >= MAX_ELEVATIONS) return refuse(`${MAX_ELEVATIONS} elevations are already waiting in this shell`);\n    const id = this.d.newId?.() ?? randomBytes(9).toString("base64url").replace(/_/g, "-");\n    this.elevations.set(id, { client, msg });\n    this.client?.write(encodeFrame(F.elevateRequest, { id, ...msg }));\n    return id;\n  }\n  /**\n   * A `dispatch-elevate` connection closed (it was interrupted, or killed).\n   * Its request, if still open, is withdrawn: never run something nobody is\n   * waiting for.\n   */\n  elevateGone(client) {\n    for (const [id, e] of this.elevations) {\n      if (e.client !== client) continue;\n      this.elevations.delete(id);\n      this.cancels.push(id);\n      if (this.cancels.length > KEEP_CANCELS) this.cancels.shift();\n      this.client?.write(encodeFrame(F.elevateCancel, { id }));\n    }\n  }\n  /** The client\'s socket closed. The shell keeps running until the heartbeat lapses. */\n  detachClient(client) {\n    if (this.client === client) this.client = void 0;\n  }\n  /**\n   * A frame from `client`. Frames from a client that has been replaced are\n   * ignored. Returns false for a frame that could not be understood; the\n   * caller drops that client, and the session carries on.\n   */\n  handle(client, frame) {\n    if (client !== this.client) return true;\n    try {\n      this.handleFrame(client, frame);\n      return true;\n    } catch (e) {\n      this.d.log?.(`bad frame 0x${frame.type.toString(16)} from the client: ${String(e)}`);\n      return false;\n    }\n  }\n  handleFrame(client, frame) {\n    this.lastBeat = this.d.now();\n    const stdin = this.d.shell.stdin;\n    const writable = Boolean(stdin) && !stdin.writableEnded && !stdin.destroyed;\n    switch (frame.type) {\n      case F.stdin:\n        if (writable) stdin.write(frame.payload);\n        break;\n      case F.stdinEnd:\n        if (writable) stdin.end();\n        break;\n      case F.heartbeat:\n        client.write(encodeFrame(F.heartbeatAck));\n        this.d.onContact?.();\n        break;\n      case F.signal: {\n        const name = String(decodeJson(frame.payload)?.signal ?? "").toUpperCase().replace(/^SIG/, "");\n        if (name === "KILL") void this.terminate("killed");\n        else if (SIGNALS.has(name)) void this.d.signal(name).catch((e) => this.d.log?.(`signal ${name}: ${String(e)}`));\n        break;\n      }\n      case F.runBegin: {\n        const m = decodeJson(frame.payload);\n        if (!m || typeof m.runId !== "string" || !m.runId) throw new Error("RUN_BEGIN without a runId");\n        this.activeRun = m.runId;\n        this.d.journalRun({\n          t: "begin",\n          runId: this.activeRun,\n          background: Boolean(m.background),\n          out: this.d.out.offset,\n          err: this.d.err.offset,\n          at: (/* @__PURE__ */ new Date()).toISOString()\n        });\n        break;\n      }\n      case F.detach:\n        this.client = void 0;\n        client.end();\n        break;\n      case F.kill:\n        void this.terminate("killed");\n        break;\n      case F.elevateOutput: {\n        const m = decodeElevateOutput(frame.payload);\n        this.elevations.get(m.id)?.client.write(encodeFrame(F.elevateData, Buffer.concat([Buffer.from([m.stream]), m.data])));\n        break;\n      }\n      case F.elevateEnd: {\n        const m = decodeJson(frame.payload);\n        const id = typeof m?.id === "string" ? m.id : "";\n        const e = this.elevations.get(id);\n        if (!e) break;\n        this.elevations.delete(id);\n        const done = {\n          code: typeof m.code === "number" && Number.isInteger(m.code) ? m.code : null,\n          ...typeof m.signal === "string" ? { signal: m.signal } : {},\n          ...typeof m.error === "string" && m.error ? { error: m.error.slice(0, 2e3) } : {}\n        };\n        e.client.write(encodeFrame(F.elevateDone, done));\n        e.client.end();\n        break;\n      }\n    }\n  }\n  /**\n   * Run every second or so: kills the session once Dispatch has been silent\n   * past the heartbeat timeout, and kills again every few seconds while a\n   * shell we are ending hasn\'t gone.\n   */\n  tick() {\n    if (this.exitMsg) return;\n    if (this.ending) {\n      if (!this.shellExit && this.d.now() - this.lastKill > 5e3) void this.kill();\n      return;\n    }\n    const silent = this.d.now() - this.lastBeat;\n    if (silent > this.d.heartbeatMs) {\n      void this.terminate("heartbeat", `no heartbeat for ${Math.round(silent / 1e3)}s`);\n    }\n  }\n  /**\n   * End the session for `reason`: kill the tree; the shell\'s exit reports it.\n   * The first reason sticks. Asking again kills again.\n   */\n  async terminate(reason, detail) {\n    if (this.exitMsg) return;\n    if (!this.ending) {\n      this.ending = { reason, ...detail ? { detail } : {} };\n      this.d.log?.(`ending session: ${reason}${detail ? ` (${detail})` : ""}`);\n    }\n    await this.kill();\n  }\n  async kill() {\n    this.lastKill = this.d.now();\n    await this.d.killTree().catch((e) => this.d.log?.(`kill: ${String(e)}`));\n  }\n  output(type, data) {\n    const log = type === F.stdout ? this.d.out : this.d.err;\n    const offset2 = log.append(data, (e) => {\n      if (!this.journalFailing) this.d.log?.(`journal write failed, output is not being kept: ${String(e)}`);\n      this.journalFailing = true;\n    });\n    const ends = type === F.stdout ? this.scanner.push(data) : [];\n    const c = this.client;\n    if (c) {\n      for (const frame of encodeOutput(type, offset2, data)) c.write(frame);\n    }\n    for (const end of ends) {\n      if (!this.activeRun) continue;\n      const runId = this.activeRun;\n      this.activeRun = void 0;\n      this.d.journalRun({\n        t: "end",\n        runId,\n        exitCode: end.exitCode,\n        cwd: end.cwd,\n        out: this.d.out.offset,\n        err: this.d.err.offset,\n        at: (/* @__PURE__ */ new Date()).toISOString()\n      });\n      this.ends.push({ runId, exitCode: end.exitCode, cwd: end.cwd, out: this.d.out.offset });\n      if (this.ends.length > 32) this.ends.shift();\n      c?.write(encodeFrame(F.runEnd, { runId, exitCode: end.exitCode, cwd: end.cwd }));\n    }\n    const max = this.d.maxBacklog ?? 8 * 1024 * 1024;\n    if (c && c.writableLength <= max) this.allowance = 0;\n    if (c && c.writableLength > max + this.allowance) {\n      this.d.log?.(`client ${c.writableLength} bytes behind; dropping it until it re-attaches`);\n      this.client = void 0;\n      c.destroy();\n    }\n  }\n  /** The shell exited (or closed, or never started). Finishes the session once, whichever comes first. */\n  shellExited(code, signal) {\n    if (this.shellExit) return;\n    this.shellExit = { code, signal: signal ?? null };\n    void this.finish();\n  }\n  async finish() {\n    if (!this.ending) await this.kill();\n    if (!this.closed) {\n      await new Promise((resolve2) => {\n        const t = setTimeout(resolve2, this.d.closeGraceMs ?? 1e3);\n        this.onClosed = () => {\n          clearTimeout(t);\n          resolve2();\n        };\n      });\n      this.onClosed = void 0;\n      if (!this.closed) {\n        this.d.shell.stdout?.destroy?.();\n        this.d.shell.stderr?.destroy?.();\n      }\n    }\n    if (this.exitMsg) return;\n    const exit = {\n      code: this.shellExit.code,\n      signal: this.shellExit.signal,\n      reason: this.ending?.reason ?? "exited",\n      ...this.ending?.detail ? { detail: this.ending.detail } : {}\n    };\n    this.exitMsg = exit;\n    for (const e of this.elevations.values()) {\n      e.client.write(encodeFrame(F.elevateDone, { code: null, error: "the shell ended" }));\n      e.client.end();\n    }\n    this.elevations.clear();\n    const c = this.client;\n    if (c) {\n      for (const id of this.cancels) c.write(encodeFrame(F.elevateCancel, { id }));\n      c.write(encodeFrame(F.exit, exit));\n      c.end();\n      this.client = void 0;\n    }\n    this.d.onExit(exit);\n  }\n}\nfunction write(client, frame) {\n  client.write(frame);\n  return frame.length;\n}\nfunction* replay(log, from, type) {\n  for (const { offset: offset2, data } of log.read(from)) yield* encodeOutput(type, offset2, data);\n}\nasync function sweepInstance(o) {\n  const result = { reaped: [], deadMan: [], removed: [] };\n  const contact = lastContact(o.root, o.instance);\n  const silentFor = contact === void 0 ? 0 : o.now - contact;\n  const records = listRecords(o.root, o.instance);\n  if (!records.length) return result;\n  const rows = await o.io.listProcs();\n  for (const { dir, rec } of records) {\n    if (rec.sid === o.selfSid) continue;\n    if (rec.state === "exited") {\n      const at = Date.parse(rec.exit?.at ?? rec.startedAt);\n      if (Number.isFinite(at) && o.now - at > (o.keepExitedMs ?? 24 * 36e5)) {\n        rmSync(dir, { recursive: true, force: true });\n        result.removed.push(rec.sid);\n      }\n      continue;\n    }\n    const target = { root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: o.self };\n    if (!ownerLive(rows, rec)) {\n      await killTree(o.io, target);\n      finish(dir, rec, o, "killed", "its owner process was gone");\n      result.reaped.push(rec.sid);\n    } else if (silentFor > o.deadManMs) {\n      await killTree(o.io, target);\n      if (rec.ownerPid !== o.self) o.io.kill(rec.ownerPid, "SIGKILL");\n      finish(dir, rec, o, "dead-man", `no Dispatch contact for ${Math.round(silentFor / 36e5)}h`);\n      result.deadMan.push(rec.sid);\n    }\n  }\n  return result;\n}\nfunction finish(dir, rec, o, reason, detail) {\n  writeRecord(join(dir, "session.json"), {\n    ...rec,\n    state: "exited",\n    exit: { code: null, signal: "SIGKILL", reason, detail, at: new Date(o.now).toISOString() }\n  });\n  rmSync(socketPath(o.root, o.instance, rec.sid), { force: true });\n}\nconst AGENT_VERSION = "0.3.0";\nconst NO_CWD_EXIT = 97;\nfunction bashPath() {\n  for (const p of ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]) if (existsSync(p)) return p;\n  return "bash";\n}\nfunction attachMsg(payload) {\n  const m = decodeJson(payload);\n  const r = m?.resume;\n  const ok = (n) => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;\n  if (r !== void 0 && !(ok(r.out) && ok(r.err))) throw new Error("ATTACH with a malformed resume point");\n  return { v: Number(m?.v) || 0, ...r ? { resume: { out: r.out, err: r.err } } : {} };\n}\nasync function runOwner(a) {\n  const paths = sessionPaths(a.root, a.instance, a.sid);\n  mkdirSync(paths.dir, { recursive: true, mode: 448 });\n  mkdirSync(`${a.root}/run`, { recursive: true, mode: 448 });\n  const log = (line) => process.stderr.write(`${(/* @__PURE__ */ new Date()).toISOString()} ${line}\n`);\n  const prev = readRecord(paths.record);\n  if (prev && prev.state === "running" && prev.ownerPid !== process.pid) {\n    const rows = await listProcs().catch(() => []);\n    if (sameProcess(rows, prev.ownerPid, prev.ownerStart)) {\n      log(`session ${a.sid} already has an owner (${prev.ownerPid}); exiting`);\n      process.exit(0);\n    }\n  }\n  const rec = {\n    v: 1,\n    instance: a.instance,\n    chat: a.chat,\n    sid: a.sid,\n    agentVersion: AGENT_VERSION,\n    cwd: a.cwd,\n    ownerPid: process.pid,\n    state: "starting",\n    startedAt: (/* @__PURE__ */ new Date()).toISOString()\n  };\n  const save = () => writeRecord(paths.record, rec);\n  const fail = (code, reason, detail) => {\n    rec.state = "exited";\n    rec.exit = { code, signal: null, reason, detail, at: (/* @__PURE__ */ new Date()).toISOString() };\n    try {\n      save();\n    } catch {\n    }\n    log(`not started: ${detail}`);\n    process.exit(code);\n  };\n  try {\n    save();\n    let isDir2 = false;\n    try {\n      isDir2 = statSync(a.cwd).isDirectory();\n    } catch {\n    }\n    if (!isDir2) fail(NO_CWD_EXIT, "start-failed", "no-cwd");\n    await serve(a, paths, rec, save, log);\n  } catch (e) {\n    fail(1, "start-failed", e instanceof Error ? e.message : String(e));\n  }\n}\nasync function serve(a, paths, rec, save, log) {\n  const login = await captureLoginEnv({ shell: loginShell(process.env, process.platform), node: process.execPath }).catch(\n    (err2) => {\n      log(`login environment not read (${String(err2)}); using the fallback PATH`);\n      return void 0;\n    }\n  );\n  let elevate;\n  const script = process.argv[1];\n  if (script) {\n    const binDir = posix.join(posix.dirname(script), "bin");\n    try {\n      ensureShims(binDir, process.execPath, script);\n      elevate = { binDir, socket: paths.socket };\n    } catch (e) {\n      log(`elevation shims not written (${String(e)}); sudo in this shell is the machine\'s own`);\n    }\n  }\n  const env = shellEnv({ agentEnv: process.env, ...login ? { login } : {}, extra: a.extraEnv, clt: hasCommandLineTools(), ...elevate ? { elevate } : {} });\n  const shell = spawn(bashPath(), ["--noprofile", "--norc"], { cwd: a.cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });\n  if (!shell.pid) {\n    const err2 = await new Promise((r) => shell.once("error", r));\n    throw new Error(`bash did not start: ${err2.message}`);\n  }\n  shell.stdin.on("error", () => {\n  });\n  rec.shellPid = shell.pid;\n  rec.state = "running";\n  const rows = await listProcs().catch(() => []);\n  rec.ownerStart = rows.find((r) => r.pid === process.pid)?.start;\n  rec.shellStart = rows.find((r) => r.pid === shell.pid)?.start;\n  save();\n  log(`session ${a.sid} for chat ${a.chat}: bash ${shell.pid} in ${a.cwd}`);\n  const out2 = StreamLog.open(paths.dir, "out");\n  const err = StreamLog.open(paths.dir, "err");\n  const target = () => ({ root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: process.pid });\n  let lastTouch = 0;\n  const contact = () => {\n    const now = Date.now();\n    if (now - lastTouch < 3e4) return;\n    lastTouch = now;\n    try {\n      touchContact(a.root, a.instance);\n    } catch {\n    }\n  };\n  contact();\n  const timers = [];\n  const server = createServer();\n  const session = new Session({\n    sid: a.sid,\n    agentVersion: AGENT_VERSION,\n    cwd: a.cwd,\n    shell,\n    out: out2,\n    err,\n    journalRun: (e) => {\n      try {\n        appendRun(paths.runs, e);\n      } catch (x) {\n        log(`runs journal: ${String(x)}`);\n      }\n    },\n    now: () => performance.now(),\n    heartbeatMs: a.heartbeatMs,\n    killTree: async () => {\n      await killTree(hostKillIo, target());\n    },\n    signal: (name) => signalTree(hostKillIo, target(), `SIG${name}`),\n    onContact: contact,\n    log,\n    onExit: (exit) => {\n      rec.state = "exited";\n      rec.exit = { ...exit, at: (/* @__PURE__ */ new Date()).toISOString() };\n      try {\n        save();\n      } catch (x) {\n        log(`record: ${String(x)}`);\n      }\n      log(`session over: ${exit.reason} (code ${exit.code ?? "none"}${exit.detail ? `, ${exit.detail}` : ""})`);\n      for (const t of timers) clearInterval(t);\n      server.close();\n      rmSync(paths.socket, { force: true });\n      out2.close();\n      err.close();\n      setTimeout(() => process.exit(0), 500).unref();\n    }\n  });\n  server.on("connection", (sock) => {\n    const client = sock;\n    const dec = new FrameDecoder();\n    let kind = "new";\n    sock.on("data", (chunk) => {\n      try {\n        for (const f of dec.push(chunk)) {\n          if (kind === "new") {\n            if (f.type === F.elevate) {\n              kind = "elevate";\n              let msg;\n              try {\n                msg = checkElevate(decodeJson(f.payload));\n              } catch (e) {\n                sock.end(encodeFrame(F.elevateDone, { code: null, error: e instanceof Error ? e.message : String(e) }));\n                return;\n              }\n              const id = session.elevate(client, msg);\n              if (id) log(`elevation ${id} asked: ${JSON.stringify(msg.argv).slice(0, 300)}`);\n              continue;\n            }\n            if (f.type !== F.attach) throw new Error(`first frame 0x${f.type.toString(16)} is not ATTACH`);\n            kind = "relay";\n            contact();\n            session.attach(client, attachMsg(f.payload));\n          } else if (kind === "elevate") {\n            continue;\n          } else if (!session.handle(client, f)) {\n            throw new Error("the client sent a frame it could not have meant");\n          }\n        }\n      } catch (e) {\n        log(`dropping a client: ${String(e)}`);\n        if (kind === "elevate") session.elevateGone(client);\n        else session.detachClient(client);\n        sock.destroy();\n      }\n    });\n    sock.on("close", () => kind === "elevate" ? session.elevateGone(client) : session.detachClient(client));\n    sock.on("error", () => {\n    });\n  });\n  rmSync(paths.socket, { force: true });\n  await new Promise((resolve2, reject) => {\n    server.once("error", reject);\n    server.listen(paths.socket, () => resolve2());\n  });\n  chmodSync(paths.socket, 384);\n  timers.push(setInterval(() => session.tick(), 1e3));\n  timers.push(\n    setInterval(() => {\n      if (!rec.shellPid || session.exited) return;\n      void (async () => {\n        const now = await listProcs();\n        const kept = (rec.tracked ?? []).filter((t) => sameProcess(now, t.pid, t.start));\n        const known = new Set(kept.map((t) => `${t.pid}@${t.start}`));\n        const fresh = escapees(now, rec.shellPid, await sessionMembers(rec.shellPid)).filter((t) => !known.has(`${t.pid}@${t.start}`));\n        if (!fresh.length && kept.length === (rec.tracked ?? []).length) return;\n        rec.tracked = [...kept, ...fresh].slice(-256);\n        if (!session.exited) save();\n      })().catch(() => {\n      });\n    }, 5e3)\n  );\n  timers.push(\n    setInterval(() => {\n      void (async () => {\n        const r = await sweepInstance({\n          root: a.root,\n          instance: a.instance,\n          now: Date.now(),\n          deadManMs: a.deadManMs,\n          self: process.pid,\n          selfSid: a.sid,\n          io: hostKillIo\n        });\n        if (r.reaped.length || r.deadMan.length) log(`sweep: reaped ${r.reaped.join(",") || "none"}; dead-man ${r.deadMan.join(",") || "none"}`);\n        const last = lastContact(a.root, a.instance);\n        if (last !== void 0 && Date.now() - last > a.deadManMs) {\n          await session.terminate("dead-man", `no Dispatch contact for ${Math.round((Date.now() - last) / 36e5)}h`);\n        }\n      })().catch((e) => log(`sweep: ${String(e)}`));\n    }, 6e4)\n  );\n  process.on("SIGHUP", () => {\n  });\n  process.on("SIGTERM", () => void session.terminate("killed", "SIGTERM"));\n  for (const t of timers) t.unref?.();\n}\nfunction trashDir(root) {\n  return join(root, "trash");\n}\nconst TRASH_GRACE_MS = 10 * 6e4;\nfunction discard(root, dir, label, now = Date.now()) {\n  if (!existsSync(dir)) return false;\n  const trash = trashDir(root);\n  mkdirSync(trash, { recursive: true, mode: 448 });\n  const to = join(trash, `${label}.${now.toString(36)}.${process.pid}`);\n  renameSync(dir, to);\n  const child = spawn("/bin/sh", ["-c", \'chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"\', "sh", to], {\n    detached: true,\n    stdio: "ignore"\n  });\n  child.on("error", () => {\n  });\n  child.unref();\n  return true;\n}\nasync function forgetChat(o) {\n  const chat = assertId("chat", o.chat);\n  const { reposDir, chatsDir } = instanceLayout(o.root, o.instance);\n  const killed = [];\n  for (const { dir, rec } of listRecords(o.root, o.instance)) {\n    if (rec.chat !== chat || rec.state === "exited") continue;\n    await o.kill(join(dir, "session.json"), rec);\n    killed.push(rec.sid);\n  }\n  let sessions = 0;\n  for (const { dir, rec } of listRecords(o.root, o.instance)) {\n    if (rec.chat !== chat || readRecord(join(dir, "session.json"))?.state !== "exited") continue;\n    rmSync(dir, { recursive: true, force: true });\n    sessions++;\n  }\n  let refs = 0;\n  const errors = [];\n  for (const repo of repos(reposDir)) {\n    if (!existsSync(join(repo, "HEAD")) || !existsSync(join(repo, "objects"))) continue;\n    const names = [`refs/dispatch/chats/${chat}`, ...keepRefs(chat)];\n    const list = await git(["--git-dir", repo, "for-each-ref", "--format=%(refname)", ...names]);\n    if (list.code !== 0) {\n      errors.push(`${basename(repo)}: ${gitError(list)}`);\n      continue;\n    }\n    const had = list.stdout.trim();\n    if (!had) continue;\n    let dropped = true;\n    for (const ref of had.split("\\n")) {\n      const d = await git(["--git-dir", repo, "update-ref", "-d", ref]);\n      if (d.code !== 0) {\n        errors.push(`${basename(repo)} ${ref}: ${gitError(d)}`);\n        dropped = false;\n      }\n    }\n    if (dropped) refs++;\n  }\n  const removed = discard(o.root, join(chatsDir, chat), `${o.instance}.chat-${chat}`);\n  return { killed, sessions, refs, removed, ...errors.length ? { errors } : {} };\n}\nfunction gitError(r) {\n  const line = r.stderr.split("\\n").map((l) => l.trim()).find(Boolean);\n  return line ?? (r.code === -1 ? "git could not be run" : `git exited ${r.code}`);\n}\nasync function forgetInstance(o) {\n  const killed = [];\n  for (const { dir, rec } of listRecords(o.root, o.instance)) {\n    if (rec.state === "exited") continue;\n    await o.kill(join(dir, "session.json"), rec);\n    killed.push(rec.sid);\n  }\n  const removed = discard(o.root, instanceLayout(o.root, o.instance).dir, `${o.instance}.instance`);\n  return { killed, sessions: 0, refs: 0, removed };\n}\nfunction listChats(root, instance) {\n  const { chatsDir } = instanceLayout(root, instance);\n  const out2 = [];\n  for (const chat of entries(chatsDir)) {\n    try {\n      assertId("chat", chat);\n      out2.push({ chat, mtimeMs: statSync(join(chatsDir, chat)).mtimeMs });\n    } catch {\n    }\n  }\n  return out2;\n}\nfunction listInstances(root) {\n  const out2 = [];\n  for (const id of entries(root)) {\n    let contactAt;\n    try {\n      assertId("instance", id);\n      contactAt = statSync(instanceLayout(root, id).contactFile).mtimeMs;\n    } catch {\n      continue;\n    }\n    const running = listRecords(root, id).filter(({ rec }) => rec.state !== "exited").length;\n    out2.push({ id, contactAt, running });\n  }\n  return out2;\n}\nasync function collectGarbage(o) {\n  const result = { trash: 0, reposRemoved: [], repos: 0, checkouts: 0, errors: [] };\n  const note = (what, err) => result.errors.push(`${what}: ${err instanceof Error ? err.message : String(err)}`);\n  const trash = trashDir(o.root);\n  for (const name of entries(trash)) {\n    const at = parseInt(name.split(".").at(-2) ?? "", 36);\n    if (Number.isFinite(at) && o.now - at < TRASH_GRACE_MS) continue;\n    try {\n      await sh(\'chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"\', join(trash, name));\n      result.trash++;\n    } catch (err) {\n      note(`emptying ${name} from the trash`, err);\n    }\n  }\n  const { reposDir, chatsDir } = instanceLayout(o.root, o.instance);\n  const users = /* @__PURE__ */ new Map();\n  for (const chat of entries(chatsDir)) {\n    for (const name of entries(join(chatsDir, chat))) {\n      const work = join(chatsDir, chat, name);\n      const objects = join(work, ".git", "objects");\n      let alt;\n      try {\n        alt = readFileSync(join(objects, "info", "alternates"), "utf8");\n      } catch {\n        continue;\n      }\n      for (const line of alt.split("\\n").map((l) => l.trim()).filter(Boolean)) {\n        const borrowed = resolve(objects, line);\n        users.set(borrowed, [...users.get(borrowed) ?? [], { chat, work }]);\n      }\n    }\n  }\n  for (const repo of repos(reposDir)) {\n    const name = repo.slice(reposDir.length + 1);\n    const using = users.get(resolve(repo, "objects")) ?? [];\n    if (!using.length) {\n      if (o.now - lastTouched(repo) > (o.repoIdleMs ?? 7 * 864e5)) {\n        try {\n          discard(o.root, repo, `${o.instance}.repo-${name}`, o.now);\n          result.reposRemoved.push(name);\n        } catch (err) {\n          note(`removing ${name}`, err);\n        }\n      }\n      continue;\n    }\n    try {\n      await pinCheckouts(repo, using);\n      await collect(["--git-dir", repo], o.git);\n      result.repos++;\n    } catch (err) {\n      note(`collecting ${name}`, err);\n    }\n  }\n  for (const chat of entries(chatsDir)) {\n    for (const name of entries(join(chatsDir, chat))) {\n      const work = join(chatsDir, chat, name);\n      if (!existsSync(join(work, ".git"))) continue;\n      try {\n        await collect(["-C", work], o.git);\n        result.checkouts++;\n      } catch (err) {\n        note(`collecting chat ${chat}\'s ${name}`, err);\n      }\n    }\n  }\n  return result;\n}\nasync function pinCheckouts(repo, using) {\n  const keep = /* @__PURE__ */ new Set();\n  for (const { chat, work } of using) {\n    for (const [ref, rev] of [\n      [`refs/dispatch/keep/${chat}-head`, "HEAD"],\n      [`refs/dispatch/keep/${chat}-base`, "refs/dispatch/base"]\n    ]) {\n      const sha = (await git(["-C", work, "rev-parse", "-q", "--verify", `${rev}^{commit}`])).stdout.trim();\n      if (!/^[0-9a-f]{40,64}$/.test(sha)) continue;\n      if ((await git(["--git-dir", repo, "cat-file", "-e", `${sha}^{commit}`])).code !== 0) continue;\n      const r = await git(["--git-dir", repo, "update-ref", ref, sha]);\n      if (r.code !== 0) throw new Error(`pinning ${chat}\'s ${rev}: ${r.stderr.trim()}`);\n      keep.add(ref);\n    }\n  }\n  const pinned = (await git(["--git-dir", repo, "for-each-ref", "--format=%(refname)", "refs/dispatch/keep/"])).stdout;\n  for (const ref of pinned.split("\\n").filter(Boolean)) {\n    if (!keep.has(ref)) await git(["--git-dir", repo, "update-ref", "-d", ref]);\n  }\n}\nasync function collect(where, t = {}) {\n  const config = [\n    `gc.auto=${t.auto ?? 1e3}`,\n    `gc.autoPackLimit=${t.autoPackLimit ?? 20}`,\n    // In the foreground: the command\'s result means it is done, and nothing\n    // of ours runs on after the SSH channel that started it.\n    "gc.autoDetach=false",\n    ...t.pruneExpire ? [`gc.pruneExpire=${t.pruneExpire}`] : []\n  ].flatMap((c) => ["-c", c]);\n  const r = await git([...where, ...config, "gc", ...t.force ? [] : ["--auto"], "--quiet"], 10 * 6e4);\n  if (r.code !== 0) throw new Error(r.stderr.trim() || `git gc exited ${r.code}`);\n}\nfunction keepRefs(chat) {\n  return [`refs/dispatch/keep/${chat}-head`, `refs/dispatch/keep/${chat}-base`];\n}\nfunction repos(reposDir) {\n  return entries(reposDir).filter((n) => n.endsWith(".git")).map((n) => join(reposDir, n));\n}\nfunction lastTouched(repo) {\n  let latest = 0;\n  for (const p of ["", "objects", "objects/pack", "refs", "refs/dispatch", "refs/dispatch/chats", "packed-refs"]) {\n    try {\n      latest = Math.max(latest, statSync(join(repo, p)).mtimeMs);\n    } catch {\n    }\n  }\n  return latest;\n}\nfunction entries(dir) {\n  try {\n    return readdirSync(dir);\n  } catch {\n    return [];\n  }\n}\nfunction git(args, timeoutMs = 6e4) {\n  return new Promise((resolveRun) => {\n    execFile("git", args, { env: gitEnv(), timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {\n      const code = err ? typeof err.code === "number" ? err.code : -1 : 0;\n      resolveRun({ code, stdout: String(stdout), stderr: String(stderr) });\n    });\n  });\n}\nfunction sh(script, arg) {\n  return new Promise((resolveRun, reject) => {\n    execFile("/bin/sh", ["-c", script, "sh", arg], { timeout: 10 * 6e4 }, (err) => err ? reject(err) : resolveRun());\n  });\n}\nfunction out(file, args, env, timeoutMs = 1e4) {\n  return new Promise((resolve2) => {\n    execFile(file, args, { env, timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {\n      const code = err ? typeof err.code === "number" ? err.code : -1 : 0;\n      resolve2({ code, stdout: String(stdout).trim(), stderr: String(stderr).trim() });\n    });\n  });\n}\nasync function firstLine(file, args, env) {\n  const r = await out(file, args, env);\n  return r.code === 0 && r.stdout ? r.stdout.split("\\n")[0].trim() : null;\n}\nfunction which(name, path) {\n  for (const dir of (path ?? "").split(":")) {\n    if (!dir) continue;\n    const p = posix.join(dir, name);\n    try {\n      if (!statSync(p).isFile()) continue;\n      accessSync(p, constants.X_OK);\n      return p;\n    } catch {\n    }\n  }\n  return null;\n}\nasync function developerDir(env) {\n  const r = await out("xcode-select", ["-p"], env);\n  return r.code === 0 && r.stdout ? r.stdout.split("\\n")[0].trim() : null;\n}\nfunction wouldPrompt(path, env, mac) {\n  return !!mac && mac.developerDir === null && !env.DEVELOPER_DIR && !!path?.startsWith("/usr/bin/");\n}\nasync function checkGit(env, mac) {\n  const path = which("git", env.PATH);\n  const dev = mac ? { developerDir: env.DEVELOPER_DIR || mac.developerDir } : {};\n  if (!path) return { path: null, ...dev, exitCode: null, version: null };\n  if (wouldPrompt(path, env, mac)) {\n    return { path, ...dev, exitCode: null, version: null, error: "no developer tools; install the Command Line Tools (xcode-select --install)" };\n  }\n  const r = await out(path, ["--version"], env);\n  const version = r.code === 0 && r.stdout ? r.stdout.split("\\n")[0].trim() : null;\n  const error = version ? void 0 : (r.stderr || r.stdout).split("\\n")[0].trim() || void 0;\n  return { path, ...dev, exitCode: r.code, version, ...error ? { error } : {} };\n}\nasync function checkBrew(env, mac, xcrun = "/usr/bin/xcrun") {\n  const path = which("brew", env.PATH);\n  if (!path) return void 0;\n  const [v, p] = await Promise.all([out(path, ["--version"], env), out(path, ["--prefix"], env)]);\n  const version = v.code === 0 && v.stdout ? v.stdout.split("\\n")[0].trim() : null;\n  const said = p.code === 0 ? p.stdout.split("\\n")[0].trim() : "";\n  const prefix = said.startsWith("/") && isDir(said) ? said : posix.dirname(posix.dirname(path));\n  const writable = brewWritable(prefix);\n  let blocked;\n  let cltTooOld;\n  if (mac?.developerDir) {\n    const doctor = out(path, ["doctor", "check_clt_minimum_version"], env);\n    const r = await out(xcrun, ["--find", "clang"], { HOME: env.HOME, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });\n    if (r.code !== 0 && /license/i.test(`${r.stderr}\n${r.stdout}`)) {\n      blocked = `Xcode\'s license isn\'t accepted (exit ${r.code}), and Homebrew ignores DEVELOPER_DIR, so it uses xcode-select\'s ${mac.developerDir}`;\n    }\n    const d = await doctor;\n    if (!blocked) cltTooOld = cltWanted(d.code, `${d.stdout}\n${d.stderr}`);\n  }\n  return { path, version, ...blocked ? { blocked } : {}, writable, ...cltTooOld ? { cltTooOld } : {} };\n}\nfunction cltWanted(code, text) {\n  if (code !== 1 || !/Command Line Tools/.test(text) || /No check available/i.test(text)) return void 0;\n  return text.match(/Command Line Tools for Xcode [\\d.]*\\d/)?.[0] ?? "newer Command Line Tools";\n}\nfunction isDir(p) {\n  try {\n    return statSync(p).isDirectory();\n  } catch {\n    return false;\n  }\n}\nfunction brewWritable(prefix) {\n  const cellar = posix.join(prefix, "Cellar");\n  const bin = posix.join(prefix, "bin");\n  return [isDir(cellar) ? cellar : prefix, ...isDir(bin) ? [bin] : []].every((d) => {\n    try {\n      accessSync(d, constants.W_OK);\n      return true;\n    } catch {\n      return false;\n    }\n  });\n}\nfunction osRelease() {\n  try {\n    const kv = Object.fromEntries(\n      readFileSync("/etc/os-release", "utf8").split("\\n").map((l) => l.match(/^([A-Z_]+)="?(.*?)"?$/)).filter((m) => Boolean(m)).map((m) => [m[1], m[2]])\n    );\n    return { name: kv.NAME, version: kv.VERSION_ID };\n  } catch {\n    return {};\n  }\n}\nasync function probe(root) {\n  let loginEnvError;\n  const login = await captureLoginEnv({ shell: loginShell(process.env, process.platform), node: process.execPath }).catch(\n    (e) => {\n      loginEnvError = e instanceof Error ? e.message : String(e);\n      return void 0;\n    }\n  );\n  const clt = hasCommandLineTools();\n  const env = shellEnv({ agentEnv: process.env, ...login ? { login } : {}, clt });\n  const darwin = process.platform === "darwin";\n  const forGit = gitEnv(process.env, clt);\n  const mac = darwin ? { developerDir: await developerDir(gitEnv(process.env, false)) } : void 0;\n  const xenv = login?.DEVELOPER_DIR || !existsSync(XCODE_DEVELOPER_DIR) ? env : { ...env, DEVELOPER_DIR: XCODE_DEVELOPER_DIR };\n  const xcode = darwin && !wouldPrompt(which("xcodebuild", xenv.PATH), xenv, mac);\n  const shellGit = wouldPrompt(which("git", env.PATH), env, mac) ? Promise.resolve(null) : firstLine("git", ["--version"], env);\n  const [name, version, build, consoleUser, git2, node, pnpm, xcodebuild, firstLaunch, syncGit, brew] = await Promise.all([\n    darwin ? firstLine("sw_vers", ["-productName"], env) : Promise.resolve(null),\n    darwin ? firstLine("sw_vers", ["-productVersion"], env) : Promise.resolve(null),\n    darwin ? firstLine("sw_vers", ["-buildVersion"], env) : Promise.resolve(null),\n    darwin ? firstLine("stat", ["-f", "%Su", "/dev/console"], env) : Promise.resolve(null),\n    shellGit,\n    firstLine("node", ["--version"], env),\n    firstLine("pnpm", ["--version"], env),\n    xcode ? firstLine("xcodebuild", ["-version"], xenv) : Promise.resolve(null),\n    xcode ? out("xcodebuild", ["-checkFirstLaunchStatus"], xenv) : Promise.resolve(null),\n    checkGit(forGit, mac),\n    checkBrew(env, mac)\n  ]);\n  let freeDiskBytes = null;\n  try {\n    const s = statfsSync(homedir());\n    freeDiskBytes = Number(s.bavail) * Number(s.bsize);\n  } catch {\n  }\n  return {\n    agentVersion: AGENT_VERSION,\n    node: process.version,\n    platform: process.platform,\n    arch: process.arch,\n    os: darwin ? { ...name ? { name } : {}, ...version ? { version } : {}, ...build ? { build } : {} } : osRelease(),\n    kernel: release(),\n    user: userInfo().username,\n    home: homedir(),\n    consoleUser,\n    freeDiskBytes,\n    path: env.PATH ?? "",\n    ...loginEnvError ? { loginEnvError } : {},\n    tools: {\n      git: git2,\n      node,\n      pnpm,\n      xcodebuild,\n      xcodeFirstLaunchDone: firstLaunch ? firstLaunch.code === 0 : null\n    },\n    syncGit,\n    ...brew ? { brew } : {},\n    ...root ? { instances: listInstances(root) } : {}\n  };\n}\nconst USAGE = "usage: dispatch-elevate <command> [args...]\\n  Runs the command as root on this machine once the user approves it in Dispatch.\\n";\nfunction runElevate(args, io) {\n  const argv = args[0] === "--" ? args.slice(1) : [...args];\n  const say = (line) => io.stderr.write(`dispatch-elevate: ${line}\n`);\n  if (!argv.length) {\n    io.stderr.write(USAGE);\n    return Promise.resolve(2);\n  }\n  if (argv.length === 1 && (argv[0] === "-h" || argv[0] === "--help")) {\n    io.stdout.write(USAGE);\n    return Promise.resolve(0);\n  }\n  const socket = io.env[ELEVATE_SOCKET_ENV];\n  if (!socket) {\n    say(`not in a Dispatch chat shell (${ELEVATE_SOCKET_ENV} is not set), so there is nobody to ask`);\n    return Promise.resolve(1);\n  }\n  let msg;\n  try {\n    msg = checkElevate({ argv, cwd: io.cwd });\n  } catch (e) {\n    say(e instanceof Error ? e.message : String(e));\n    return Promise.resolve(2);\n  }\n  return new Promise((resolve2) => {\n    let settled = false;\n    let off = () => {\n    };\n    const finish2 = (code) => {\n      if (settled) return;\n      settled = true;\n      off();\n      sock.destroy();\n      resolve2(code);\n    };\n    const sock = (io.connect ?? ((p) => connect(p)))(socket);\n    const dec = new FrameDecoder();\n    sock.on("connect", () => sock.write(encodeFrame(F.elevate, msg)));\n    sock.on("data", (chunk) => {\n      let frames;\n      try {\n        frames = dec.push(chunk);\n      } catch (e) {\n        say(`garbled answer from the session (${String(e)})`);\n        return finish2(1);\n      }\n      for (const f of frames) {\n        if (f.type === F.elevateData && f.payload.length >= 1) {\n          (f.payload.readUInt8(0) === 2 ? io.stderr : io.stdout).write(f.payload.subarray(1));\n        } else if (f.type === F.elevateDone) {\n          const end = decodeJson(f.payload) ?? { code: null };\n          if (end.error) say(end.error);\n          return finish2(typeof end.code === "number" ? end.code : end.signal ? 128 + signalNumber(end.signal) : 1);\n        }\n      }\n    });\n    sock.on("error", (e) => {\n      say(`can\'t reach this shell\'s session (${e.message})`);\n      finish2(1);\n    });\n    sock.on("close", () => {\n      if (settled) return;\n      say("the session went away before an answer came");\n      finish2(1);\n    });\n    off = io.onSignal?.((signal) => {\n      say(`interrupted (${signal}); the request is withdrawn`);\n      finish2(128 + signalNumber(signal));\n    }) ?? (() => {\n    });\n  });\n}\nfunction signalNumber(name) {\n  const n = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 }[name.startsWith("SIG") ? name : `SIG${name}`];\n  return n ?? 1;\n}\nfunction processSignals(fn) {\n  const sigs = ["SIGINT", "SIGTERM", "SIGHUP"];\n  for (const s of sigs) process.on(s, fn);\n  return () => {\n    for (const s of sigs) process.off(s, fn);\n  };\n}\nconst STARTING_STALE_MS = 3e4;\nasync function runRelay(a) {\n  const paths = sessionPaths(a.root, a.instance, a.sid);\n  touchContact(a.root, a.instance);\n  const send = (type, payload) => a.output.write(encodeFrame(type, payload));\n  const error = (code, message) => {\n    send(F.error, { code, message });\n    return code === "no-cwd" ? NO_CWD_EXIT : 1;\n  };\n  let rec = readRecord(paths.record);\n  if (rec?.state === "exited") return replayExited(a, rec);\n  let sock = await tryConnect(paths.socket);\n  if (!sock) {\n    const rows = await listProcs().catch(() => []);\n    if (rec) {\n      const starting = rec.state === "starting" && Date.now() - Date.parse(rec.startedAt) < STARTING_STALE_MS;\n      if (starting || ownerLive(rows, rec)) {\n        sock = await waitForSocket(paths.socket, paths.record, 2e4);\n      } else {\n        return error("gone", `session ${a.sid} is no longer on this host (its owner has exited)`);\n      }\n    } else if (a.resume) {\n      return error("gone", `session ${a.sid} is not on this host`);\n    } else {\n      try {\n        if (!statSync(a.cwd).isDirectory()) return error("no-cwd", `${a.cwd} is not a directory on this host`);\n      } catch {\n        return error("no-cwd", `${a.cwd} does not exist on this host`);\n      }\n      try {\n        decodeEnvArg(a.envB64);\n      } catch (e) {\n        return error("bad-args", e instanceof Error ? e.message : String(e));\n      }\n      const won = claimRecord(paths.record, {\n        v: 1,\n        instance: a.instance,\n        chat: a.chat,\n        sid: a.sid,\n        agentVersion: AGENT_VERSION,\n        cwd: a.cwd,\n        ownerPid: 0,\n        state: "starting",\n        startedAt: (/* @__PURE__ */ new Date()).toISOString()\n      });\n      if (won) startOwner(a, paths.ownerLog, paths.dir);\n      sock = await waitForSocket(paths.socket, paths.record, 2e4);\n    }\n  }\n  if (!sock) {\n    rec = readRecord(paths.record);\n    if (rec?.state === "exited") {\n      if (rec.exit?.detail === "no-cwd") return error("no-cwd", `${a.cwd} does not exist on this host`);\n      if (rec.exit?.reason === "start-failed") return error("start", `the shell did not start: ${rec.exit.detail ?? "unknown"}`);\n      return replayExited(a, rec);\n    }\n    return error("start", `the session\'s owner did not come up (see ${paths.ownerLog})`);\n  }\n  return pipe(a, sock);\n}\nfunction startOwner(a, ownerLog, dir) {\n  mkdirSync(dir, { recursive: true, mode: 448 });\n  const fd = openSync(ownerLog, "a", 384);\n  const args = [\n    a.script,\n    "serve",\n    "--root",\n    a.root,\n    "--instance",\n    a.instance,\n    "--chat",\n    a.chat,\n    "--sid",\n    a.sid,\n    "--cwd",\n    a.cwd,\n    "--heartbeat-ms",\n    String(a.heartbeatMs),\n    "--dead-man-hours",\n    String(a.deadManHours),\n    ...a.envB64 ? ["--env", a.envB64] : []\n  ];\n  spawn(process.execPath, args, { detached: true, stdio: ["ignore", fd, fd], cwd: dir }).unref();\n}\nfunction tryConnect(path) {\n  return new Promise((resolve2) => {\n    const s = connect(path);\n    s.once("connect", () => {\n      s.removeAllListeners("error");\n      resolve2(s);\n    });\n    s.once("error", () => resolve2(void 0));\n  });\n}\nasync function waitForSocket(path, record, ms) {\n  const until = Date.now() + ms;\n  while (Date.now() < until) {\n    const s = await tryConnect(path);\n    if (s) return s;\n    if (readRecord(record)?.state === "exited") return void 0;\n    await new Promise((r) => setTimeout(r, 50));\n  }\n  return void 0;\n}\nfunction pipe(a, sock) {\n  return new Promise((resolve2) => {\n    let done = false;\n    const finish2 = () => {\n      if (done) return;\n      done = true;\n      sock.destroy();\n      resolve2(0);\n    };\n    const hangUp = () => {\n      sock.end();\n      setTimeout(finish2, 2e3).unref();\n    };\n    sock.write(encodeFrame(F.attach, { v: PROTOCOL_VERSION, ...a.resume ? { resume: a.resume } : {} }));\n    a.input.on("data", (c) => {\n      if (!sock.write(c)) {\n        a.input.pause();\n        sock.once("drain", () => a.input.resume());\n      }\n    });\n    a.input.on("end", hangUp);\n    a.input.on("error", hangUp);\n    sock.on("data", (c) => {\n      if (!a.output.write(c)) {\n        sock.pause();\n        a.output.once("drain", () => sock.resume());\n      }\n    });\n    sock.on("close", finish2);\n    sock.on("error", finish2);\n    a.output.on("error", finish2);\n  });\n}\nfunction replayExited(a, rec) {\n  const paths = sessionPaths(a.root, a.instance, a.sid);\n  const out2 = StreamLog.open(paths.dir, "out");\n  const err = StreamLog.open(paths.dir, "err");\n  const from = a.resume ?? { out: 0, err: 0 };\n  const gap = {};\n  if (out2.start > from.out) gap.out = out2.start;\n  if (err.start > from.err) gap.err = err.start;\n  const ready = {\n    v: PROTOCOL_VERSION,\n    sid: rec.sid,\n    pid: rec.shellPid ?? 0,\n    agentVersion: rec.agentVersion,\n    cwd: rec.cwd,\n    out: out2.offset,\n    err: err.offset,\n    resumed: true,\n    ...gap.out !== void 0 || gap.err !== void 0 ? { gap } : {}\n  };\n  a.output.write(encodeFrame(F.ready, ready));\n  for (const f of replay(out2, from.out, F.stdout)) a.output.write(f);\n  for (const f of replay(err, from.err, F.stderr)) a.output.write(f);\n  for (const e of readRuns(paths.runs)) {\n    if (e.t === "end" && e.out > from.out) a.output.write(encodeFrame(F.runEnd, { runId: e.runId, exitCode: e.exitCode, cwd: e.cwd }));\n  }\n  const exit = {\n    code: rec.exit?.code ?? null,\n    signal: rec.exit?.signal ?? null,\n    reason: rec.exit?.reason ?? "exited",\n    ...rec.exit?.detail ? { detail: rec.exit.detail } : {}\n  };\n  a.output.write(encodeFrame(F.exit, exit));\n  return 0;\n}\nfunction parseArgs(argv) {\n  const [cmd = "", ...rest] = argv;\n  const opts = {};\n  const flags = /* @__PURE__ */ new Set();\n  for (let i = 0; i < rest.length; i++) {\n    const a = rest[i];\n    if (!a.startsWith("--")) throw new UsageError(`unexpected argument ${JSON.stringify(a)}`);\n    const key = a.slice(2);\n    const next = rest[i + 1];\n    if (next === void 0 || next.startsWith("--")) flags.add(key);\n    else {\n      opts[key] = next;\n      i++;\n    }\n  }\n  return { cmd, opts, flags };\n}\nclass UsageError extends Error {\n}\nconst DEFAULT_HEARTBEAT_MS = 6e4;\nconst DEFAULT_DEAD_MAN_HOURS = 12;\nfunction need(opts, key) {\n  const v = opts[key];\n  if (v === void 0 || v === "") throw new UsageError(`--${key} is required`);\n  return v;\n}\nfunction num(opts, key, dflt) {\n  const v = opts[key];\n  if (v === void 0) return dflt;\n  const n = Number(v);\n  if (!Number.isFinite(n) || n < 0) throw new UsageError(`--${key} must be a non-negative number`);\n  return n;\n}\nfunction offset(opts, key) {\n  const n = num(opts, key, 0);\n  if (!Number.isSafeInteger(n)) throw new UsageError(`--${key} must be a whole number of bytes`);\n  return n;\n}\nfunction print(value) {\n  process.stdout.write(JSON.stringify(value) + "\\n");\n}\nasync function main(argv) {\n  if (argv[0] === "elevate") {\n    return runElevate(argv.slice(1), {\n      env: process.env,\n      cwd: process.cwd(),\n      stdout: process.stdout,\n      stderr: process.stderr,\n      onSignal: processSignals\n    });\n  }\n  const { cmd, opts, flags } = parseArgs(argv);\n  const root = opts.root ?? process.env.DISPATCH_HOST_ROOT ?? rootDir(homedir());\n  const instance = () => assertId("instance", need(opts, "instance"));\n  switch (cmd) {\n    case "version":\n      process.stdout.write(`${AGENT_VERSION}\n`);\n      return 0;\n    case "session": {\n      const resumeOut = opts["resume-out"];\n      const resumeErr = opts["resume-err"];\n      return runRelay({\n        root,\n        instance: instance(),\n        chat: assertId("chat", need(opts, "chat")),\n        sid: assertId("sid", need(opts, "sid")),\n        cwd: need(opts, "cwd"),\n        ...opts.env ? { envB64: opts.env } : {},\n        ...resumeOut !== void 0 || resumeErr !== void 0 ? { resume: { out: offset(opts, "resume-out"), err: offset(opts, "resume-err") } } : {},\n        heartbeatMs: num(opts, "heartbeat-ms", DEFAULT_HEARTBEAT_MS),\n        deadManHours: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS),\n        script: fileURLToPath(import.meta.url),\n        input: process.stdin,\n        output: process.stdout\n      });\n    }\n    case "serve":\n      await runOwner({\n        root,\n        instance: instance(),\n        chat: assertId("chat", need(opts, "chat")),\n        sid: assertId("sid", need(opts, "sid")),\n        cwd: need(opts, "cwd"),\n        extraEnv: decodeEnvArg(opts.env),\n        heartbeatMs: num(opts, "heartbeat-ms", DEFAULT_HEARTBEAT_MS),\n        deadManMs: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS) * 36e5\n      });\n      return -1;\n    // keep running: the owner exits on its own\n    case "hello": {\n      const id = instance();\n      touchContact(root, id);\n      print({ agentVersion: AGENT_VERSION, protocol: PROTOCOL_VERSION, node: process.version, platform: process.platform, arch: process.arch, pid: process.pid });\n      return 0;\n    }\n    case "probe":\n      print(await probe(root));\n      return 0;\n    case "list": {\n      const id = instance();\n      touchContact(root, id);\n      const rows = await listProcs().catch(() => []);\n      print(\n        listRecords(root, id).map(({ rec }) => ({\n          sid: rec.sid,\n          chat: rec.chat,\n          state: rec.state,\n          ownerAlive: ownerLive(rows, rec),\n          shellPid: rec.shellPid ?? null,\n          cwd: rec.cwd,\n          agentVersion: rec.agentVersion,\n          startedAt: rec.startedAt,\n          exit: rec.exit ?? null\n        }))\n      );\n      return 0;\n    }\n    case "ports": {\n      const id = instance();\n      touchContact(root, id);\n      const [rows, listeners] = await Promise.all([listProcs(), listListeners()]);\n      const live = listRecords(root, id).filter(({ rec }) => rec.state === "running" && ownerLive(rows, rec));\n      const att = attribute(\n        listeners,\n        rows,\n        live.map(({ rec }) => ({ sid: rec.sid, chat: rec.chat, root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked }))\n      );\n      const chat = opts.chat;\n      print({\n        sessions: att.sessions.filter((s) => !chat || s.chat === chat),\n        unattributed: att.unattributed\n      });\n      return 0;\n    }\n    case "kill": {\n      const id = instance();\n      touchContact(root, id);\n      const all = flags.has("all");\n      const sid = opts.sid;\n      const chat = opts.chat;\n      if (!all && !sid && !chat) throw new UsageError("kill needs --sid, --chat or --all");\n      const killed = [];\n      for (const { dir, rec } of listRecords(root, id)) {\n        if (rec.state === "exited") continue;\n        if (!all && rec.sid !== sid && rec.chat !== chat) continue;\n        await killSession(join(dir, "session.json"), rec);\n        killed.push(rec.sid);\n      }\n      print({ killed });\n      return 0;\n    }\n    case "forget": {\n      const id = instance();\n      touchContact(root, id);\n      if (flags.has("all")) {\n        print(await forgetInstance({ root, instance: id, kill: killSession }));\n        return 0;\n      }\n      const chat = need(opts, "chat");\n      const r = await forgetChat({ root, instance: id, chat, kill: killSession });\n      print(r);\n      if (r.errors?.length) {\n        process.stderr.write(`dispatch-host: could not delete chat ${chat}\'s refs: ${r.errors.join("; ")}\n`);\n        return 1;\n      }\n      return 0;\n    }\n    case "chats": {\n      const id = instance();\n      touchContact(root, id);\n      print(listChats(root, id));\n      return 0;\n    }\n    case "gc": {\n      const id = instance();\n      touchContact(root, id);\n      print(await collectGarbage({ root, instance: id, now: Date.now(), repoIdleMs: num(opts, "repo-idle-days", 7) * 864e5 }));\n      return 0;\n    }\n    case "sweep": {\n      const id = instance();\n      touchContact(root, id);\n      print(\n        await sweepInstance({\n          root,\n          instance: id,\n          now: Date.now(),\n          deadManMs: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS) * 36e5,\n          self: process.pid,\n          io: hostKillIo\n        })\n      );\n      return 0;\n    }\n    default:\n      throw new UsageError(`unknown command ${JSON.stringify(cmd)}`);\n  }\n}\nasync function killSession(recordFile, rec) {\n  const owner = async () => ownerLive(await listProcs(), rec);\n  if (await owner()) {\n    try {\n      process.kill(rec.ownerPid, "SIGTERM");\n    } catch {\n    }\n    const until = Date.now() + 5e3;\n    while (Date.now() < until) {\n      if (readRecord(recordFile)?.state === "exited") return;\n      await new Promise((r) => setTimeout(r, 100));\n    }\n  }\n  const target = { root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: process.pid };\n  await killTree(hostKillIo, target);\n  if (await owner()) {\n    try {\n      process.kill(rec.ownerPid, "SIGKILL");\n    } catch {\n    }\n  }\n  const now = readRecord(recordFile);\n  if (now && now.state !== "exited") {\n    writeRecord(recordFile, {\n      ...now,\n      state: "exited",\n      exit: { code: null, signal: "SIGKILL", reason: "killed", detail: "dispatch-host kill", at: (/* @__PURE__ */ new Date()).toISOString() }\n    });\n  }\n}\nfunction isEntry() {\n  const argv1 = process.argv[1];\n  if (!argv1) return false;\n  try {\n    return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url));\n  } catch {\n    return false;\n  }\n}\nif (isEntry()) {\n  main(process.argv.slice(2)).then(\n    (code) => {\n      if (code < 0) return;\n      process.exitCode = code;\n      process.stdout.write("", () => process.stderr.write("", () => process.exit(code)));\n    },\n    (err) => {\n      process.stderr.write(`dispatch-host: ${err instanceof Error ? err.message : String(err)}\n`);\n      process.exit(err instanceof UsageError ? 2 : 1);\n    }\n  );\n}\nexport {\n  UsageError,\n  killSession,\n  main,\n  parseArgs\n};\n';
+const AGENT_VERSION = "0.4.0";
+const agentSource = 'import { existsSync, readdirSync, openSync, fstatSync, closeSync, mkdirSync, rmSync, writeSync, readSync, appendFileSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, statfsSync, accessSync, constants, realpathSync } from "node:fs";\nimport { homedir, userInfo, release } from "node:os";\nimport { posix, join, dirname, resolve, basename, isAbsolute, sep } from "node:path";\nimport { fileURLToPath } from "node:url";\nimport { createHash, randomBytes } from "node:crypto";\nimport { spawn, execFile } from "node:child_process";\nimport { createServer, connect } from "node:net";\nimport { performance } from "node:perf_hooks";\nimport { StringDecoder } from "node:string_decoder";\nconst ID = /^[A-Za-z0-9_-]{1,64}$/;\nfunction assertId(kind, value) {\n  if (typeof value !== "string" || !ID.test(value)) {\n    throw new Error(`${kind} must match ${ID.source}, got ${JSON.stringify(value)}`);\n  }\n  return value;\n}\nfunction rootDir(home) {\n  return posix.join(home, ".dispatch-host");\n}\nfunction instanceLayout(root, instance) {\n  const dir = posix.join(root, assertId("instance", instance));\n  return {\n    dir,\n    contactFile: posix.join(dir, "contact"),\n    reposDir: posix.join(dir, "repos"),\n    chatsDir: posix.join(dir, "chats"),\n    sessionsDir: posix.join(dir, "sessions"),\n    mcpDir: posix.join(dir, "mcp")\n  };\n}\nfunction mcpTmpPath(root, instance, chatId, dirName) {\n  const h = createHash("sha256").update(`${assertId("instance", instance)}\\0${assertId("chat", chatId)}\\0${dirName}`).digest("hex").slice(0, 12);\n  return posix.join(root, "t", h);\n}\nfunction mcpPackagesDir(root) {\n  return posix.join(root, "mcp-packages");\n}\nfunction browsersDir(root) {\n  return posix.join(root, "browsers");\n}\nfunction sessionPaths(root, instance, sid) {\n  const dir = posix.join(instanceLayout(root, instance).sessionsDir, assertId("sid", sid));\n  return {\n    dir,\n    record: posix.join(dir, "session.json"),\n    runs: posix.join(dir, "runs.jsonl"),\n    ownerLog: posix.join(dir, "owner.log"),\n    socket: socketPath(root, instance, sid)\n  };\n}\nfunction socketPath(root, instance, sid) {\n  const h = createHash("sha256").update(`${instance}\\0${sid}`).digest("hex").slice(0, 20);\n  return posix.join(root, "run", `${h}.sock`);\n}\nclass StreamLog {\n  constructor(dir, name, opts) {\n    this.dir = dir;\n    this.name = name;\n    this.segmentBytes = opts.segmentBytes ?? 8 * 1024 * 1024;\n    this.keep = Math.max(1, opts.keep ?? 2);\n  }\n  segments = [];\n  fd;\n  /** The offset of the next byte. Ahead of the segments after a failed write. */\n  next = 0;\n  /** The last write failed: start a fresh segment rather than append after a hole. */\n  broken = false;\n  segmentBytes;\n  keep;\n  /** Open (or create) the journal in `dir`, picking up whatever segments are there. */\n  static open(dir, name, opts = {}) {\n    const log = new StreamLog(dir, name, opts);\n    const re = new RegExp(`^${name}\\\\.(\\\\d+)\\\\.log$`);\n    if (existsSync(dir)) {\n      for (const f of readdirSync(dir)) {\n        const m = re.exec(f);\n        if (!m) continue;\n        const file = join(dir, f);\n        const fd = openSync(file, "r");\n        const size = fstatSync(fd).size;\n        closeSync(fd);\n        log.segments.push({ base: Number(m[1]), file, size });\n      }\n    }\n    log.segments.sort((a, b) => a.base - b.base);\n    const last = log.segments.at(-1);\n    log.next = last ? last.base + last.size : 0;\n    return log;\n  }\n  /** The offset the next byte will have: how many bytes the stream has ever had. */\n  get offset() {\n    return this.next;\n  }\n  /** The oldest offset still held. */\n  get start() {\n    return this.segments[0]?.base ?? this.offset;\n  }\n  /**\n   * Append `data`; returns the offset of its first byte. Never throws: a\n   * failed write is reported to `onError` and leaves a hole.\n   */\n  append(data, onError) {\n    const at = this.next;\n    if (!data.length) return at;\n    this.next += data.length;\n    try {\n      let cur = this.segments.at(-1);\n      if (!cur || cur.size >= this.segmentBytes || this.broken) {\n        this.closeFd();\n        mkdirSync(this.dir, { recursive: true });\n        cur = { base: at, file: join(this.dir, `${this.name}.${at}.log`), size: 0 };\n        this.segments.push(cur);\n        this.broken = false;\n        while (this.segments.length > this.keep) rmSync(this.segments.shift().file, { force: true });\n      }\n      if (this.fd === void 0) this.fd = openSync(cur.file, "a");\n      for (let done = 0; done < data.length; ) {\n        const n = writeSync(this.fd, data, done);\n        done += n;\n        cur.size += n;\n      }\n    } catch (err) {\n      this.broken = true;\n      this.closeFd();\n      onError?.(err);\n    }\n    return at;\n  }\n  closeFd() {\n    if (this.fd === void 0) return;\n    try {\n      closeSync(this.fd);\n    } catch {\n    }\n    this.fd = void 0;\n  }\n  /**\n   * Everything from `from` on, in pieces of at most `maxChunk` bytes. Starts\n   * at {@link start} when `from` is older than what is held.\n   */\n  *read(from, maxChunk = 256 * 1024) {\n    let at = Math.max(from, this.start);\n    for (const seg of this.segments) {\n      const end = seg.base + seg.size;\n      if (end <= at) continue;\n      if (seg.base > at) at = seg.base;\n      const fd = openSync(seg.file, "r");\n      try {\n        while (at < end) {\n          const n = Math.min(maxChunk, end - at);\n          const buf = Buffer.alloc(n);\n          const got = readSync(fd, buf, 0, n, at - seg.base);\n          if (got <= 0) break;\n          yield { offset: at, data: buf.subarray(0, got) };\n          at += got;\n        }\n      } finally {\n        closeSync(fd);\n      }\n    }\n  }\n  close() {\n    this.closeFd();\n  }\n}\nfunction appendRun(file, entry) {\n  appendFileSync(file, JSON.stringify(entry) + "\\n");\n}\nfunction readRuns(file) {\n  if (!existsSync(file)) return [];\n  const out2 = [];\n  for (const line of readFileSync(file, "utf8").split("\\n")) {\n    if (!line.trim()) continue;\n    try {\n      out2.push(JSON.parse(line));\n    } catch {\n    }\n  }\n  return out2;\n}\nconst SENTINEL = /^CMTERMSENTINEL_[A-Za-z0-9_-]+\\|(-?\\d+)\\|(?:True|False)\\|(.*)$/;\nconst MAX_LINE = 64 * 1024;\nclass SentinelScanner {\n  decoder = new StringDecoder("utf8");\n  line = "";\n  /** Inside a line longer than {@link MAX_LINE}: skip to its end. */\n  skipping = false;\n  push(data) {\n    const found = [];\n    let text = this.decoder.write(data);\n    while (text) {\n      const nl = text.indexOf("\\n");\n      if (nl < 0) {\n        if (!this.skipping) {\n          this.line += text;\n          if (this.line.length > MAX_LINE) {\n            this.line = "";\n            this.skipping = true;\n          }\n        }\n        break;\n      }\n      if (!this.skipping) {\n        const m = SENTINEL.exec((this.line + text.slice(0, nl)).replace(/\\r$/, ""));\n        if (m) found.push({ exitCode: Number(m[1]), cwd: m[2] });\n      }\n      this.line = "";\n      this.skipping = false;\n      text = text.slice(nl + 1);\n    }\n    return found;\n  }\n}\nconst CLT_DEVELOPER_DIR = "/Library/Developer/CommandLineTools";\nconst XCODE_DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer";\nfunction hasCommandLineTools() {\n  return existsSync(`${CLT_DEVELOPER_DIR}/usr/bin/git`);\n}\nfunction gitEnv(base = process.env, clt = hasCommandLineTools()) {\n  const env = { ...base, LC_ALL: "C" };\n  if (clt) env.DEVELOPER_DIR = CLT_DEVELOPER_DIR;\n  else delete env.DEVELOPER_DIR;\n  return env;\n}\nconst LOGIN_ENV_ALLOW = [\n  /^PATH$/,\n  /^HOMEBREW_[A-Z0-9_]+$/,\n  /^LANG$/,\n  /^LC_[A-Z_]+$/,\n  /^DEVELOPER_DIR$/,\n  /^JAVA_HOME$/\n];\nconst BASE_ENV = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR"];\nconst FALLBACK_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";\nconst NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;\nfunction filterLoginEnv(env) {\n  const out2 = {};\n  for (const [k, v] of Object.entries(env)) {\n    if (v !== void 0 && LOGIN_ENV_ALLOW.some((re) => re.test(k))) out2[k] = v;\n  }\n  return out2;\n}\nfunction shellEnv(opts) {\n  const env = {};\n  for (const k of BASE_ENV) {\n    const v = opts.agentEnv[k];\n    if (v !== void 0) env[k] = v;\n  }\n  Object.assign(env, opts.login ? filterLoginEnv(opts.login) : {});\n  if (!env.PATH) env.PATH = FALLBACK_PATH;\n  if (opts.clt && !env.DEVELOPER_DIR) env.DEVELOPER_DIR = CLT_DEVELOPER_DIR;\n  for (const [k, v] of Object.entries(opts.extra ?? {})) {\n    if (!NAME.test(k)) throw new Error(`not an environment variable name: ${JSON.stringify(k)}`);\n    env[k] = String(v);\n  }\n  if (opts.elevate) {\n    env.PATH = `${opts.elevate.binDir}:${env.PATH}`;\n    env[ELEVATE_SOCKET_ENV] = opts.elevate.socket;\n  }\n  return env;\n}\nconst ELEVATE_SOCKET_ENV = "DISPATCH_ELEVATE_SOCK";\nfunction decodeEnvArg(b64) {\n  if (!b64) return {};\n  let parsed;\n  try {\n    parsed = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));\n  } catch {\n    throw new Error("--env must be base64 JSON of an object");\n  }\n  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("--env must be base64 JSON of an object");\n  const out2 = {};\n  for (const [k, v] of Object.entries(parsed)) {\n    if (!NAME.test(k)) throw new Error(`not an environment variable name: ${JSON.stringify(k)}`);\n    out2[k] = String(v);\n  }\n  return out2;\n}\nconst SESSION_ENV_VAR = "DISPATCH_HOST_SESSION_ENV";\nfunction takeSessionEnv(env = process.env) {\n  const v = env[SESSION_ENV_VAR];\n  delete env[SESSION_ENV_VAR];\n  return v;\n}\nconst MAX_EXEC_ARGV = 32 * 1024;\nfunction decodeExecArg(b64) {\n  let parsed;\n  try {\n    parsed = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));\n  } catch {\n    throw new Error("--exec must be base64 JSON of a list of strings");\n  }\n  if (!Array.isArray(parsed) || !parsed.length || !parsed.every((a) => typeof a === "string")) {\n    throw new Error("--exec must be base64 JSON of a non-empty list of strings");\n  }\n  const argv = parsed;\n  if (!argv[0]) throw new Error("--exec names no program");\n  if (argv.some((a) => a.includes("\\0"))) throw new Error("an --exec argument holds a NUL byte");\n  if (Buffer.byteLength(argv.join("\\0"), "utf8") > MAX_EXEC_ARGV) throw new Error(`--exec is longer than ${MAX_EXEC_ARGV} bytes`);\n  return argv;\n}\nconst MARK = "__DISPATCH_HOST_ENV__";\nfunction parseCapturedEnv(stdout) {\n  const at = stdout.lastIndexOf(`${MARK}\n`);\n  if (at < 0) throw new Error("the login shell printed no environment");\n  const parsed = JSON.parse(stdout.slice(at + MARK.length + 1).trim());\n  if (!parsed || typeof parsed !== "object") throw new Error("the login shell\'s environment was not an object");\n  const out2 = {};\n  for (const [k, v] of Object.entries(parsed)) if (typeof v === "string") out2[k] = v;\n  return out2;\n}\nfunction captureLoginEnv(opts) {\n  const script = `printf \'\\\\n%s\\\\n\' ${MARK}; exec "$0" -e \'process.stdout.write(JSON.stringify(process.env))\'`;\n  return new Promise((resolve2, reject) => {\n    const child = spawn(opts.shell, ["-l", "-c", script, opts.node], {\n      stdio: ["ignore", "pipe", "ignore"],\n      env: opts.env\n    });\n    const chunks = [];\n    const timer = setTimeout(() => {\n      child.kill("SIGKILL");\n      reject(new Error(`${opts.shell} -l took longer than ${(opts.timeoutMs ?? 1e4) / 1e3}s`));\n    }, opts.timeoutMs ?? 1e4);\n    child.stdout.on("data", (c) => chunks.push(c));\n    child.on("error", (err) => {\n      clearTimeout(timer);\n      reject(err);\n    });\n    child.on("close", (code) => {\n      clearTimeout(timer);\n      if (code !== 0) return reject(new Error(`${opts.shell} -l exited ${code}`));\n      try {\n        resolve2(parseCapturedEnv(Buffer.concat(chunks).toString("utf8")));\n      } catch (err) {\n        reject(err);\n      }\n    });\n  });\n}\nfunction loginShell(env, platform) {\n  const s = env.SHELL;\n  if (s && s.startsWith("/")) return s;\n  return platform === "darwin" ? "/bin/zsh" : "/bin/bash";\n}\nconst PROTOCOL_VERSION = 1;\nconst MAX_FRAME = 1 << 20;\nconst F = {\n  /** Raw bytes for the shell\'s stdin. */\n  stdin: 1,\n  /** Close the shell\'s stdin (core\'s teardown). */\n  stdinEnd: 2,\n  /** "Dispatch is still here." Any frame counts, this one carries nothing else. */\n  heartbeat: 3,\n  /** JSON {@link SignalMsg}: deliver a signal to the session. */\n  signal: 4,\n  /** JSON {@link RunBeginMsg}: a command is about to be written. Journaled. */\n  runBegin: 5,\n  /** Leaving on purpose. The session keeps running until the heartbeat lapses. */\n  detach: 6,\n  /** End the session now: kill its whole tree. */\n  kill: 7,\n  /** u8 stream (1 out, 2 err) + u8 id length + id + bytes: output of an elevated command, for `dispatch-elevate`. */\n  elevateOutput: 8,\n  /** JSON {@link ElevateEndMsg}: the elevated command is over (or never ran). */\n  elevateEnd: 9,\n  /** JSON {@link AttachMsg}. Written by the relay, first, on every connection. */\n  attach: 16,\n  /** JSON {@link ElevateMsg}. Written first by `dispatch-elevate` on its own connection to the owner\'s socket. */\n  elevate: 17,\n  /** JSON {@link ReadyMsg}: attached; replay follows. */\n  ready: 129,\n  /** u64 offset + bytes the shell wrote to stdout. */\n  stdout: 130,\n  /** u64 offset + bytes the shell wrote to stderr. */\n  stderr: 131,\n  /** JSON {@link ExitMsg}: the session is over. */\n  exit: 132,\n  /** Answer to a heartbeat. */\n  heartbeatAck: 133,\n  /** JSON {@link ErrorMsg}: the session could not start or attach. The relay exits after it. */\n  error: 134,\n  /** JSON {@link RunEndMsg}: the journal saw a run\'s sentinel. */\n  runEnd: 135,\n  /** JSON {@link ElevateRequestMsg}: a command in the shell asks to run something as root. */\n  elevateRequest: 136,\n  /** JSON {@link ElevateCancelMsg}: whoever asked has gone (Ctrl-C); stop asking, stop running. */\n  elevateCancel: 137,\n  /** Owner → `dispatch-elevate`: u8 stream (1 out, 2 err) + bytes. */\n  elevateData: 138,\n  /** Owner → `dispatch-elevate`: JSON {@link ElevateEndMsg} without the id. */\n  elevateDone: 139\n};\nconst MAX_ELEVATE_ARGV = 32 * 1024;\nfunction checkElevate(m) {\n  const o = m;\n  if (!o || typeof o !== "object") throw new Error("not an elevation request");\n  if (!Array.isArray(o.argv) || !o.argv.length || !o.argv.every((a) => typeof a === "string")) throw new Error("argv must be a non-empty list of strings");\n  if (o.argv.some((a) => a.includes("\\0"))) throw new Error("an argument holds a NUL byte");\n  if (!o.argv[0]) throw new Error("the command is empty");\n  if (Buffer.byteLength(o.argv.join("\\0"), "utf8") > MAX_ELEVATE_ARGV) throw new Error(`the command is longer than ${MAX_ELEVATE_ARGV} bytes`);\n  if (typeof o.cwd !== "string" || !o.cwd.startsWith("/") || o.cwd.includes("\\0")) throw new Error("cwd must be an absolute path");\n  return { argv: [...o.argv], cwd: o.cwd };\n}\nfunction decodeElevateOutput(payload) {\n  if (payload.length < 2) throw new Error("elevation output frame too short");\n  const stream = payload.readUInt8(0);\n  const len = payload.readUInt8(1);\n  if (stream !== 1 && stream !== 2) throw new Error(`elevation output for stream ${stream}`);\n  if (payload.length < 2 + len) throw new Error("elevation output frame shorter than its id");\n  return { id: payload.subarray(2, 2 + len).toString("utf8"), stream, data: payload.subarray(2 + len) };\n}\nfunction encodeFrame(type, payload = Buffer.alloc(0)) {\n  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload), "utf8");\n  if (body.length > MAX_FRAME) throw new Error(`frame of ${body.length} bytes is over the ${MAX_FRAME}-byte limit`);\n  const head = Buffer.alloc(5);\n  head.writeUInt8(type, 0);\n  head.writeUInt32BE(body.length, 1);\n  return Buffer.concat([head, body]);\n}\nfunction encodeOutput(type, offset2, data) {\n  const frames = [];\n  const room = MAX_FRAME - 8;\n  let at = 0;\n  do {\n    const head = Buffer.alloc(8);\n    head.writeBigUInt64BE(BigInt(offset2 + at), 0);\n    frames.push(encodeFrame(type, Buffer.concat([head, data.subarray(at, at + room)])));\n    at += room;\n  } while (at < data.length);\n  return frames;\n}\nfunction decodeJson(payload) {\n  return JSON.parse(payload.toString("utf8"));\n}\nclass FrameDecoder {\n  buf = Buffer.alloc(0);\n  push(chunk) {\n    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;\n    const frames = [];\n    while (this.buf.length >= 5) {\n      const len = this.buf.readUInt32BE(1);\n      if (len > MAX_FRAME) throw new Error(`frame of ${len} bytes is over the ${MAX_FRAME}-byte limit`);\n      if (this.buf.length < 5 + len) break;\n      frames.push({ type: this.buf.readUInt8(0), payload: this.buf.subarray(5, 5 + len) });\n      this.buf = this.buf.subarray(5 + len);\n    }\n    return frames;\n  }\n  /** Bytes held back waiting for the rest of a frame. */\n  get pending() {\n    return this.buf.length;\n  }\n}\nfunction sq(s) {\n  return `\'${s.replace(/\'/g, `\'\\\\\'\'`)}\'`;\n}\nfunction elevateShim(node, script) {\n  return [\n    "#!/bin/sh",\n    "# Run a command as root on this machine once the user approves it in Dispatch.",\n    "# Usage: dispatch-elevate <command> [args...]",\n    `exec ${sq(node)} ${sq(script)} elevate "$@"`,\n    ""\n  ].join("\\n");\n}\nfunction sudoShim(elevate) {\n  return [\n    "#!/bin/bash",\n    "# sudo in a Dispatch chat shell: the command goes to dispatch-elevate, which asks",\n    "# the user to approve it. No password is ever asked for or kept here.",\n    "me=sudo",\n    \'refuse() { printf "%s: %s\\\\n" "$me" "$1" >&2; exit 1; }\',\n    "while [ $# -gt 0 ]; do",\n    \'  case "$1" in\',\n    "    --) shift; break ;;",\n    \'    -v|--validate) echo "$me: nothing to validate here: each command is approved by the user on its own" >&2; exit 0 ;;\',\n    "    -k|-K|--reset-timestamp|--remove-timestamp) exit 0 ;;",\n    `    -n|--non-interactive) refuse "-n: every command here needs the user\'s approval, which -n rules out" ;;`,\n    \'    -u|--user) [ "${2:-}" = root ] || [ "${2:-}" = 0 ] || [ "${2:-}" = "#0" ] || refuse "-u ${2:-}: only root is possible here"; shift 2 ;;\',\n    "    -uroot|--user=root) shift ;;",\n    `    -E|--preserve-env|--preserve-env=*) refuse "$1: the command runs with root\'s own environment; set what it needs on its command line (env NAME=value cmd)" ;;`,\n    \'    -s|--shell|-i|--login) refuse "$1: no interactive root shell here; pass the command itself" ;;\',\n    \'    -S|--stdin|-A|--askpass) refuse "$1: there is no password to give; the user approves each command in Dispatch" ;;\',\n    \'    -b|--background) refuse "$1: run it in the background yourself (with &)" ;;\',\n    \'    -*) refuse "$1: not supported here; run sudo <command>, or dispatch-elevate <command>" ;;\',\n    "    *) break ;;",\n    "  esac",\n    "done",\n    \'[ $# -gt 0 ] || refuse "usage: sudo <command> [args...] (the user approves it in Dispatch)"\',\n    `exec ${sq(elevate)} "$@"`,\n    ""\n  ].join("\\n");\n}\nfunction ensureShims(binDir, node, script) {\n  mkdirSync(binDir, { recursive: true, mode: 493 });\n  const elevate = posix.join(binDir, "dispatch-elevate");\n  write$1(elevate, elevateShim(node, script));\n  write$1(posix.join(binDir, "sudo"), sudoShim(elevate));\n}\nfunction write$1(file, content) {\n  try {\n    if (readFileSync(file, "utf8") === content) return;\n  } catch {\n  }\n  const tmp = `${file}.${process.pid}.tmp`;\n  writeFileSync(tmp, content, { mode: 493 });\n  renameSync(tmp, file);\n}\nconst PS_ARGS = ["-A", "-o", "pid=,ppid=,pgid=,lstart=,command="];\nfunction parsePs(out2) {\n  const rows = [];\n  for (const line of out2.split("\\n")) {\n    const w = line.trim().split(/\\s+/);\n    if (w.length < 8) continue;\n    const [pid, ppid, pgid] = w.slice(0, 3).map(Number);\n    if (!Number.isInteger(pid) || !Number.isInteger(ppid) || !Number.isInteger(pgid)) continue;\n    rows.push({ pid, ppid, pgid, start: w.slice(3, 8).join(" "), command: w.slice(8).join(" ") });\n  }\n  return rows;\n}\nfunction descendantsOf(rows, roots) {\n  const children = /* @__PURE__ */ new Map();\n  const alive = /* @__PURE__ */ new Set();\n  for (const r of rows) {\n    alive.add(r.pid);\n    const list = children.get(r.ppid);\n    if (list) list.push(r.pid);\n    else children.set(r.ppid, [r.pid]);\n  }\n  const out2 = /* @__PURE__ */ new Set();\n  const stack = [...roots].filter((p) => alive.has(p));\n  while (stack.length) {\n    const pid = stack.pop();\n    if (out2.has(pid) || pid <= 1) continue;\n    out2.add(pid);\n    for (const c of children.get(pid) ?? []) stack.push(c);\n  }\n  return out2;\n}\nfunction sameProcess(rows, pid, start) {\n  if (!pid) return false;\n  const r = rows.find((x) => x.pid === pid);\n  return Boolean(r) && (!start || r.start === start);\n}\nfunction rootReused(rows, root, rootStart) {\n  if (!root || !rootStart) return false;\n  const r = rows.find((x) => x.pid === root);\n  return Boolean(r) && r.start !== rootStart;\n}\nfunction groupOf(rows, root, rootStart) {\n  if (!root || rootReused(rows, root, rootStart)) return [];\n  return rows.filter((r) => r.pgid === root).map((r) => r.pid);\n}\nfunction liveTracked(rows, tracked) {\n  const byPid = new Map(rows.map((r) => [r.pid, r]));\n  return tracked.filter((t) => byPid.get(t.pid)?.start === t.start).map((t) => t.pid);\n}\nfunction killPlan(rows, opts) {\n  const selfPgid = rows.find((r) => r.pid === opts.self)?.pgid;\n  const reused = rootReused(rows, opts.root, opts.rootStart);\n  const seeds = /* @__PURE__ */ new Set([\n    ...opts.root && !reused ? [opts.root] : [],\n    ...groupOf(rows, opts.root, opts.rootStart),\n    ...reused ? [] : opts.sessionMembers ?? [],\n    ...liveTracked(rows, opts.tracked ?? [])\n  ]);\n  const pids = descendantsOf(rows, seeds);\n  pids.delete(opts.self);\n  const pgid = new Map(rows.map((r) => [r.pid, r.pgid]));\n  const pgids = /* @__PURE__ */ new Set();\n  for (const p of pids) {\n    const g = pgid.get(p);\n    if (g !== void 0 && g > 1 && g !== selfPgid && g !== opts.self) pgids.add(g);\n  }\n  return { pids: [...pids].sort((a, b) => a - b), pgids: [...pgids].sort((a, b) => a - b) };\n}\nfunction escapees(rows, root, sessionMembers2) {\n  const plain = descendantsOf(rows, [root]);\n  const all = descendantsOf(rows, [root, ...groupOf(rows, root), ...sessionMembers2]);\n  const byPid = new Map(rows.map((r) => [r.pid, r]));\n  const out2 = [];\n  for (const pid of all) {\n    const r = byPid.get(pid);\n    if (!r) continue;\n    if (r.pgid !== root || !plain.has(pid)) out2.push({ pid, start: r.start });\n  }\n  return out2;\n}\nconst LSOF_ARGS = ["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"];\nfunction parseLsof(out2) {\n  const found = /* @__PURE__ */ new Map();\n  let pid = 0;\n  let command = "";\n  for (const raw of out2.split("\\n")) {\n    const line = raw.replace(/\\r$/, "");\n    const tag = line[0];\n    const val = line.slice(1);\n    if (tag === "p") {\n      pid = Number(val);\n      command = "";\n    } else if (tag === "c") {\n      command = val;\n    } else if (tag === "n" && pid) {\n      const cut = val.lastIndexOf(":");\n      if (cut < 0) continue;\n      const port = Number(val.slice(cut + 1));\n      if (!Number.isInteger(port) || port < 1 || port > 65535) continue;\n      const addr = val.slice(0, cut).replace(/^\\[|\\]$/g, "").replace(/%.*$/, "");\n      const host = addr === "*" || addr === "0.0.0.0" || addr === "::" ? "127.0.0.1" : addr;\n      const key = `${pid}:${port}`;\n      const prev = found.get(key);\n      if (!prev || host === "127.0.0.1") found.set(key, { pid, command, host, port });\n    }\n  }\n  return [...found.values()].sort((a, b) => a.port - b.port || a.pid - b.pid);\n}\nfunction attribute(listeners, rows, sessions) {\n  const owner = /* @__PURE__ */ new Map();\n  sessions.forEach((s, i) => {\n    const root = s.root && !rootReused(rows, s.root, s.rootStart) ? [s.root] : [];\n    const seeds = [...root, ...groupOf(rows, s.root, s.rootStart), ...liveTracked(rows, s.tracked ?? [])];\n    for (const pid of descendantsOf(rows, seeds)) if (!owner.has(pid)) owner.set(pid, i);\n  });\n  const out2 = { sessions: sessions.map((s) => ({ sid: s.sid, chat: s.chat, ports: [] })), unattributed: [] };\n  for (const l of listeners) {\n    const i = owner.get(l.pid);\n    if (i === void 0) out2.unattributed.push(l);\n    else out2.sessions[i].ports.push(l);\n  }\n  return out2;\n}\nfunction run(file, args, okCodes = [0]) {\n  return new Promise((resolve2, reject) => {\n    execFile(file, args, { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {\n      const code = err ? typeof err.code === "number" ? err.code : -1 : 0;\n      if (okCodes.includes(code)) resolve2(stdout);\n      else reject(err);\n    });\n  });\n}\nasync function listProcs() {\n  return parsePs(await run("ps", PS_ARGS));\n}\nasync function sessionMembers(sid) {\n  const out2 = await run("pgrep", ["-s", String(sid)], [0, 1]).catch(() => "");\n  return out2.split(/\\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 1);\n}\nasync function listListeners() {\n  return parseLsof(await run("lsof", LSOF_ARGS, [0, 1]));\n}\nconst hostKillIo = {\n  listProcs,\n  sessionMembers,\n  kill: (pid, signal) => {\n    try {\n      process.kill(pid, signal);\n    } catch {\n    }\n  },\n  sleep: (ms) => new Promise((r) => setTimeout(r, ms))\n};\nasync function killTree(io, target) {\n  let signalled = 0;\n  for (let pass = 0; pass < 3; pass++) {\n    const rows = await io.listProcs();\n    const members = target.root && !rootReused(rows, target.root, target.rootStart) ? await io.sessionMembers(target.root) : [];\n    const plan = killPlan(rows, { ...target, sessionMembers: members });\n    if (!plan.pids.length) break;\n    for (const g of plan.pgids) io.kill(-g, "SIGKILL");\n    for (const p of plan.pids) io.kill(p, "SIGKILL");\n    signalled += plan.pids.length;\n    await io.sleep(100);\n  }\n  return signalled;\n}\nasync function signalTree(io, target, signal) {\n  const rows = await io.listProcs();\n  const members = target.root && !rootReused(rows, target.root, target.rootStart) ? await io.sessionMembers(target.root) : [];\n  for (const p of killPlan(rows, { ...target, sessionMembers: members }).pids) io.kill(p, signal);\n}\nfunction readRecord(file) {\n  try {\n    return JSON.parse(readFileSync(file, "utf8"));\n  } catch {\n    return void 0;\n  }\n}\nfunction writeRecord(file, rec) {\n  mkdirSync(dirname(file), { recursive: true, mode: 448 });\n  const tmp = `${file}.${process.pid}.tmp`;\n  writeFileSync(tmp, JSON.stringify(rec, null, 2) + "\\n", { mode: 384 });\n  renameSync(tmp, file);\n}\nfunction listRecords(root, instance) {\n  const { sessionsDir } = instanceLayout(root, instance);\n  if (!existsSync(sessionsDir)) return [];\n  const out2 = [];\n  for (const name of readdirSync(sessionsDir)) {\n    const dir = join(sessionsDir, name);\n    const rec = readRecord(join(dir, "session.json"));\n    if (rec) out2.push({ dir, rec });\n  }\n  return out2;\n}\nfunction touchContact(root, instance, now = /* @__PURE__ */ new Date()) {\n  const { dir, contactFile } = instanceLayout(root, instance);\n  mkdirSync(dir, { recursive: true, mode: 448 });\n  writeFileSync(contactFile, now.toISOString() + "\\n", { mode: 384 });\n}\nfunction lastContact(root, instance) {\n  try {\n    return statSync(instanceLayout(root, instance).contactFile).mtimeMs;\n  } catch {\n    return void 0;\n  }\n}\nfunction ownerLive(rows, rec) {\n  return rec.state !== "exited" && sameProcess(rows, rec.ownerPid, rec.ownerStart);\n}\nfunction claimRecord(file, rec) {\n  mkdirSync(dirname(file), { recursive: true, mode: 448 });\n  try {\n    writeFileSync(file, JSON.stringify(rec, null, 2) + "\\n", { mode: 384, flag: "wx" });\n    return true;\n  } catch (e) {\n    if (e.code === "EEXIST") return false;\n    throw e;\n  }\n}\nconst MAX_ELEVATIONS = 8;\nconst KEEP_CANCELS = 32;\nconst SIGNALS = /* @__PURE__ */ new Set(["HUP", "INT", "QUIT", "KILL", "TERM", "USR1", "USR2", "STOP", "CONT", "TSTP", "WINCH"]);\nclass Session {\n  constructor(d) {\n    this.d = d;\n    this.lastBeat = d.now();\n    d.shell.stdout?.on("data", (c) => this.output(F.stdout, c));\n    d.shell.stderr?.on("data", (c) => this.output(F.stderr, c));\n    d.shell.on("exit", (code, signal) => this.shellExited(code, signal));\n    d.shell.on("close", (code, signal) => {\n      this.closed = true;\n      this.onClosed?.();\n      this.shellExited(code, signal);\n    });\n    d.shell.on("error", (err) => {\n      this.ending ??= { reason: "start-failed", detail: err.message };\n      this.closed = true;\n      this.shellExited(null, null);\n    });\n  }\n  client;\n  lastBeat;\n  activeRun;\n  exitMsg;\n  /** Why we are killing the shell, so its exit is reported as that and not as `exited`. */\n  ending;\n  /** When the last kill was sent while ending, so `tick` can send another. */\n  lastKill = 0;\n  /** The shell\'s own exit, once it happened. */\n  shellExit;\n  closed = false;\n  onClosed;\n  /**\n   * Replay bytes queued to the current client, which may exceed the backlog\n   * limit on their own. Forgiven until the client has caught up.\n   */\n  allowance = 0;\n  /** The journal\'s last write failed (a full disk). Logged once, not per chunk. */\n  journalFailing = false;\n  scanner = new SentinelScanner();\n  /** Recent run ends, so a client that was away when one landed still gets its RUN_END. */\n  ends = [];\n  /** Open elevation requests: the `dispatch-elevate` waiting on each, and what it asked. */\n  elevations = /* @__PURE__ */ new Map();\n  /** Recently cancelled elevations, said again on every attach (see {@link KEEP_CANCELS}). */\n  cancels = [];\n  get exited() {\n    return this.exitMsg;\n  }\n  get hasClient() {\n    return Boolean(this.client);\n  }\n  /**\n   * A client connected and sent its ATTACH. A newer client replaces an older\n   * one: the old one is a half-open connection Dispatch has already given up\n   * on. It gets READY, then everything after its resume point, then live\n   * output. That all happens in this one call, so no byte can fall between the\n   * replay and the live stream.\n   */\n  attach(client, msg) {\n    if (this.client && this.client !== client) this.client.destroy();\n    this.client = client;\n    this.lastBeat = this.d.now();\n    const from = msg.resume ?? { out: 0, err: 0 };\n    const gap = {};\n    if (this.d.out.start > from.out) gap.out = this.d.out.start;\n    if (this.d.err.start > from.err) gap.err = this.d.err.start;\n    const ready2 = {\n      v: PROTOCOL_VERSION,\n      sid: this.d.sid,\n      pid: this.d.shell.pid ?? 0,\n      agentVersion: this.d.agentVersion,\n      cwd: this.d.cwd,\n      out: this.d.out.offset,\n      err: this.d.err.offset,\n      resumed: Boolean(msg.resume),\n      ...gap.out !== void 0 || gap.err !== void 0 ? { gap } : {}\n    };\n    client.write(encodeFrame(F.ready, ready2));\n    let replayed = 0;\n    for (const frame of replay(this.d.out, from.out, F.stdout)) replayed += write(client, frame);\n    for (const frame of replay(this.d.err, from.err, F.stderr)) replayed += write(client, frame);\n    this.allowance = Math.max(replayed, client.writableLength);\n    for (const e of this.ends) if (e.out > from.out) client.write(encodeFrame(F.runEnd, { runId: e.runId, exitCode: e.exitCode, cwd: e.cwd }));\n    if (this.exitMsg) {\n      client.write(encodeFrame(F.exit, this.exitMsg));\n      client.end();\n      this.client = void 0;\n      return;\n    }\n    for (const [id, e] of this.elevations) client.write(encodeFrame(F.elevateRequest, { id, ...e.msg }));\n    for (const id of this.cancels) client.write(encodeFrame(F.elevateCancel, { id }));\n  }\n  /**\n   * `dispatch-elevate` connected to the owner and asked to run `msg` as root.\n   * Passed up to Dispatch now, or when it next attaches. Its answer (output,\n   * then the end) comes back down to `client` alone.\n   */\n  elevate(client, msg) {\n    const refuse = (error) => {\n      client.write(encodeFrame(F.elevateDone, { code: null, error }));\n      client.end();\n      return void 0;\n    };\n    if (this.exitMsg || this.ending) return refuse("the shell is ending");\n    if (this.elevations.size >= MAX_ELEVATIONS) return refuse(`${MAX_ELEVATIONS} elevations are already waiting in this shell`);\n    const id = this.d.newId?.() ?? randomBytes(9).toString("base64url").replace(/_/g, "-");\n    this.elevations.set(id, { client, msg });\n    this.client?.write(encodeFrame(F.elevateRequest, { id, ...msg }));\n    return id;\n  }\n  /**\n   * A `dispatch-elevate` connection closed (it was interrupted, or killed).\n   * Its request, if still open, is withdrawn: never run something nobody is\n   * waiting for.\n   */\n  elevateGone(client) {\n    for (const [id, e] of this.elevations) {\n      if (e.client !== client) continue;\n      this.elevations.delete(id);\n      this.cancels.push(id);\n      if (this.cancels.length > KEEP_CANCELS) this.cancels.shift();\n      this.client?.write(encodeFrame(F.elevateCancel, { id }));\n    }\n  }\n  /** The client\'s socket closed. The shell keeps running until the heartbeat lapses. */\n  detachClient(client) {\n    if (this.client === client) this.client = void 0;\n  }\n  /**\n   * A frame from `client`. Frames from a client that has been replaced are\n   * ignored. Returns false for a frame that could not be understood; the\n   * caller drops that client, and the session carries on.\n   */\n  handle(client, frame) {\n    if (client !== this.client) return true;\n    try {\n      this.handleFrame(client, frame);\n      return true;\n    } catch (e) {\n      this.d.log?.(`bad frame 0x${frame.type.toString(16)} from the client: ${String(e)}`);\n      return false;\n    }\n  }\n  handleFrame(client, frame) {\n    this.lastBeat = this.d.now();\n    const stdin = this.d.shell.stdin;\n    const writable = Boolean(stdin) && !stdin.writableEnded && !stdin.destroyed;\n    switch (frame.type) {\n      case F.stdin:\n        if (writable) stdin.write(frame.payload);\n        break;\n      case F.stdinEnd:\n        if (writable) stdin.end();\n        break;\n      case F.heartbeat:\n        client.write(encodeFrame(F.heartbeatAck));\n        this.d.onContact?.();\n        break;\n      case F.signal: {\n        const name = String(decodeJson(frame.payload)?.signal ?? "").toUpperCase().replace(/^SIG/, "");\n        if (name === "KILL") void this.terminate("killed");\n        else if (SIGNALS.has(name)) void this.d.signal(name).catch((e) => this.d.log?.(`signal ${name}: ${String(e)}`));\n        break;\n      }\n      case F.runBegin: {\n        const m = decodeJson(frame.payload);\n        if (!m || typeof m.runId !== "string" || !m.runId) throw new Error("RUN_BEGIN without a runId");\n        this.activeRun = m.runId;\n        this.d.journalRun({\n          t: "begin",\n          runId: this.activeRun,\n          background: Boolean(m.background),\n          out: this.d.out.offset,\n          err: this.d.err.offset,\n          at: (/* @__PURE__ */ new Date()).toISOString()\n        });\n        break;\n      }\n      case F.detach:\n        this.client = void 0;\n        client.end();\n        break;\n      case F.kill:\n        void this.terminate("killed");\n        break;\n      case F.elevateOutput: {\n        const m = decodeElevateOutput(frame.payload);\n        this.elevations.get(m.id)?.client.write(encodeFrame(F.elevateData, Buffer.concat([Buffer.from([m.stream]), m.data])));\n        break;\n      }\n      case F.elevateEnd: {\n        const m = decodeJson(frame.payload);\n        const id = typeof m?.id === "string" ? m.id : "";\n        const e = this.elevations.get(id);\n        if (!e) break;\n        this.elevations.delete(id);\n        const done = {\n          code: typeof m.code === "number" && Number.isInteger(m.code) ? m.code : null,\n          ...typeof m.signal === "string" ? { signal: m.signal } : {},\n          ...typeof m.error === "string" && m.error ? { error: m.error.slice(0, 2e3) } : {}\n        };\n        e.client.write(encodeFrame(F.elevateDone, done));\n        e.client.end();\n        break;\n      }\n    }\n  }\n  /**\n   * Run every second or so: kills the session once Dispatch has been silent\n   * past the heartbeat timeout, and kills again every few seconds while a\n   * shell we are ending hasn\'t gone.\n   */\n  tick() {\n    if (this.exitMsg) return;\n    if (this.ending) {\n      if (!this.shellExit && this.d.now() - this.lastKill > 5e3) void this.kill();\n      return;\n    }\n    const silent = this.d.now() - this.lastBeat;\n    if (silent > this.d.heartbeatMs) {\n      void this.terminate("heartbeat", `no heartbeat for ${Math.round(silent / 1e3)}s`);\n    }\n  }\n  /**\n   * End the session for `reason`: kill the tree; the shell\'s exit reports it.\n   * The first reason sticks. Asking again kills again.\n   */\n  async terminate(reason, detail) {\n    if (this.exitMsg) return;\n    if (!this.ending) {\n      this.ending = { reason, ...detail ? { detail } : {} };\n      this.d.log?.(`ending session: ${reason}${detail ? ` (${detail})` : ""}`);\n    }\n    await this.kill();\n  }\n  async kill() {\n    this.lastKill = this.d.now();\n    await this.d.killTree().catch((e) => this.d.log?.(`kill: ${String(e)}`));\n  }\n  output(type, data) {\n    const log = type === F.stdout ? this.d.out : this.d.err;\n    const offset2 = log.append(data, (e) => {\n      if (!this.journalFailing) this.d.log?.(`journal write failed, output is not being kept: ${String(e)}`);\n      this.journalFailing = true;\n    });\n    const ends = type === F.stdout ? this.scanner.push(data) : [];\n    const c = this.client;\n    if (c) {\n      for (const frame of encodeOutput(type, offset2, data)) c.write(frame);\n    }\n    for (const end of ends) {\n      if (!this.activeRun) continue;\n      const runId = this.activeRun;\n      this.activeRun = void 0;\n      this.d.journalRun({\n        t: "end",\n        runId,\n        exitCode: end.exitCode,\n        cwd: end.cwd,\n        out: this.d.out.offset,\n        err: this.d.err.offset,\n        at: (/* @__PURE__ */ new Date()).toISOString()\n      });\n      this.ends.push({ runId, exitCode: end.exitCode, cwd: end.cwd, out: this.d.out.offset });\n      if (this.ends.length > 32) this.ends.shift();\n      c?.write(encodeFrame(F.runEnd, { runId, exitCode: end.exitCode, cwd: end.cwd }));\n    }\n    const max = this.d.maxBacklog ?? 8 * 1024 * 1024;\n    if (c && c.writableLength <= max) this.allowance = 0;\n    if (c && c.writableLength > max + this.allowance) {\n      this.d.log?.(`client ${c.writableLength} bytes behind; dropping it until it re-attaches`);\n      this.client = void 0;\n      c.destroy();\n    }\n  }\n  /** The shell exited (or closed, or never started). Finishes the session once, whichever comes first. */\n  shellExited(code, signal) {\n    if (this.shellExit) return;\n    this.shellExit = { code, signal: signal ?? null };\n    void this.finish();\n  }\n  async finish() {\n    if (!this.ending) await this.kill();\n    if (!this.closed) {\n      await new Promise((resolve2) => {\n        const t = setTimeout(resolve2, this.d.closeGraceMs ?? 1e3);\n        this.onClosed = () => {\n          clearTimeout(t);\n          resolve2();\n        };\n      });\n      this.onClosed = void 0;\n      if (!this.closed) {\n        this.d.shell.stdout?.destroy?.();\n        this.d.shell.stderr?.destroy?.();\n      }\n    }\n    if (this.exitMsg) return;\n    const exit = {\n      code: this.shellExit.code,\n      signal: this.shellExit.signal,\n      reason: this.ending?.reason ?? "exited",\n      ...this.ending?.detail ? { detail: this.ending.detail } : {}\n    };\n    this.exitMsg = exit;\n    for (const e of this.elevations.values()) {\n      e.client.write(encodeFrame(F.elevateDone, { code: null, error: "the shell ended" }));\n      e.client.end();\n    }\n    this.elevations.clear();\n    const c = this.client;\n    if (c) {\n      for (const id of this.cancels) c.write(encodeFrame(F.elevateCancel, { id }));\n      c.write(encodeFrame(F.exit, exit));\n      c.end();\n      this.client = void 0;\n    }\n    this.d.onExit(exit);\n  }\n}\nfunction write(client, frame) {\n  client.write(frame);\n  return frame.length;\n}\nfunction* replay(log, from, type) {\n  for (const { offset: offset2, data } of log.read(from)) yield* encodeOutput(type, offset2, data);\n}\nasync function sweepInstance(o) {\n  const result = { reaped: [], deadMan: [], removed: [] };\n  const contact = lastContact(o.root, o.instance);\n  const silentFor = contact === void 0 ? 0 : o.now - contact;\n  const records = listRecords(o.root, o.instance);\n  if (!records.length) return result;\n  const rows = await o.io.listProcs();\n  for (const { dir, rec } of records) {\n    if (rec.sid === o.selfSid) continue;\n    if (rec.state === "exited") {\n      const at = Date.parse(rec.exit?.at ?? rec.startedAt);\n      if (Number.isFinite(at) && o.now - at > (o.keepExitedMs ?? 24 * 36e5)) {\n        rmSync(dir, { recursive: true, force: true });\n        result.removed.push(rec.sid);\n      }\n      continue;\n    }\n    const target = { root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: o.self };\n    if (!ownerLive(rows, rec)) {\n      await killTree(o.io, target);\n      finish(dir, rec, o, "killed", "its owner process was gone");\n      result.reaped.push(rec.sid);\n    } else if (silentFor > o.deadManMs) {\n      await killTree(o.io, target);\n      if (rec.ownerPid !== o.self) o.io.kill(rec.ownerPid, "SIGKILL");\n      finish(dir, rec, o, "dead-man", `no Dispatch contact for ${Math.round(silentFor / 36e5)}h`);\n      result.deadMan.push(rec.sid);\n    }\n  }\n  return result;\n}\nfunction finish(dir, rec, o, reason, detail) {\n  writeRecord(join(dir, "session.json"), {\n    ...rec,\n    state: "exited",\n    exit: { code: null, signal: "SIGKILL", reason, detail, at: new Date(o.now).toISOString() }\n  });\n  rmSync(socketPath(o.root, o.instance, rec.sid), { force: true });\n}\nconst AGENT_VERSION = "0.4.0";\nconst NO_CWD_EXIT = 97;\nfunction bashPath() {\n  for (const p of ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]) if (existsSync(p)) return p;\n  return "bash";\n}\nfunction attachMsg(payload) {\n  const m = decodeJson(payload);\n  const r = m?.resume;\n  const ok = (n) => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;\n  if (r !== void 0 && !(ok(r.out) && ok(r.err))) throw new Error("ATTACH with a malformed resume point");\n  return { v: Number(m?.v) || 0, ...r ? { resume: { out: r.out, err: r.err } } : {} };\n}\nasync function runOwner(a) {\n  const paths = sessionPaths(a.root, a.instance, a.sid);\n  mkdirSync(paths.dir, { recursive: true, mode: 448 });\n  mkdirSync(`${a.root}/run`, { recursive: true, mode: 448 });\n  const log = (line) => process.stderr.write(`${(/* @__PURE__ */ new Date()).toISOString()} ${line}\n`);\n  const prev = readRecord(paths.record);\n  if (prev && prev.state === "running" && prev.ownerPid !== process.pid) {\n    const rows = await listProcs().catch(() => []);\n    if (sameProcess(rows, prev.ownerPid, prev.ownerStart)) {\n      log(`session ${a.sid} already has an owner (${prev.ownerPid}); exiting`);\n      process.exit(0);\n    }\n  }\n  const rec = {\n    v: 1,\n    instance: a.instance,\n    chat: a.chat,\n    sid: a.sid,\n    agentVersion: AGENT_VERSION,\n    cwd: a.cwd,\n    ownerPid: process.pid,\n    state: "starting",\n    ...a.exec ? { kind: "process" } : {},\n    startedAt: (/* @__PURE__ */ new Date()).toISOString()\n  };\n  const save = () => writeRecord(paths.record, rec);\n  const fail = (code, reason, detail) => {\n    rec.state = "exited";\n    rec.exit = { code, signal: null, reason, detail, at: (/* @__PURE__ */ new Date()).toISOString() };\n    try {\n      save();\n    } catch {\n    }\n    log(`not started: ${detail}`);\n    process.exit(code);\n  };\n  try {\n    save();\n    let isDir2 = false;\n    try {\n      isDir2 = statSync(a.cwd).isDirectory();\n    } catch {\n    }\n    if (!isDir2) fail(NO_CWD_EXIT, "start-failed", "no-cwd");\n    await serve(a, paths, rec, save, log);\n  } catch (e) {\n    fail(1, "start-failed", e instanceof Error ? e.message : String(e));\n  }\n}\nasync function serve(a, paths, rec, save, log) {\n  const login = await captureLoginEnv({ shell: loginShell(process.env, process.platform), node: process.execPath }).catch(\n    (err2) => {\n      log(`login environment not read (${String(err2)}); using the fallback PATH`);\n      return void 0;\n    }\n  );\n  let elevate;\n  const script = process.argv[1];\n  if (script && !a.exec) {\n    const binDir = posix.join(posix.dirname(script), "bin");\n    try {\n      ensureShims(binDir, process.execPath, script);\n      elevate = { binDir, socket: paths.socket };\n    } catch (e) {\n      log(`elevation shims not written (${String(e)}); sudo in this shell is the machine\'s own`);\n    }\n  }\n  const env = shellEnv({ agentEnv: process.env, ...login ? { login } : {}, extra: a.extraEnv, clt: hasCommandLineTools(), ...elevate ? { elevate } : {} });\n  const [program, args] = a.exec ? [a.exec[0], a.exec.slice(1)] : [bashPath(), ["--noprofile", "--norc"]];\n  const shell = spawn(program, args, { cwd: a.cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });\n  if (!shell.pid) {\n    const err2 = await new Promise((r) => shell.once("error", r));\n    throw new Error(`${a.exec ? program : "bash"} did not start: ${err2.message}`);\n  }\n  shell.stdin.on("error", () => {\n  });\n  rec.shellPid = shell.pid;\n  rec.state = "running";\n  const rows = await listProcs().catch(() => []);\n  rec.ownerStart = rows.find((r) => r.pid === process.pid)?.start;\n  rec.shellStart = rows.find((r) => r.pid === shell.pid)?.start;\n  save();\n  log(`session ${a.sid} for chat ${a.chat}: ${a.exec ? `process ${JSON.stringify(a.exec).slice(0, 300)}` : "bash"} ${shell.pid} in ${a.cwd}`);\n  const out2 = StreamLog.open(paths.dir, "out");\n  const err = StreamLog.open(paths.dir, "err");\n  const target = () => ({ root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: process.pid });\n  let lastTouch = 0;\n  const contact = () => {\n    const now = Date.now();\n    if (now - lastTouch < 3e4) return;\n    lastTouch = now;\n    try {\n      touchContact(a.root, a.instance);\n    } catch {\n    }\n  };\n  contact();\n  const timers = [];\n  const server = createServer();\n  const session = new Session({\n    sid: a.sid,\n    agentVersion: AGENT_VERSION,\n    cwd: a.cwd,\n    shell,\n    out: out2,\n    err,\n    journalRun: (e) => {\n      try {\n        appendRun(paths.runs, e);\n      } catch (x) {\n        log(`runs journal: ${String(x)}`);\n      }\n    },\n    now: () => performance.now(),\n    heartbeatMs: a.heartbeatMs,\n    killTree: async () => {\n      await killTree(hostKillIo, target());\n    },\n    signal: (name) => signalTree(hostKillIo, target(), `SIG${name}`),\n    onContact: contact,\n    log,\n    onExit: (exit) => {\n      rec.state = "exited";\n      rec.exit = { ...exit, at: (/* @__PURE__ */ new Date()).toISOString() };\n      try {\n        save();\n      } catch (x) {\n        log(`record: ${String(x)}`);\n      }\n      log(`session over: ${exit.reason} (code ${exit.code ?? "none"}${exit.detail ? `, ${exit.detail}` : ""})`);\n      for (const t of timers) clearInterval(t);\n      server.close();\n      rmSync(paths.socket, { force: true });\n      out2.close();\n      err.close();\n      setTimeout(() => process.exit(0), 500).unref();\n    }\n  });\n  server.on("connection", (sock) => {\n    const client = sock;\n    const dec = new FrameDecoder();\n    let kind = "new";\n    sock.on("data", (chunk) => {\n      try {\n        for (const f of dec.push(chunk)) {\n          if (kind === "new") {\n            if (f.type === F.elevate) {\n              kind = "elevate";\n              let msg;\n              try {\n                msg = checkElevate(decodeJson(f.payload));\n              } catch (e) {\n                sock.end(encodeFrame(F.elevateDone, { code: null, error: e instanceof Error ? e.message : String(e) }));\n                return;\n              }\n              const id = session.elevate(client, msg);\n              if (id) log(`elevation ${id} asked: ${JSON.stringify(msg.argv).slice(0, 300)}`);\n              continue;\n            }\n            if (f.type !== F.attach) throw new Error(`first frame 0x${f.type.toString(16)} is not ATTACH`);\n            kind = "relay";\n            contact();\n            session.attach(client, attachMsg(f.payload));\n          } else if (kind === "elevate") {\n            continue;\n          } else if (!session.handle(client, f)) {\n            throw new Error("the client sent a frame it could not have meant");\n          }\n        }\n      } catch (e) {\n        log(`dropping a client: ${String(e)}`);\n        if (kind === "elevate") session.elevateGone(client);\n        else session.detachClient(client);\n        sock.destroy();\n      }\n    });\n    sock.on("close", () => kind === "elevate" ? session.elevateGone(client) : session.detachClient(client));\n    sock.on("error", () => {\n    });\n  });\n  rmSync(paths.socket, { force: true });\n  await new Promise((resolve2, reject) => {\n    server.once("error", reject);\n    server.listen(paths.socket, () => resolve2());\n  });\n  chmodSync(paths.socket, 384);\n  timers.push(setInterval(() => session.tick(), 1e3));\n  timers.push(\n    setInterval(() => {\n      if (!rec.shellPid || session.exited) return;\n      void (async () => {\n        const now = await listProcs();\n        const kept = (rec.tracked ?? []).filter((t) => sameProcess(now, t.pid, t.start));\n        const known = new Set(kept.map((t) => `${t.pid}@${t.start}`));\n        const fresh = escapees(now, rec.shellPid, await sessionMembers(rec.shellPid)).filter((t) => !known.has(`${t.pid}@${t.start}`));\n        if (!fresh.length && kept.length === (rec.tracked ?? []).length) return;\n        rec.tracked = [...kept, ...fresh].slice(-256);\n        if (!session.exited) save();\n      })().catch(() => {\n      });\n    }, 5e3)\n  );\n  timers.push(\n    setInterval(() => {\n      void (async () => {\n        const r = await sweepInstance({\n          root: a.root,\n          instance: a.instance,\n          now: Date.now(),\n          deadManMs: a.deadManMs,\n          self: process.pid,\n          selfSid: a.sid,\n          io: hostKillIo\n        });\n        if (r.reaped.length || r.deadMan.length) log(`sweep: reaped ${r.reaped.join(",") || "none"}; dead-man ${r.deadMan.join(",") || "none"}`);\n        const last = lastContact(a.root, a.instance);\n        if (last !== void 0 && Date.now() - last > a.deadManMs) {\n          await session.terminate("dead-man", `no Dispatch contact for ${Math.round((Date.now() - last) / 36e5)}h`);\n        }\n      })().catch((e) => log(`sweep: ${String(e)}`));\n    }, 6e4)\n  );\n  process.on("SIGHUP", () => {\n  });\n  process.on("SIGTERM", () => void session.terminate("killed", "SIGTERM"));\n  for (const t of timers) t.unref?.();\n}\nfunction trashDir(root) {\n  return join(root, "trash");\n}\nconst TRASH_GRACE_MS = 10 * 6e4;\nfunction discard(root, dir, label, now = Date.now()) {\n  if (!existsSync(dir)) return false;\n  const trash = trashDir(root);\n  mkdirSync(trash, { recursive: true, mode: 448 });\n  const to = join(trash, `${label}.${now.toString(36)}.${process.pid}`);\n  renameSync(dir, to);\n  const child = spawn("/bin/sh", ["-c", \'chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"\', "sh", to], {\n    detached: true,\n    stdio: "ignore"\n  });\n  child.on("error", () => {\n  });\n  child.unref();\n  return true;\n}\nasync function forgetChat(o) {\n  const chat = assertId("chat", o.chat);\n  const { reposDir, chatsDir, mcpDir } = instanceLayout(o.root, o.instance);\n  const killed = [];\n  for (const { dir, rec } of listRecords(o.root, o.instance)) {\n    if (rec.chat !== chat || rec.state === "exited") continue;\n    await o.kill(join(dir, "session.json"), rec);\n    killed.push(rec.sid);\n  }\n  let sessions = 0;\n  for (const { dir, rec } of listRecords(o.root, o.instance)) {\n    if (rec.chat !== chat || readRecord(join(dir, "session.json"))?.state !== "exited") continue;\n    rmSync(dir, { recursive: true, force: true });\n    sessions++;\n  }\n  let refs = 0;\n  const errors = [];\n  for (const repo of repos(reposDir)) {\n    if (!existsSync(join(repo, "HEAD")) || !existsSync(join(repo, "objects"))) continue;\n    const names = [`refs/dispatch/chats/${chat}`, ...keepRefs(chat)];\n    const list = await git(["--git-dir", repo, "for-each-ref", "--format=%(refname)", ...names]);\n    if (list.code !== 0) {\n      errors.push(`${basename(repo)}: ${gitError(list)}`);\n      continue;\n    }\n    const had = list.stdout.trim();\n    if (!had) continue;\n    let dropped = true;\n    for (const ref of had.split("\\n")) {\n      const d = await git(["--git-dir", repo, "update-ref", "-d", ref]);\n      if (d.code !== 0) {\n        errors.push(`${basename(repo)} ${ref}: ${gitError(d)}`);\n        dropped = false;\n      }\n    }\n    if (dropped) refs++;\n  }\n  const removed = discard(o.root, join(chatsDir, chat), `${o.instance}.chat-${chat}`);\n  discardMcpTmp(o.root, o.instance, chat);\n  const mcp = discard(o.root, join(mcpDir, chat), `${o.instance}.mcp-${chat}`);\n  return { killed, sessions, refs, removed: removed || mcp, ...errors.length ? { errors } : {} };\n}\nfunction gitError(r) {\n  const line = r.stderr.split("\\n").map((l) => l.trim()).find(Boolean);\n  return line ?? (r.code === -1 ? "git could not be run" : `git exited ${r.code}`);\n}\nasync function forgetInstance(o) {\n  const killed = [];\n  for (const { dir, rec } of listRecords(o.root, o.instance)) {\n    if (rec.state === "exited") continue;\n    await o.kill(join(dir, "session.json"), rec);\n    killed.push(rec.sid);\n  }\n  for (const chat of entries(instanceLayout(o.root, o.instance).mcpDir)) discardMcpTmp(o.root, o.instance, chat);\n  const removed = discard(o.root, instanceLayout(o.root, o.instance).dir, `${o.instance}.instance`);\n  return { killed, sessions: 0, refs: 0, removed };\n}\nfunction discardMcpTmp(root, instance, chat) {\n  if (!ID_RE.test(chat)) return;\n  for (const name of entries(join(instanceLayout(root, instance).mcpDir, chat))) {\n    discard(root, mcpTmpPath(root, instance, chat, name), `${instance}.mcp-tmp-${chat}-${name}`);\n  }\n}\nconst ID_RE = /^[A-Za-z0-9_-]{1,64}$/;\nfunction listChats(root, instance) {\n  const { chatsDir, mcpDir } = instanceLayout(root, instance);\n  const seen = /* @__PURE__ */ new Map();\n  for (const dir of [chatsDir, mcpDir]) {\n    for (const chat of entries(dir)) {\n      try {\n        assertId("chat", chat);\n        const mtimeMs = statSync(join(dir, chat)).mtimeMs;\n        seen.set(chat, Math.max(seen.get(chat) ?? 0, mtimeMs));\n      } catch {\n      }\n    }\n  }\n  return [...seen].map(([chat, mtimeMs]) => ({ chat, mtimeMs }));\n}\nfunction listInstances(root) {\n  const out2 = [];\n  for (const id of entries(root)) {\n    let contactAt;\n    try {\n      assertId("instance", id);\n      contactAt = statSync(instanceLayout(root, id).contactFile).mtimeMs;\n    } catch {\n      continue;\n    }\n    const running = listRecords(root, id).filter(({ rec }) => rec.state !== "exited").length;\n    out2.push({ id, contactAt, running });\n  }\n  return out2;\n}\nasync function collectGarbage(o) {\n  const result = { trash: 0, reposRemoved: [], repos: 0, checkouts: 0, errors: [] };\n  const note = (what, err) => result.errors.push(`${what}: ${err instanceof Error ? err.message : String(err)}`);\n  const trash = trashDir(o.root);\n  for (const name of entries(trash)) {\n    const at = parseInt(name.split(".").at(-2) ?? "", 36);\n    if (Number.isFinite(at) && o.now - at < TRASH_GRACE_MS) continue;\n    try {\n      await sh(\'chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"\', join(trash, name));\n      result.trash++;\n    } catch (err) {\n      note(`emptying ${name} from the trash`, err);\n    }\n  }\n  const { reposDir, chatsDir } = instanceLayout(o.root, o.instance);\n  const users = /* @__PURE__ */ new Map();\n  for (const chat of entries(chatsDir)) {\n    for (const name of entries(join(chatsDir, chat))) {\n      const work = join(chatsDir, chat, name);\n      const objects = join(work, ".git", "objects");\n      let alt;\n      try {\n        alt = readFileSync(join(objects, "info", "alternates"), "utf8");\n      } catch {\n        continue;\n      }\n      for (const line of alt.split("\\n").map((l) => l.trim()).filter(Boolean)) {\n        const borrowed = resolve(objects, line);\n        users.set(borrowed, [...users.get(borrowed) ?? [], { chat, work }]);\n      }\n    }\n  }\n  for (const repo of repos(reposDir)) {\n    const name = repo.slice(reposDir.length + 1);\n    const using = users.get(resolve(repo, "objects")) ?? [];\n    if (!using.length) {\n      if (o.now - lastTouched(repo) > (o.repoIdleMs ?? 7 * 864e5)) {\n        try {\n          discard(o.root, repo, `${o.instance}.repo-${name}`, o.now);\n          result.reposRemoved.push(name);\n        } catch (err) {\n          note(`removing ${name}`, err);\n        }\n      }\n      continue;\n    }\n    try {\n      await pinCheckouts(repo, using);\n      await collect(["--git-dir", repo], o.git);\n      result.repos++;\n    } catch (err) {\n      note(`collecting ${name}`, err);\n    }\n  }\n  for (const chat of entries(chatsDir)) {\n    for (const name of entries(join(chatsDir, chat))) {\n      const work = join(chatsDir, chat, name);\n      if (!existsSync(join(work, ".git"))) continue;\n      try {\n        await collect(["-C", work], o.git);\n        result.checkouts++;\n      } catch (err) {\n        note(`collecting chat ${chat}\'s ${name}`, err);\n      }\n    }\n  }\n  return result;\n}\nasync function pinCheckouts(repo, using) {\n  const keep = /* @__PURE__ */ new Set();\n  for (const { chat, work } of using) {\n    for (const [ref, rev] of [\n      [`refs/dispatch/keep/${chat}-head`, "HEAD"],\n      [`refs/dispatch/keep/${chat}-base`, "refs/dispatch/base"]\n    ]) {\n      const sha = (await git(["-C", work, "rev-parse", "-q", "--verify", `${rev}^{commit}`])).stdout.trim();\n      if (!/^[0-9a-f]{40,64}$/.test(sha)) continue;\n      if ((await git(["--git-dir", repo, "cat-file", "-e", `${sha}^{commit}`])).code !== 0) continue;\n      const r = await git(["--git-dir", repo, "update-ref", ref, sha]);\n      if (r.code !== 0) throw new Error(`pinning ${chat}\'s ${rev}: ${r.stderr.trim()}`);\n      keep.add(ref);\n    }\n  }\n  const pinned = (await git(["--git-dir", repo, "for-each-ref", "--format=%(refname)", "refs/dispatch/keep/"])).stdout;\n  for (const ref of pinned.split("\\n").filter(Boolean)) {\n    if (!keep.has(ref)) await git(["--git-dir", repo, "update-ref", "-d", ref]);\n  }\n}\nasync function collect(where, t = {}) {\n  const config = [\n    `gc.auto=${t.auto ?? 1e3}`,\n    `gc.autoPackLimit=${t.autoPackLimit ?? 20}`,\n    // In the foreground: the command\'s result means it is done, and nothing\n    // of ours runs on after the SSH channel that started it.\n    "gc.autoDetach=false",\n    ...t.pruneExpire ? [`gc.pruneExpire=${t.pruneExpire}`] : []\n  ].flatMap((c) => ["-c", c]);\n  const r = await git([...where, ...config, "gc", ...t.force ? [] : ["--auto"], "--quiet"], 10 * 6e4);\n  if (r.code !== 0) throw new Error(r.stderr.trim() || `git gc exited ${r.code}`);\n}\nfunction keepRefs(chat) {\n  return [`refs/dispatch/keep/${chat}-head`, `refs/dispatch/keep/${chat}-base`];\n}\nfunction repos(reposDir) {\n  return entries(reposDir).filter((n) => n.endsWith(".git")).map((n) => join(reposDir, n));\n}\nfunction lastTouched(repo) {\n  let latest = 0;\n  for (const p of ["", "objects", "objects/pack", "refs", "refs/dispatch", "refs/dispatch/chats", "packed-refs"]) {\n    try {\n      latest = Math.max(latest, statSync(join(repo, p)).mtimeMs);\n    } catch {\n    }\n  }\n  return latest;\n}\nfunction entries(dir) {\n  try {\n    return readdirSync(dir);\n  } catch {\n    return [];\n  }\n}\nfunction git(args, timeoutMs = 6e4) {\n  return new Promise((resolveRun) => {\n    execFile("git", args, { env: gitEnv(), timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {\n      const code = err ? typeof err.code === "number" ? err.code : -1 : 0;\n      resolveRun({ code, stdout: String(stdout), stderr: String(stderr) });\n    });\n  });\n}\nfunction sh(script, arg) {\n  return new Promise((resolveRun, reject) => {\n    execFile("/bin/sh", ["-c", script, "sh", arg], { timeout: 10 * 6e4 }, (err) => err ? reject(err) : resolveRun());\n  });\n}\nfunction out(file, args, env, timeoutMs = 1e4) {\n  return new Promise((resolve2) => {\n    execFile(file, args, { env, timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {\n      const code = err ? typeof err.code === "number" ? err.code : -1 : 0;\n      resolve2({ code, stdout: String(stdout).trim(), stderr: String(stderr).trim() });\n    });\n  });\n}\nasync function firstLine(file, args, env) {\n  const r = await out(file, args, env);\n  return r.code === 0 && r.stdout ? r.stdout.split("\\n")[0].trim() : null;\n}\nfunction which(name, path) {\n  for (const dir of (path ?? "").split(":")) {\n    if (!dir) continue;\n    const p = posix.join(dir, name);\n    try {\n      if (!statSync(p).isFile()) continue;\n      accessSync(p, constants.X_OK);\n      return p;\n    } catch {\n    }\n  }\n  return null;\n}\nasync function developerDir(env) {\n  const r = await out("xcode-select", ["-p"], env);\n  return r.code === 0 && r.stdout ? r.stdout.split("\\n")[0].trim() : null;\n}\nfunction wouldPrompt(path, env, mac) {\n  return !!mac && mac.developerDir === null && !env.DEVELOPER_DIR && !!path?.startsWith("/usr/bin/");\n}\nasync function checkGit(env, mac) {\n  const path = which("git", env.PATH);\n  const dev = mac ? { developerDir: env.DEVELOPER_DIR || mac.developerDir } : {};\n  if (!path) return { path: null, ...dev, exitCode: null, version: null };\n  if (wouldPrompt(path, env, mac)) {\n    return { path, ...dev, exitCode: null, version: null, error: "no developer tools; install the Command Line Tools (xcode-select --install)" };\n  }\n  const r = await out(path, ["--version"], env);\n  const version = r.code === 0 && r.stdout ? r.stdout.split("\\n")[0].trim() : null;\n  const error = version ? void 0 : (r.stderr || r.stdout).split("\\n")[0].trim() || void 0;\n  return { path, ...dev, exitCode: r.code, version, ...error ? { error } : {} };\n}\nasync function checkBrew(env, mac, xcrun = "/usr/bin/xcrun") {\n  const path = which("brew", env.PATH);\n  if (!path) return void 0;\n  const [v, p] = await Promise.all([out(path, ["--version"], env), out(path, ["--prefix"], env)]);\n  const version = v.code === 0 && v.stdout ? v.stdout.split("\\n")[0].trim() : null;\n  const said = p.code === 0 ? p.stdout.split("\\n")[0].trim() : "";\n  const prefix = said.startsWith("/") && isDir(said) ? said : posix.dirname(posix.dirname(path));\n  const writable = brewWritable(prefix);\n  let blocked;\n  let cltTooOld;\n  if (mac?.developerDir) {\n    const doctor = out(path, ["doctor", "check_clt_minimum_version"], env);\n    const r = await out(xcrun, ["--find", "clang"], { HOME: env.HOME, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });\n    if (r.code !== 0 && /license/i.test(`${r.stderr}\n${r.stdout}`)) {\n      blocked = `Xcode\'s license isn\'t accepted (exit ${r.code}), and Homebrew ignores DEVELOPER_DIR, so it uses xcode-select\'s ${mac.developerDir}`;\n    }\n    const d = await doctor;\n    if (!blocked) cltTooOld = cltWanted(d.code, `${d.stdout}\n${d.stderr}`);\n  }\n  return { path, version, ...blocked ? { blocked } : {}, writable, ...cltTooOld ? { cltTooOld } : {} };\n}\nfunction cltWanted(code, text) {\n  if (code !== 1 || !/Command Line Tools/.test(text) || /No check available/i.test(text)) return void 0;\n  return text.match(/Command Line Tools for Xcode [\\d.]*\\d/)?.[0] ?? "newer Command Line Tools";\n}\nfunction isDir(p) {\n  try {\n    return statSync(p).isDirectory();\n  } catch {\n    return false;\n  }\n}\nfunction brewWritable(prefix) {\n  const cellar = posix.join(prefix, "Cellar");\n  const bin = posix.join(prefix, "bin");\n  return [isDir(cellar) ? cellar : prefix, ...isDir(bin) ? [bin] : []].every((d) => {\n    try {\n      accessSync(d, constants.W_OK);\n      return true;\n    } catch {\n      return false;\n    }\n  });\n}\nfunction osRelease() {\n  try {\n    const kv = Object.fromEntries(\n      readFileSync("/etc/os-release", "utf8").split("\\n").map((l) => l.match(/^([A-Z_]+)="?(.*?)"?$/)).filter((m) => Boolean(m)).map((m) => [m[1], m[2]])\n    );\n    return { name: kv.NAME, version: kv.VERSION_ID };\n  } catch {\n    return {};\n  }\n}\nasync function probe(root) {\n  let loginEnvError;\n  const login = await captureLoginEnv({ shell: loginShell(process.env, process.platform), node: process.execPath }).catch(\n    (e) => {\n      loginEnvError = e instanceof Error ? e.message : String(e);\n      return void 0;\n    }\n  );\n  const clt = hasCommandLineTools();\n  const env = shellEnv({ agentEnv: process.env, ...login ? { login } : {}, clt });\n  const darwin = process.platform === "darwin";\n  const forGit = gitEnv(process.env, clt);\n  const mac = darwin ? { developerDir: await developerDir(gitEnv(process.env, false)) } : void 0;\n  const xenv = login?.DEVELOPER_DIR || !existsSync(XCODE_DEVELOPER_DIR) ? env : { ...env, DEVELOPER_DIR: XCODE_DEVELOPER_DIR };\n  const xcode = darwin && !wouldPrompt(which("xcodebuild", xenv.PATH), xenv, mac);\n  const shellGit = wouldPrompt(which("git", env.PATH), env, mac) ? Promise.resolve(null) : firstLine("git", ["--version"], env);\n  const [name, version, build, consoleUser, git2, node, pnpm, xcodebuild, firstLaunch, syncGit, brew] = await Promise.all([\n    darwin ? firstLine("sw_vers", ["-productName"], env) : Promise.resolve(null),\n    darwin ? firstLine("sw_vers", ["-productVersion"], env) : Promise.resolve(null),\n    darwin ? firstLine("sw_vers", ["-buildVersion"], env) : Promise.resolve(null),\n    darwin ? firstLine("stat", ["-f", "%Su", "/dev/console"], env) : Promise.resolve(null),\n    shellGit,\n    firstLine("node", ["--version"], env),\n    firstLine("pnpm", ["--version"], env),\n    xcode ? firstLine("xcodebuild", ["-version"], xenv) : Promise.resolve(null),\n    xcode ? out("xcodebuild", ["-checkFirstLaunchStatus"], xenv) : Promise.resolve(null),\n    checkGit(forGit, mac),\n    checkBrew(env, mac)\n  ]);\n  let freeDiskBytes = null;\n  try {\n    const s = statfsSync(homedir());\n    freeDiskBytes = Number(s.bavail) * Number(s.bsize);\n  } catch {\n  }\n  return {\n    agentVersion: AGENT_VERSION,\n    node: process.version,\n    platform: process.platform,\n    arch: process.arch,\n    os: darwin ? { ...name ? { name } : {}, ...version ? { version } : {}, ...build ? { build } : {} } : osRelease(),\n    kernel: release(),\n    user: userInfo().username,\n    home: homedir(),\n    consoleUser,\n    freeDiskBytes,\n    path: env.PATH ?? "",\n    ...loginEnvError ? { loginEnvError } : {},\n    tools: {\n      git: git2,\n      node,\n      pnpm,\n      xcodebuild,\n      xcodeFirstLaunchDone: firstLaunch ? firstLaunch.code === 0 : null\n    },\n    syncGit,\n    ...brew ? { brew } : {},\n    ...root ? { instances: listInstances(root) } : {}\n  };\n}\nfunction prefixFor(root, spec) {\n  const key = spec.packages.map((p) => `${p.name}@${p.version}`).sort().join("\\n");\n  return join(mcpPackagesDir(root), createHash("sha256").update(key).digest("hex").slice(0, 16));\n}\nconst PKG = /^(?:@[a-z0-9][a-z0-9._~-]*\\/)?[a-z0-9][a-z0-9._~-]*$/;\nconst VERSION = /^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$/;\nconst BIN_PART = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;\nfunction checkProvisionSpec(raw) {\n  const o = raw;\n  if (!o || typeof o !== "object") throw new Error("not a provisioning spec");\n  if (!Array.isArray(o.packages) || !o.packages.length || o.packages.length > 8) throw new Error("packages must list 1 to 8 packages");\n  const packages = o.packages.map((p) => {\n    if (!p || typeof p.name !== "string" || !PKG.test(p.name) || p.name.length > 214) throw new Error(`not an npm package name: ${JSON.stringify(p?.name)}`);\n    if (typeof p.version !== "string" || !VERSION.test(p.version) || p.version.length > 64) {\n      throw new Error(`${p.name}: not an exact version: ${JSON.stringify(p.version)}`);\n    }\n    return { name: p.name, version: p.version };\n  });\n  const e = o.entry;\n  if (!e || typeof e.name !== "string" || !packages.some((p) => p.name === e.name)) throw new Error("entry must name one of the packages");\n  if (typeof e.bin !== "string" || e.bin.length > 200 || !e.bin.split("/").every((s) => BIN_PART.test(s))) {\n    throw new Error(`not a path within the package: ${JSON.stringify(e.bin)}`);\n  }\n  if (o.browser !== void 0 && o.browser !== "chromium" && o.browser !== "firefox") throw new Error(`not a browser this installs: ${JSON.stringify(o.browser)}`);\n  if (o.executable && !o.browser) throw new Error("executable needs a browser");\n  return {\n    packages,\n    entry: { name: e.name, bin: e.bin },\n    ...o.browser ? { browser: o.browser } : {},\n    ...o.executable ? { executable: true } : {}\n  };\n}\nconst STEP_MS = 15 * 6e4;\nconst STALE_LOCK_MS = 30 * 6e4;\nasync function provision(rawSpec, d) {\n  const spec = checkProvisionSpec(rawSpec);\n  const prefix = prefixFor(d.root, spec);\n  const browsersPath = browsersDir(d.root);\n  const entry = join(prefix, "node_modules", spec.entry.name, spec.entry.bin);\n  const installed = [];\n  const env = baseEnv(d, browsersPath);\n  if (!ready(prefix)) {\n    await withLock(`${prefix}.lock`, d, async () => {\n      if (ready(prefix)) return;\n      const npmCli = join(dirname(dirname(d.node)), "lib", "node_modules", "npm", "bin", "npm-cli.js");\n      if (!existsSync(npmCli)) throw new Error(`the runtime has no npm (${npmCli} is missing)`);\n      const tmp = `${prefix}.tmp-${process.pid}`;\n      rmSync(tmp, { recursive: true, force: true });\n      mkdirSync(tmp, { recursive: true, mode: 448 });\n      const names = spec.packages.map((p) => `${p.name}@${p.version}`);\n      d.say(`installing ${names.join(", ")}`);\n      const r = await d.run(\n        d.node,\n        [npmCli, "install", "--prefix", tmp, "--no-audit", "--no-fund", "--ignore-scripts", "--omit=dev", "--no-package-lock", "--loglevel=error", ...names],\n        { env, cwd: tmp, timeoutMs: STEP_MS }\n      );\n      if (r.code !== 0) {\n        rmSync(tmp, { recursive: true, force: true });\n        throw new Error(`npm install ${names.join(" ")} failed (exit ${r.code}): ${tail(r.stderr || r.stdout)}`);\n      }\n      if (!existsSync(join(tmp, "node_modules", spec.entry.name, spec.entry.bin))) {\n        rmSync(tmp, { recursive: true, force: true });\n        throw new Error(`${spec.entry.name} installed, but has no ${spec.entry.bin}`);\n      }\n      writeFileSync(join(tmp, ".ready"), JSON.stringify({ packages: spec.packages, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\\n");\n      rmSync(prefix, { recursive: true, force: true });\n      renameSync(tmp, prefix);\n      installed.push(...names);\n    });\n  }\n  if (!existsSync(entry)) throw new Error(`${entry} is missing from an installed prefix; delete ${prefix} to reinstall`);\n  let executablePath;\n  if (spec.browser) {\n    const pwCli = join(prefix, "node_modules", "playwright-core", "cli.js");\n    if (!existsSync(pwCli)) throw new Error(`none of ${spec.packages.map((p) => p.name).join(", ")} brings playwright-core, so no browser can be installed`);\n    await withLock(join(browsersPath, ".install.lock"), d, async () => {\n      mkdirSync(browsersPath, { recursive: true, mode: 448 });\n      const r = await d.run(d.node, [pwCli, "install", spec.browser], { env, cwd: prefix, timeoutMs: STEP_MS });\n      if (r.code !== 0) throw new Error(`installing ${spec.browser} failed (exit ${r.code}): ${tail(r.stderr || r.stdout)}`);\n      if (/download|downloaded/i.test(r.stdout + r.stderr)) installed.push(spec.browser);\n    });\n    if (spec.executable) {\n      const r = await d.run(\n        d.node,\n        ["-e", `process.stdout.write(require(process.argv[1])[process.argv[2]].executablePath())`, join(prefix, "node_modules", "playwright-core"), spec.browser],\n        { env, cwd: prefix, timeoutMs: 6e4 }\n      );\n      executablePath = r.stdout.trim();\n      if (r.code !== 0 || !isAbsolute(executablePath) || !existsSync(executablePath)) {\n        throw new Error(`${spec.browser} is installed but its executable wasn\'t found: ${tail(r.stderr) || executablePath || `exit ${r.code}`}`);\n      }\n    }\n  }\n  return { entry, browsersPath, ...executablePath ? { executablePath } : {}, installed };\n}\nfunction ready(prefix) {\n  return existsSync(join(prefix, ".ready"));\n}\nfunction baseEnv(d, browsersPath) {\n  const env = {};\n  for (const k of ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG"]) {\n    const v = d.env[k];\n    if (v !== void 0) env[k] = v;\n  }\n  env.PATH = `${dirname(d.node)}:/usr/bin:/bin:/usr/sbin:/sbin`;\n  env.npm_config_cache = join(mcpPackagesDir(d.root), ".npm-cache");\n  env.npm_config_update_notifier = "false";\n  env.PLAYWRIGHT_BROWSERS_PATH = browsersPath;\n  return env;\n}\nfunction tail(text) {\n  return text.trim().split("\\n").slice(-6).join(" | ").slice(0, 1e3);\n}\nasync function withLock(lock, d, fn) {\n  const now = d.now ?? Date.now;\n  const sleep = d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));\n  const until = now() + STEP_MS * 2;\n  mkdirSync(dirname(lock), { recursive: true, mode: 448 });\n  let said = false;\n  for (; ; ) {\n    try {\n      mkdirSync(lock, { mode: 448 });\n      writeFileSync(join(lock, "owner"), `${process.pid}\n`);\n      break;\n    } catch (err) {\n      if (err.code !== "EEXIST") throw err;\n    }\n    if (lockAbandoned(lock, now())) {\n      rmSync(lock, { recursive: true, force: true });\n      continue;\n    }\n    if (now() > until) throw new Error(`another install has held ${lock} too long`);\n    if (!said) d.say(`waiting for another install (${lock})`);\n    said = true;\n    await sleep(500);\n  }\n  try {\n    await fn();\n  } finally {\n    rmSync(lock, { recursive: true, force: true });\n  }\n}\nfunction lockAbandoned(lock, now) {\n  try {\n    if (now - statSync(lock).mtimeMs > STALE_LOCK_MS) return true;\n    const pid = Number(readFileSync(join(lock, "owner"), "utf8").trim());\n    if (!Number.isInteger(pid) || pid <= 0) return false;\n    try {\n      process.kill(pid, 0);\n      return false;\n    } catch (err) {\n      return err.code === "ESRCH";\n    }\n  } catch {\n    return false;\n  }\n}\nfunction runProgram(cmd, args, opts) {\n  return new Promise((resolve2) => {\n    const child = spawn(cmd, args, { env: opts.env, cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });\n    let stdout = "";\n    let stderr = "";\n    child.stdout.on("data", (c) => stdout = (stdout + c.toString("utf8")).slice(-64e3));\n    child.stderr.on("data", (c) => stderr = (stderr + c.toString("utf8")).slice(-64e3));\n    const timer = setTimeout(() => {\n      child.kill("SIGKILL");\n      stderr += `\n(killed after ${Math.round(opts.timeoutMs / 1e3)} s)`;\n    }, opts.timeoutMs);\n    child.on("error", (err) => {\n      clearTimeout(timer);\n      resolve2({ code: -1, stdout, stderr: `${stderr}\n${err.message}` });\n    });\n    child.on("close", (code) => {\n      clearTimeout(timer);\n      resolve2({ code, stdout, stderr });\n    });\n  });\n}\nconst USAGE = "usage: dispatch-elevate <command> [args...]\\n  Runs the command as root on this machine once the user approves it in Dispatch.\\n";\nfunction runElevate(args, io) {\n  const argv = args[0] === "--" ? args.slice(1) : [...args];\n  const say = (line) => io.stderr.write(`dispatch-elevate: ${line}\n`);\n  if (!argv.length) {\n    io.stderr.write(USAGE);\n    return Promise.resolve(2);\n  }\n  if (argv.length === 1 && (argv[0] === "-h" || argv[0] === "--help")) {\n    io.stdout.write(USAGE);\n    return Promise.resolve(0);\n  }\n  const socket = io.env[ELEVATE_SOCKET_ENV];\n  if (!socket) {\n    say(`not in a Dispatch chat shell (${ELEVATE_SOCKET_ENV} is not set), so there is nobody to ask`);\n    return Promise.resolve(1);\n  }\n  let msg;\n  try {\n    msg = checkElevate({ argv, cwd: io.cwd });\n  } catch (e) {\n    say(e instanceof Error ? e.message : String(e));\n    return Promise.resolve(2);\n  }\n  return new Promise((resolve2) => {\n    let settled = false;\n    let off = () => {\n    };\n    const finish2 = (code) => {\n      if (settled) return;\n      settled = true;\n      off();\n      sock.destroy();\n      resolve2(code);\n    };\n    const sock = (io.connect ?? ((p) => connect(p)))(socket);\n    const dec = new FrameDecoder();\n    sock.on("connect", () => sock.write(encodeFrame(F.elevate, msg)));\n    sock.on("data", (chunk) => {\n      let frames;\n      try {\n        frames = dec.push(chunk);\n      } catch (e) {\n        say(`garbled answer from the session (${String(e)})`);\n        return finish2(1);\n      }\n      for (const f of frames) {\n        if (f.type === F.elevateData && f.payload.length >= 1) {\n          (f.payload.readUInt8(0) === 2 ? io.stderr : io.stdout).write(f.payload.subarray(1));\n        } else if (f.type === F.elevateDone) {\n          const end = decodeJson(f.payload) ?? { code: null };\n          if (end.error) say(end.error);\n          return finish2(typeof end.code === "number" ? end.code : end.signal ? 128 + signalNumber(end.signal) : 1);\n        }\n      }\n    });\n    sock.on("error", (e) => {\n      say(`can\'t reach this shell\'s session (${e.message})`);\n      finish2(1);\n    });\n    sock.on("close", () => {\n      if (settled) return;\n      say("the session went away before an answer came");\n      finish2(1);\n    });\n    off = io.onSignal?.((signal) => {\n      say(`interrupted (${signal}); the request is withdrawn`);\n      finish2(128 + signalNumber(signal));\n    }) ?? (() => {\n    });\n  });\n}\nfunction signalNumber(name) {\n  const n = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 }[name.startsWith("SIG") ? name : `SIG${name}`];\n  return n ?? 1;\n}\nfunction processSignals(fn) {\n  const sigs = ["SIGINT", "SIGTERM", "SIGHUP"];\n  for (const s of sigs) process.on(s, fn);\n  return () => {\n    for (const s of sigs) process.off(s, fn);\n  };\n}\nconst STARTING_STALE_MS = 3e4;\nasync function runRelay(a) {\n  const paths = sessionPaths(a.root, a.instance, a.sid);\n  touchContact(a.root, a.instance);\n  const send = (type, payload) => a.output.write(encodeFrame(type, payload));\n  const error = (code, message) => {\n    send(F.error, { code, message });\n    return code === "no-cwd" ? NO_CWD_EXIT : 1;\n  };\n  let envB64 = a.envB64;\n  if (a.envFile !== void 0) {\n    try {\n      envB64 = takeEnvFile(a.root, a.instance, a.chat, a.envFile);\n    } catch (e) {\n      return error("bad-args", e instanceof Error ? e.message : String(e));\n    }\n  }\n  let rec = readRecord(paths.record);\n  if (rec?.state === "exited") return replayExited(a, rec);\n  let sock = await tryConnect(paths.socket);\n  if (!sock) {\n    const rows = await listProcs().catch(() => []);\n    if (rec) {\n      const starting = rec.state === "starting" && Date.now() - Date.parse(rec.startedAt) < STARTING_STALE_MS;\n      if (starting || ownerLive(rows, rec)) {\n        sock = await waitForSocket(paths.socket, paths.record, 2e4);\n      } else {\n        return error("gone", `session ${a.sid} is no longer on this host (its owner has exited)`);\n      }\n    } else if (a.resume) {\n      return error("gone", `session ${a.sid} is not on this host`);\n    } else {\n      try {\n        if (!statSync(a.cwd).isDirectory()) return error("no-cwd", `${a.cwd} is not a directory on this host`);\n      } catch {\n        return error("no-cwd", `${a.cwd} does not exist on this host`);\n      }\n      try {\n        decodeEnvArg(envB64);\n        if (a.execB64 !== void 0) decodeExecArg(a.execB64);\n      } catch (e) {\n        return error("bad-args", e instanceof Error ? e.message : String(e));\n      }\n      const won = claimRecord(paths.record, {\n        v: 1,\n        instance: a.instance,\n        chat: a.chat,\n        sid: a.sid,\n        agentVersion: AGENT_VERSION,\n        cwd: a.cwd,\n        ownerPid: 0,\n        state: "starting",\n        ...a.execB64 !== void 0 ? { kind: "process" } : {},\n        startedAt: (/* @__PURE__ */ new Date()).toISOString()\n      });\n      if (won) startOwner(a, envB64, paths.ownerLog, paths.dir);\n      sock = await waitForSocket(paths.socket, paths.record, 2e4);\n    }\n  }\n  if (!sock) {\n    rec = readRecord(paths.record);\n    if (rec?.state === "exited") {\n      if (rec.exit?.detail === "no-cwd") return error("no-cwd", `${a.cwd} does not exist on this host`);\n      if (rec.exit?.reason === "start-failed") return error("start", `the shell did not start: ${rec.exit.detail ?? "unknown"}`);\n      return replayExited(a, rec);\n    }\n    return error("start", `the session\'s owner did not come up (see ${paths.ownerLog})`);\n  }\n  return pipe(a, sock);\n}\nfunction takeEnvFile(root, instance, chat, file) {\n  const base = resolve(root, instance, "mcp", chat);\n  const p = resolve(file);\n  if (!p.startsWith(base + sep)) throw new Error(`--env-file must be under ${base}`);\n  try {\n    return readFileSync(p, "utf8").trim();\n  } catch {\n    throw new Error(`the environment file ${p} is not there`);\n  } finally {\n    rmSync(p, { force: true });\n  }\n}\nfunction startOwner(a, envB64, ownerLog, dir) {\n  mkdirSync(dir, { recursive: true, mode: 448 });\n  const fd = openSync(ownerLog, "a", 384);\n  const args = [\n    a.script,\n    "serve",\n    "--root",\n    a.root,\n    "--instance",\n    a.instance,\n    "--chat",\n    a.chat,\n    "--sid",\n    a.sid,\n    "--cwd",\n    a.cwd,\n    "--heartbeat-ms",\n    String(a.heartbeatMs),\n    "--dead-man-hours",\n    String(a.deadManHours),\n    ...a.execB64 !== void 0 ? ["--exec", a.execB64] : []\n  ];\n  const env = envB64 ? { ...process.env, [SESSION_ENV_VAR]: envB64 } : process.env;\n  spawn(process.execPath, args, { detached: true, stdio: ["ignore", fd, fd], cwd: dir, env }).unref();\n}\nfunction tryConnect(path) {\n  return new Promise((resolve2) => {\n    const s = connect(path);\n    s.once("connect", () => {\n      s.removeAllListeners("error");\n      resolve2(s);\n    });\n    s.once("error", () => resolve2(void 0));\n  });\n}\nasync function waitForSocket(path, record, ms) {\n  const until = Date.now() + ms;\n  while (Date.now() < until) {\n    const s = await tryConnect(path);\n    if (s) return s;\n    if (readRecord(record)?.state === "exited") return void 0;\n    await new Promise((r) => setTimeout(r, 50));\n  }\n  return void 0;\n}\nfunction pipe(a, sock) {\n  return new Promise((resolve2) => {\n    let done = false;\n    const finish2 = () => {\n      if (done) return;\n      done = true;\n      sock.destroy();\n      resolve2(0);\n    };\n    const hangUp = () => {\n      sock.end();\n      setTimeout(finish2, 2e3).unref();\n    };\n    sock.write(encodeFrame(F.attach, { v: PROTOCOL_VERSION, ...a.resume ? { resume: a.resume } : {} }));\n    a.input.on("data", (c) => {\n      if (!sock.write(c)) {\n        a.input.pause();\n        sock.once("drain", () => a.input.resume());\n      }\n    });\n    a.input.on("end", hangUp);\n    a.input.on("error", hangUp);\n    sock.on("data", (c) => {\n      if (!a.output.write(c)) {\n        sock.pause();\n        a.output.once("drain", () => sock.resume());\n      }\n    });\n    sock.on("close", finish2);\n    sock.on("error", finish2);\n    a.output.on("error", finish2);\n  });\n}\nfunction replayExited(a, rec) {\n  const paths = sessionPaths(a.root, a.instance, a.sid);\n  const out2 = StreamLog.open(paths.dir, "out");\n  const err = StreamLog.open(paths.dir, "err");\n  const from = a.resume ?? { out: 0, err: 0 };\n  const gap = {};\n  if (out2.start > from.out) gap.out = out2.start;\n  if (err.start > from.err) gap.err = err.start;\n  const ready2 = {\n    v: PROTOCOL_VERSION,\n    sid: rec.sid,\n    pid: rec.shellPid ?? 0,\n    agentVersion: rec.agentVersion,\n    cwd: rec.cwd,\n    out: out2.offset,\n    err: err.offset,\n    resumed: true,\n    ...gap.out !== void 0 || gap.err !== void 0 ? { gap } : {}\n  };\n  a.output.write(encodeFrame(F.ready, ready2));\n  for (const f of replay(out2, from.out, F.stdout)) a.output.write(f);\n  for (const f of replay(err, from.err, F.stderr)) a.output.write(f);\n  for (const e of readRuns(paths.runs)) {\n    if (e.t === "end" && e.out > from.out) a.output.write(encodeFrame(F.runEnd, { runId: e.runId, exitCode: e.exitCode, cwd: e.cwd }));\n  }\n  const exit = {\n    code: rec.exit?.code ?? null,\n    signal: rec.exit?.signal ?? null,\n    reason: rec.exit?.reason ?? "exited",\n    ...rec.exit?.detail ? { detail: rec.exit.detail } : {}\n  };\n  a.output.write(encodeFrame(F.exit, exit));\n  return 0;\n}\nfunction parseArgs(argv) {\n  const [cmd = "", ...rest] = argv;\n  const opts = {};\n  const flags = /* @__PURE__ */ new Set();\n  for (let i = 0; i < rest.length; i++) {\n    const a = rest[i];\n    if (!a.startsWith("--")) throw new UsageError(`unexpected argument ${JSON.stringify(a)}`);\n    const key = a.slice(2);\n    const next = rest[i + 1];\n    if (next === void 0 || next.startsWith("--")) flags.add(key);\n    else {\n      opts[key] = next;\n      i++;\n    }\n  }\n  return { cmd, opts, flags };\n}\nclass UsageError extends Error {\n}\nconst DEFAULT_HEARTBEAT_MS = 6e4;\nconst DEFAULT_DEAD_MAN_HOURS = 12;\nfunction need(opts, key) {\n  const v = opts[key];\n  if (v === void 0 || v === "") throw new UsageError(`--${key} is required`);\n  return v;\n}\nfunction num(opts, key, dflt) {\n  const v = opts[key];\n  if (v === void 0) return dflt;\n  const n = Number(v);\n  if (!Number.isFinite(n) || n < 0) throw new UsageError(`--${key} must be a non-negative number`);\n  return n;\n}\nfunction offset(opts, key) {\n  const n = num(opts, key, 0);\n  if (!Number.isSafeInteger(n)) throw new UsageError(`--${key} must be a whole number of bytes`);\n  return n;\n}\nfunction print(value) {\n  process.stdout.write(JSON.stringify(value) + "\\n");\n}\nasync function main(argv) {\n  if (argv[0] === "elevate") {\n    return runElevate(argv.slice(1), {\n      env: process.env,\n      cwd: process.cwd(),\n      stdout: process.stdout,\n      stderr: process.stderr,\n      onSignal: processSignals\n    });\n  }\n  const { cmd, opts, flags } = parseArgs(argv);\n  const root = opts.root ?? process.env.DISPATCH_HOST_ROOT ?? rootDir(homedir());\n  const instance = () => assertId("instance", need(opts, "instance"));\n  switch (cmd) {\n    case "version":\n      process.stdout.write(`${AGENT_VERSION}\n`);\n      return 0;\n    case "session": {\n      const resumeOut = opts["resume-out"];\n      const resumeErr = opts["resume-err"];\n      return runRelay({\n        root,\n        instance: instance(),\n        chat: assertId("chat", need(opts, "chat")),\n        sid: assertId("sid", need(opts, "sid")),\n        cwd: need(opts, "cwd"),\n        ...opts.env ? { envB64: opts.env } : {},\n        ...opts["env-file"] ? { envFile: opts["env-file"] } : {},\n        ...opts.exec ? { execB64: opts.exec } : {},\n        ...resumeOut !== void 0 || resumeErr !== void 0 ? { resume: { out: offset(opts, "resume-out"), err: offset(opts, "resume-err") } } : {},\n        heartbeatMs: num(opts, "heartbeat-ms", DEFAULT_HEARTBEAT_MS),\n        deadManHours: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS),\n        script: fileURLToPath(import.meta.url),\n        input: process.stdin,\n        output: process.stdout\n      });\n    }\n    case "serve":\n      await runOwner({\n        root,\n        instance: instance(),\n        chat: assertId("chat", need(opts, "chat")),\n        sid: assertId("sid", need(opts, "sid")),\n        cwd: need(opts, "cwd"),\n        extraEnv: decodeEnvArg(takeSessionEnv() ?? opts.env),\n        ...opts.exec ? { exec: decodeExecArg(opts.exec) } : {},\n        heartbeatMs: num(opts, "heartbeat-ms", DEFAULT_HEARTBEAT_MS),\n        deadManMs: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS) * 36e5\n      });\n      return -1;\n    // keep running: the owner exits on its own\n    case "hello": {\n      const id = instance();\n      touchContact(root, id);\n      print({ agentVersion: AGENT_VERSION, protocol: PROTOCOL_VERSION, node: process.version, platform: process.platform, arch: process.arch, pid: process.pid });\n      return 0;\n    }\n    case "probe":\n      print(await probe(root));\n      return 0;\n    case "list": {\n      const id = instance();\n      touchContact(root, id);\n      const rows = await listProcs().catch(() => []);\n      print(\n        listRecords(root, id).map(({ rec }) => ({\n          sid: rec.sid,\n          chat: rec.chat,\n          state: rec.state,\n          ownerAlive: ownerLive(rows, rec),\n          shellPid: rec.shellPid ?? null,\n          cwd: rec.cwd,\n          agentVersion: rec.agentVersion,\n          startedAt: rec.startedAt,\n          exit: rec.exit ?? null\n        }))\n      );\n      return 0;\n    }\n    case "ports": {\n      const id = instance();\n      touchContact(root, id);\n      const [rows, listeners] = await Promise.all([listProcs(), listListeners()]);\n      const live = listRecords(root, id).filter(({ rec }) => rec.state === "running" && rec.kind !== "process" && ownerLive(rows, rec));\n      const att = attribute(\n        listeners,\n        rows,\n        live.map(({ rec }) => ({ sid: rec.sid, chat: rec.chat, root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked }))\n      );\n      const chat = opts.chat;\n      print({\n        sessions: att.sessions.filter((s) => !chat || s.chat === chat),\n        unattributed: att.unattributed\n      });\n      return 0;\n    }\n    case "kill": {\n      const id = instance();\n      touchContact(root, id);\n      const all = flags.has("all");\n      const sid = opts.sid;\n      const chat = opts.chat;\n      if (!all && !sid && !chat) throw new UsageError("kill needs --sid, --chat or --all");\n      const killed = [];\n      for (const { dir, rec } of listRecords(root, id)) {\n        if (rec.state === "exited") continue;\n        if (!all && rec.sid !== sid && rec.chat !== chat) continue;\n        await killSession(join(dir, "session.json"), rec);\n        killed.push(rec.sid);\n      }\n      print({ killed });\n      return 0;\n    }\n    case "forget": {\n      const id = instance();\n      touchContact(root, id);\n      if (flags.has("all")) {\n        print(await forgetInstance({ root, instance: id, kill: killSession }));\n        return 0;\n      }\n      const chat = need(opts, "chat");\n      const r = await forgetChat({ root, instance: id, chat, kill: killSession });\n      print(r);\n      if (r.errors?.length) {\n        process.stderr.write(`dispatch-host: could not delete chat ${chat}\'s refs: ${r.errors.join("; ")}\n`);\n        return 1;\n      }\n      return 0;\n    }\n    case "mcp-provision": {\n      let spec;\n      try {\n        spec = JSON.parse(Buffer.from(need(opts, "spec"), "base64").toString("utf8"));\n      } catch {\n        throw new UsageError("--spec must be base64 JSON");\n      }\n      print(\n        await provision(spec, {\n          root,\n          node: process.execPath,\n          run: runProgram,\n          say: (line) => process.stderr.write(`dispatch-host: ${line}\n`),\n          env: process.env\n        })\n      );\n      return 0;\n    }\n    case "chats": {\n      const id = instance();\n      touchContact(root, id);\n      print(listChats(root, id));\n      return 0;\n    }\n    case "gc": {\n      const id = instance();\n      touchContact(root, id);\n      print(await collectGarbage({ root, instance: id, now: Date.now(), repoIdleMs: num(opts, "repo-idle-days", 7) * 864e5 }));\n      return 0;\n    }\n    case "sweep": {\n      const id = instance();\n      touchContact(root, id);\n      print(\n        await sweepInstance({\n          root,\n          instance: id,\n          now: Date.now(),\n          deadManMs: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS) * 36e5,\n          self: process.pid,\n          io: hostKillIo\n        })\n      );\n      return 0;\n    }\n    default:\n      throw new UsageError(`unknown command ${JSON.stringify(cmd)}`);\n  }\n}\nasync function killSession(recordFile, rec) {\n  const owner = async () => ownerLive(await listProcs(), rec);\n  if (await owner()) {\n    try {\n      process.kill(rec.ownerPid, "SIGTERM");\n    } catch {\n    }\n    const until = Date.now() + 5e3;\n    while (Date.now() < until) {\n      if (readRecord(recordFile)?.state === "exited") return;\n      await new Promise((r) => setTimeout(r, 100));\n    }\n  }\n  const target = { root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: process.pid };\n  await killTree(hostKillIo, target);\n  if (await owner()) {\n    try {\n      process.kill(rec.ownerPid, "SIGKILL");\n    } catch {\n    }\n  }\n  const now = readRecord(recordFile);\n  if (now && now.state !== "exited") {\n    writeRecord(recordFile, {\n      ...now,\n      state: "exited",\n      exit: { code: null, signal: "SIGKILL", reason: "killed", detail: "dispatch-host kill", at: (/* @__PURE__ */ new Date()).toISOString() }\n    });\n  }\n}\nfunction isEntry() {\n  const argv1 = process.argv[1];\n  if (!argv1) return false;\n  try {\n    return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url));\n  } catch {\n    return false;\n  }\n}\nif (isEntry()) {\n  main(process.argv.slice(2)).then(\n    (code) => {\n      if (code < 0) return;\n      process.exitCode = code;\n      process.stdout.write("", () => process.stderr.write("", () => process.exit(code)));\n    },\n    (err) => {\n      process.stderr.write(`dispatch-host: ${err instanceof Error ? err.message : String(err)}\n`);\n      process.exit(err instanceof UsageError ? 2 : 1);\n    }\n  );\n}\nexport {\n  UsageError,\n  killSession,\n  main,\n  parseArgs\n};\n';
 let bundled;
 function bundledAgent() {
   bundled ??= { version: AGENT_VERSION, source: agentSource, sha256: sha256(Buffer.from(agentSource, "utf8")) };
@@ -21356,9 +21376,9 @@ function approvalsOf(ctx) {
   return a && typeof a.request === "function" ? a : void 0;
 }
 class ElevationLoginError extends Error {
-  constructor(message, kind) {
+  constructor(message, kind2) {
     super(message);
-    this.kind = kind;
+    this.kind = kind2;
     this.name = "ElevationLoginError";
   }
 }
@@ -21460,7 +21480,7 @@ class Elevation {
     } catch (err) {
       conn.close();
       if (signal?.aborted) throw err;
-      const why = errText(err);
+      const why = errText$1(err);
       if (/authentication/i.test(why)) {
         throw new ElevationLoginError(`${host.label} refused the elevation key`, "refused");
       }
@@ -21482,7 +21502,7 @@ class Elevation {
     try {
       end = await this.process(job, req);
     } catch (err) {
-      end = { code: null, error: `elevation failed: ${errText(err)}` };
+      end = { code: null, error: `elevation failed: ${errText$1(err)}` };
     } finally {
       this.active.delete(id);
       this.done.add(id);
@@ -21509,7 +21529,7 @@ class Elevation {
     try {
       msg = checkElevate(req);
     } catch (err) {
-      return { code: null, error: errText(err) };
+      return { code: null, error: errText$1(err) };
     }
     const cmd = displayCommand(msg.argv);
     if (cmd.length > APPROVAL_COMMAND_MAX) {
@@ -21556,7 +21576,7 @@ class Elevation {
         });
       } catch (err) {
         if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
-        return { code: null, error: `asking the user for approval failed (${errText(err)}); nothing ran` };
+        return { code: null, error: `asking the user for approval failed (${errText$1(err)}); nothing ran` };
       }
       shell.release(id);
       const by = answer.by ? ` by ${answer.by}` : "";
@@ -21583,10 +21603,10 @@ class Elevation {
       conn = await this.login(key2, abort.signal);
     } catch (err) {
       if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
-      const kind = err instanceof ElevationLoginError ? err.kind : "unreachable";
+      const kind2 = err instanceof ElevationLoginError ? err.kind : "unreachable";
       return {
         code: null,
-        error: kind === "refused" ? `${host.label} refused the elevation key, so nothing ran. Elevation may have been removed there, or this computer's address changed; the user can set it up again in Settings → Remote hosts.` : `${errText(err)}; nothing ran`
+        error: kind2 === "refused" ? `${host.label} refused the elevation key, so nothing ran. Elevation may have been removed there, or this computer's address changed; the user can set it up again in Settings → Remote hosts.` : `${errText$1(err)}; nothing ran`
       };
     }
     try {
@@ -21594,7 +21614,7 @@ class Elevation {
       try {
         ch = await conn.channel(runCommand(id, cwd, argv));
       } catch (err) {
-        return { code: null, error: `the root helper on ${host.label} did not start (${errText(err)}); nothing ran` };
+        return { code: null, error: `the root helper on ${host.label} did not start (${errText$1(err)}); nothing ran` };
       }
       if (abort.signal.aborted) {
         try {
@@ -21993,7 +22013,7 @@ class HostLink {
         await this.hello();
         await this.probeNow();
       } catch (err) {
-        this.lost(`no answer: ${errText(err)}`);
+        this.lost(`no answer: ${errText$1(err)}`);
       }
       return this.current;
     }
@@ -22027,7 +22047,7 @@ class HostLink {
           this.failures++;
           const wait = this.t.backoffMs[Math.min(this.failures - 1, this.t.backoffMs.length - 1)] ?? 6e4;
           this.nextAttemptAt = this.now() + wait;
-          if (!this.disposed) this.report({ state: "offline", detail: errText(err), ...this.seen() });
+          if (!this.disposed) this.report({ state: "offline", detail: errText$1(err), ...this.seen() });
         }
         throw err;
       }
@@ -22112,7 +22132,7 @@ class HostLink {
     try {
       this.deps.onConnected?.();
     } catch (err) {
-      this.deps.log.warn(`remote-host ${this.host.slug}: ${errText(err)}`);
+      this.deps.log.warn(`remote-host ${this.host.slug}: ${errText$1(err)}`);
     }
     return linked;
   }
@@ -22206,23 +22226,23 @@ class HostLink {
         try {
           await this.hello();
         } catch (err) {
-          if (/channel open failure|open failed/i.test(errText(err))) {
-            this.deps.log.warn(`remote-host ${this.host.slug}: hello could not open a channel: ${errText(err)}`);
+          if (/channel open failure|open failed/i.test(errText$1(err))) {
+            this.deps.log.warn(`remote-host ${this.host.slug}: hello could not open a channel: ${errText$1(err)}`);
           } else {
-            this.lost(`no answer: ${errText(err)}`);
+            this.lost(`no answer: ${errText$1(err)}`);
             return;
           }
         }
       }
       if (now - this.lastProbeAt >= this.t.probeEveryMs) {
-        await this.probeNow().catch((err) => this.deps.log.warn(`remote-host ${this.host.slug}: probe failed: ${errText(err)}`));
+        await this.probeNow().catch((err) => this.deps.log.warn(`remote-host ${this.host.slug}: probe failed: ${errText$1(err)}`));
       }
       if (now - this.lastSweepAt >= this.t.sweepEveryMs) {
         await this.agent(["sweep", "--instance", this.deps.instanceId], 6e4).then((s) => {
           this.lastSweepAt = this.now();
           const n = (s?.reaped?.length ?? 0) + (s?.deadMan?.length ?? 0);
           if (n) this.deps.log.info(`remote-host ${this.host.slug}: swept ${n} orphaned session(s)`);
-        }).catch((err) => this.deps.log.warn(`remote-host ${this.host.slug}: sweep failed: ${errText(err)}`));
+        }).catch((err) => this.deps.log.warn(`remote-host ${this.host.slug}: sweep failed: ${errText$1(err)}`));
       }
       if (!this.gcRunning && now - (this.memory.lastGcAt ?? now) >= this.t.gcEveryMs) this.collectGarbage();
     } finally {
@@ -22244,7 +22264,7 @@ class HostLink {
       ].filter(Boolean);
       if (did.length) this.deps.log.info(`remote-host ${this.host.slug}: cleaned up ${did.join(" and ")}`);
       for (const e of r.errors ?? []) this.deps.log.warn(`remote-host ${this.host.slug}: cleaning up: ${e}`);
-    }).catch((err) => this.deps.log.warn(`remote-host ${this.host.slug}: cleaning up failed: ${errText(err)}`)).finally(() => {
+    }).catch((err) => this.deps.log.warn(`remote-host ${this.host.slug}: cleaning up failed: ${errText$1(err)}`)).finally(() => {
       this.gcRunning = false;
       this.memory.lastGcAt = this.now();
       void this.saveMemory();
@@ -22256,7 +22276,7 @@ class HostLink {
     try {
       this.deps.setStatus(status);
     } catch (err) {
-      this.deps.log.warn(`remote-host ${this.host.slug}: could not report status: ${errText(err)}`);
+      this.deps.log.warn(`remote-host ${this.host.slug}: could not report status: ${errText$1(err)}`);
     }
   }
   memKey() {
@@ -22273,7 +22293,7 @@ class HostLink {
     try {
       await this.deps.kv?.set(this.memKey(), this.memory);
     } catch (err) {
-      this.deps.log.warn(`remote-host ${this.host.slug}: could not save its state: ${errText(err)}`);
+      this.deps.log.warn(`remote-host ${this.host.slug}: could not save its state: ${errText$1(err)}`);
     }
   }
 }
@@ -22322,7 +22342,7 @@ function gitIssue(probe) {
   return `${which} won't run (exit ${g.exitCode}${g.error ? `: ${g.error}` : ""})`;
 }
 function describeConnectError(err) {
-  const m = errText(err);
+  const m = errText$1(err);
   if (/host denied/i.test(m)) return "a different host key answered (not this machine)";
   if (/authentication/i.test(m)) return "the key was refused (taken out of authorized_keys, or this computer's address isn't in its from= list)";
   if (/ECONNREFUSED/.test(m)) return "connection refused (is Remote Login on?)";
@@ -22387,7 +22407,7 @@ class Pairing {
       if (!validFrom(a)) throw new UserError(`not an IP address or a network no wider than /8: ${a}`);
     }
     const label = typeof body2.label === "string" && body2.label.trim() ? body2.label.trim().slice(0, 80) : slug;
-    const comment = `dispatch-remote-host:${slug}@${safeName(this.deps.dispatchName ?? hostname())}`;
+    const comment = `dispatch-remote-host:${slug}@${safeName$1(this.deps.dispatchName ?? hostname())}`;
     const kp = generateKeyPair(comment);
     const line = authorizedKeysLine(kp.publicKey, allowFrom);
     const id = randomUUID();
@@ -22431,8 +22451,8 @@ class Pairing {
       } catch (err) {
         c.close();
         throw new UserError(
-          /host denied/i.test(errText(err)) ? `${r.address} presented a different host key from the one you confirmed. Nothing was sent to it.` : `logging in to ${r.address} as ${r.user} failed: ${describeConnectError(err)}`,
-          /host denied|authentication/i.test(errText(err)) ? 400 : 502
+          /host denied/i.test(errText$1(err)) ? `${r.address} presented a different host key from the one you confirmed. Nothing was sent to it.` : `logging in to ${r.address} as ${r.user} failed: ${describeConnectError(err)}`,
+          /host denied|authentication/i.test(errText$1(err)) ? 400 : 502
         );
       }
       try {
@@ -22449,7 +22469,7 @@ class Pairing {
       const res = await k.exec(`printf '%s' "$SSH_CLIENT"`, { timeoutMs: 15e3 });
       seenFrom = res.stdout.trim().split(/\s+/)[0] || void 0;
     } catch (err) {
-      const why = errText(err);
+      const why = errText$1(err);
       if (/host denied/i.test(why)) throw new UserError(`${r.address} presented a different host key from the one you confirmed`);
       if (/authentication/i.test(why)) {
         throw new UserError(
@@ -22518,7 +22538,7 @@ class Pairing {
       const res = await c.exec(shCommand(removeKeyScript(blob)), { timeoutMs: 3e4 });
       return res.code === 0 && res.stdout.includes("removed") ? "removed" : res.code === 0 ? "absent" : "left";
     } catch (err) {
-      this.deps.log.warn(`remote-host: could not remove the old key from ${old.user}@${old.addresses[0]}: ${errText(err)}`);
+      this.deps.log.warn(`remote-host: could not remove the old key from ${old.user}@${old.addresses[0]}: ${errText$1(err)}`);
       return "left";
     } finally {
       c.close();
@@ -22555,7 +22575,7 @@ function localIPv4() {
   }
   return [...new Set(out)];
 }
-function safeName(name) {
+function safeName$1(name) {
   return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 50) || "dispatch";
 }
 const HELPER_VERSION = "1";
@@ -22642,7 +22662,7 @@ class ElevationSetups {
   /** Mint a key for `host` (replacing one minted before) and make its setup command. */
   start(host) {
     this.expire();
-    const kp = generateKeyPair(`dispatch-elevate:${host.slug}@${safeName(this.d.dispatchName ?? hostname())}`);
+    const kp = generateKeyPair(`dispatch-elevate:${host.slug}@${safeName$1(this.d.dispatchName ?? hostname())}`);
     const paths = this.d.paths ?? MAC_PATHS;
     const keyLine = elevationKeyLine(kp.publicKey, host.allowFrom, paths.helper);
     const script = setupScript(host.slug, keyLine, paths);
@@ -22676,8 +22696,8 @@ async function verifyElevation(el, key2, label, rootUid = 0) {
         `${label} doesn't accept the elevation key yet. Run the setup command there (it asks for an administrator's password), wait for "Done", then verify again.`
       );
     }
-    if (err instanceof ElevationLoginError && err.kind === "host-key") throw new UserError(`${errText(err)}; nothing was checked`);
-    throw new UserError(`could not check ${label}: ${errText(err)}`, 502);
+    if (err instanceof ElevationLoginError && err.kind === "host-key") throw new UserError(`${errText$1(err)}; nothing was checked`);
+    throw new UserError(`could not check ${label}: ${errText$1(err)}`, 502);
   }
   const m = r.stdout.match(/^dispatch-elevate (\S+) uid=(\d+)\s*$/m);
   if (r.code !== 0 || !m) {
@@ -22700,10 +22720,516 @@ async function removeElevation(el) {
     if (r.code === 0 && /^removed/m.test(r.stdout)) return { there: "removed" };
     return { there: "failed", detail: (r.stderr || r.stdout).trim().slice(0, 300) || `exit ${r.code ?? "unknown"}` };
   } catch (err) {
-    if (/isn't set up/.test(errText(err)) && !(err instanceof ElevationLoginError)) return { there: "not-set-up" };
-    if (err instanceof ElevationLoginError) return { there: err.kind === "refused" ? "refused" : "unreachable", detail: errText(err) };
-    return { there: "failed", detail: errText(err) };
+    if (/isn't set up/.test(errText$1(err)) && !(err instanceof ElevationLoginError)) return { there: "not-set-up" };
+    if (err instanceof ElevationLoginError) return { there: err.kind === "refused" ? "refused" : "unreachable", detail: errText$1(err) };
+    return { there: "failed", detail: errText$1(err) };
   }
+}
+const SCAN_MAX = 4 * 1024 * 1024;
+const PATH_CHARS = "[^\\s\"'<>()\\[\\]{}`|,;]";
+class McpBridge extends EventEmitter {
+  constructor(inner, o) {
+    super();
+    this.inner = inner;
+    this.o = o;
+    this.windows = o.windows ?? process.platform === "win32";
+    this.stdin = {
+      write: (chunk) => {
+        this.fromClient(String(chunk));
+        return true;
+      },
+      end: () => {
+        this.inQueue = this.inQueue.then(() => void this.inner.stdin.end?.());
+      },
+      on: () => void 0
+    };
+    inner.stdout.on("data", (d) => this.fromServer(String(d)));
+    inner.stderr?.on("data", (d) => this.stderr.emit("data", String(d)));
+    inner.on("stalled", (info) => this.emit("stalled", info));
+    inner.on("resumed", () => this.afterOut(() => this.emit("resumed")));
+    inner.on("error", (err) => this.afterOut(() => this.emit("error", err)));
+    inner.on(
+      "exit",
+      (code, reason) => this.afterOut(() => {
+        this.ended = true;
+        if (this.outBuf) this.stdout.emit("data", this.outBuf);
+        this.outBuf = "";
+        this.emit("exit", code, reason);
+      })
+    );
+  }
+  stdout = new EventEmitter();
+  stderr = new EventEmitter();
+  stdin;
+  inBuf = "";
+  outBuf = "";
+  inQueue = Promise.resolve();
+  outQueue = Promise.resolve();
+  /** Files the agent asked to have saved, per request id: written there, copied to the local path after. */
+  saves = /* @__PURE__ */ new Map();
+  /** Local files already copied there, by path + size + mtime. */
+  uploaded = /* @__PURE__ */ new Map();
+  /** The other way: an upload's path there → the local file it came from. A result naming it names that file. */
+  uploadedFrom = /* @__PURE__ */ new Map();
+  windows;
+  ended = false;
+  kill(signal) {
+    this.inner.kill(signal);
+  }
+  // ---- client → server ------------------------------------------------------
+  fromClient(chunk) {
+    this.inBuf += chunk;
+    let nl;
+    while ((nl = this.inBuf.indexOf("\n")) >= 0) {
+      const line = this.inBuf.slice(0, nl);
+      this.inBuf = this.inBuf.slice(nl + 1);
+      this.inQueue = this.inQueue.then(() => this.clientLine(line)).catch((err) => {
+        this.o.log?.warn(`remote-host ${this.o.label}: MCP bridge (to the machine): ${errText(err)}`);
+      });
+    }
+  }
+  async clientLine(line) {
+    const msg = parse(line);
+    if (!msg) return void this.inner.stdin.write(`${line}
+`);
+    if (this.o.ownRoots && msg.method === "initialize") {
+      const params = msg.params ??= {};
+      const caps = params.capabilities ??= {};
+      caps.roots = { listChanged: false };
+    } else if (this.o.ownRoots && msg.method === "notifications/roots/list_changed") {
+      return;
+    } else if (msg.method === "tools/call" && msg.id !== void 0) {
+      const params = msg.params;
+      if (params && params.arguments && typeof params.arguments === "object") {
+        try {
+          await this.mapArguments(String(msg.id), params.arguments);
+        } catch (err) {
+          this.saves.delete(String(msg.id));
+          this.emitLine({ jsonrpc: "2.0", id: msg.id, error: { code: -32e3, message: errText(err) } });
+          return;
+        }
+      }
+    }
+    this.inner.stdin.write(`${JSON.stringify(msg)}
+`);
+  }
+  /** Rewrite the local paths in a call's arguments into paths there, copying files first. */
+  async mapArguments(id, args) {
+    const walk = async (holder, key2, pathy, urly) => {
+      const v = holder[key2];
+      if (typeof v === "string") {
+        const mapped = urly ? await this.mapUrl(v) : pathy ? await this.mapPath(id, v) : void 0;
+        if (mapped !== void 0) holder[key2] = mapped;
+      } else if (Array.isArray(v)) {
+        for (let i = 0; i < v.length; i++) await walk(v, i, pathy, urly);
+      } else if (v && typeof v === "object") {
+        for (const k of Object.keys(v)) await walk(v, k, pathKey(k), urlKey(k));
+      }
+    };
+    for (const k of Object.keys(args)) await walk(args, k, pathKey(k), urlKey(k));
+  }
+  async mapUrl(v) {
+    if (!v.startsWith("file:")) return void 0;
+    let local;
+    try {
+      local = fileURLToPath(v);
+    } catch {
+      return void 0;
+    }
+    if (!this.isLocalPath(local) || await kind(local) !== "file") return void 0;
+    const remote = await this.uploadFile(local);
+    return `file://${encodeURI(remote)}`;
+  }
+  async mapPath(id, v) {
+    if (!this.isLocalPath(v)) return void 0;
+    const k = await kind(v);
+    if (k === "file") return this.uploadFile(v);
+    if (k === void 0 && await kind(dirname(v)) === "dir") {
+      const remote = posix.join(this.o.out, `${randomBytes(4).toString("hex")}-${safeName(basename(v))}`);
+      const list2 = this.saves.get(id) ?? [];
+      list2.push({ remote, local: v });
+      this.saves.set(id, list2);
+      return remote;
+    }
+    return void 0;
+  }
+  async uploadFile(local) {
+    const st = await stat(local);
+    const key2 = `${local}\0${st.size}\0${st.mtimeMs}`;
+    const have = this.uploaded.get(key2);
+    if (have) return have;
+    const tag2 = createHash("sha256").update(key2).digest("hex").slice(0, 10);
+    const remote = posix.join(this.o.dir, "uploads", tag2, safeName(basename(local)));
+    try {
+      await this.o.files.upload(local, remote);
+    } catch (err) {
+      throw new Error(`couldn't copy ${local} to ${this.o.label} for the browser there: ${errText(err)}`);
+    }
+    this.uploaded.set(key2, remote);
+    this.uploadedFrom.set(remote, local);
+    return remote;
+  }
+  /** An absolute path on THIS computer, as opposed to one there (or a relative one). */
+  isLocalPath(p) {
+    if (this.windows) return /^[A-Za-z]:[\\/]/.test(p);
+    if (!p.startsWith("/")) return false;
+    return !this.remoteRoots().some((r) => within$1(r, p));
+  }
+  // ---- server → client ------------------------------------------------------
+  fromServer(chunk) {
+    this.outBuf += chunk;
+    let nl;
+    while ((nl = this.outBuf.indexOf("\n")) >= 0) {
+      const line = this.outBuf.slice(0, nl);
+      this.outBuf = this.outBuf.slice(nl + 1);
+      this.outQueue = this.outQueue.then(() => this.serverLine(line)).catch((err) => {
+        this.o.log?.warn(`remote-host ${this.o.label}: MCP bridge (from the machine): ${errText(err)}`);
+        this.stdout.emit("data", `${line}
+`);
+      });
+    }
+  }
+  afterOut(fn) {
+    this.outQueue = this.outQueue.then(fn, fn);
+  }
+  emitLine(msg) {
+    if (!this.ended) this.stdout.emit("data", `${JSON.stringify(msg)}
+`);
+  }
+  async serverLine(line) {
+    const msg = line.length <= SCAN_MAX ? parse(line) : void 0;
+    if (!msg) return void this.stdout.emit("data", `${line}
+`);
+    if (this.o.ownRoots && msg.method === "roots/list" && msg.id !== void 0) {
+      this.inner.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { roots: this.roots() } })}
+`);
+      return;
+    }
+    if (msg.id !== void 0 && msg.method === void 0 && msg.result !== void 0) {
+      await this.mapResult(String(msg.id), msg.result);
+    } else if (msg.id !== void 0 && msg.method === void 0) {
+      this.saves.delete(String(msg.id));
+    }
+    this.emitLine(msg);
+  }
+  roots() {
+    const roots = [{ uri: `file://${encodeURI(this.o.dir)}`, name: "dispatch: this chat's files for this server" }];
+    if (this.o.checkout) roots.push({ uri: `file://${encodeURI(this.o.checkout.remote)}`, name: "the chat's checkout" });
+    return roots;
+  }
+  remoteRoots() {
+    return [this.o.dir, ...this.o.checkout ? [this.o.checkout.remote] : []];
+  }
+  /** Copy here the files a result names there, and name the copies instead. */
+  async mapResult(id, result) {
+    const notes = [];
+    const swap = /* @__PURE__ */ new Map();
+    for (const s of this.saves.get(id) ?? []) {
+      try {
+        if (await this.o.files.fetch(s.remote, s.local)) swap.set(s.remote, s.local);
+      } catch (err) {
+        notes.push(`[remote-host] ${s.local} wasn't copied from ${this.o.label} (${errText(err)}); it is at ${s.remote} there.`);
+      }
+    }
+    this.saves.delete(id);
+    const tokens = /* @__PURE__ */ new Map();
+    const found = (written, abs) => {
+      if (!tokens.has(written)) tokens.set(written, abs);
+    };
+    const roots = this.remoteRoots();
+    const absRe = new RegExp(`(?:file://)?(?:${roots.map(escapeRe).join("|")})(?:/${PATH_CHARS}*)?`, "g");
+    const linkRe = /\]\(([^)\s]+)\)/g;
+    eachString(result, (s) => {
+      for (const m of s.matchAll(absRe)) {
+        const written = trimTrailing(m[0]);
+        const abs = written.startsWith("file://") ? decodeURIComponentSafe(written.slice(7)) : written;
+        found(written, abs);
+      }
+      for (const m of s.matchAll(linkRe)) {
+        const target = m[1];
+        if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("#") || target.startsWith("/")) continue;
+        const abs = posix.normalize(posix.join(this.o.dir, target.replace(/\\/g, "/")));
+        if (roots.some((r) => within$1(r, abs))) found(target, abs);
+      }
+    });
+    const copied = /* @__PURE__ */ new Map();
+    for (const [remote, local] of swap) copied.set(remote, local);
+    if (this.uploadedFrom.size) {
+      const seen = /* @__PURE__ */ new Set();
+      eachString(result, (s) => {
+        for (const remote of this.uploadedFrom.keys()) if (s.includes(remote)) seen.add(remote);
+      });
+      for (const remote of seen) copied.set(remote, this.uploadedFrom.get(remote));
+    }
+    for (const abs of new Set(tokens.values())) {
+      if (copied.has(abs) || !roots.some((r) => within$1(r, abs)) || abs === this.o.dir) continue;
+      if ([...copied.keys()].some((k) => k.length > abs.length && k.startsWith(abs))) continue;
+      const from = this.uploadedFrom.get(abs);
+      if (from) {
+        copied.set(abs, from);
+        continue;
+      }
+      const local = this.localCopyPath(abs);
+      if (!local) continue;
+      try {
+        if (await this.o.files.fetch(abs, local)) copied.set(abs, local);
+      } catch (err) {
+        notes.push(`[remote-host] ${abs} is on ${this.o.label} and wasn't copied here: ${errText(err)}.`);
+      }
+    }
+    if (copied.size) {
+      const pairs = [];
+      for (const [written, abs] of tokens) {
+        const local = copied.get(abs);
+        if (local) pairs.push([written, written.startsWith("file://") ? pathToFileURL(local).href : local]);
+      }
+      for (const [remote, local] of copied) if (!tokens.has(remote)) pairs.push([remote, local]);
+      pairs.sort((a, b) => b[0].length - a[0].length);
+      mapStrings(result, (s) => replaceTokens(s, pairs));
+    }
+    if (notes.length) {
+      this.o.log?.warn(`remote-host ${this.o.label}: MCP bridge: ${notes.join(" ")}`);
+      const content = result?.content;
+      if (Array.isArray(content)) content.push({ type: "text", text: notes.join("\n") });
+    }
+  }
+  /** Where the copy of a file there goes here: under the chat's folder for this server. */
+  localCopyPath(abs) {
+    const from = within$1(this.o.dir, abs) ? this.o.dir : this.o.checkout && within$1(this.o.checkout.remote, abs) ? this.o.checkout.remote : void 0;
+    if (!from) return void 0;
+    const rel = posix.relative(from, abs);
+    if (!rel || rel.startsWith("..")) return void 0;
+    const base = from === this.o.dir ? this.o.localDir : join(this.o.localDir, "checkout");
+    const local = join(base, ...rel.split("/"));
+    const back = relative(base, local);
+    return back && !back.startsWith("..") && !isAbsolute(back) && !back.split(sep).includes("..") ? local : void 0;
+  }
+}
+function pathKey(k) {
+  return /^(paths?|files?|filenames?|dir|directory)$/i.test(k) || /(Path|Paths|File|Files|Filename|FileName|Dir)$/.test(k);
+}
+function urlKey(k) {
+  return /^(url|uri)$/i.test(k) || /(Url|Uri|URL)$/.test(k);
+}
+function parse(line) {
+  const t = line.trim();
+  if (!t.startsWith("{")) return void 0;
+  try {
+    const m = JSON.parse(t);
+    return m && typeof m === "object" && !Array.isArray(m) ? m : void 0;
+  } catch {
+    return void 0;
+  }
+}
+async function kind(p) {
+  try {
+    const st = await stat(p);
+    return st.isFile() ? "file" : st.isDirectory() ? "dir" : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function within$1(root, abs) {
+  return abs === root || abs.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+function eachString(v, fn) {
+  if (typeof v === "string") {
+    if (v.length <= SCAN_MAX) fn(v);
+  } else if (Array.isArray(v)) for (const x of v) eachString(x, fn);
+  else if (v && typeof v === "object") {
+    for (const [k, x] of Object.entries(v)) if (k !== "data" && k !== "blob") eachString(x, fn);
+  }
+}
+function mapStrings(v, fn) {
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) {
+      if (typeof v[i] === "string") v[i] = fn(v[i]);
+      else mapStrings(v[i], fn);
+    }
+  } else if (v && typeof v === "object") {
+    const o = v;
+    for (const k of Object.keys(o)) {
+      if (k === "data" || k === "blob") continue;
+      if (typeof o[k] === "string") o[k] = fn(o[k]);
+      else mapStrings(o[k], fn);
+    }
+  }
+}
+function replaceTokens(s, pairs) {
+  let out = s;
+  for (const [from, to] of pairs) {
+    if (!out.includes(from)) continue;
+    const re = new RegExp(`(?<![\\w./\\\\-])${escapeRe(from)}(?![\\w/\\\\-]|\\.\\w)`, "g");
+    out = out.replace(re, () => to);
+  }
+  return out;
+}
+function trimTrailing(p) {
+  return p.replace(/[.:]+$/, "");
+}
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function decodeURIComponentSafe(s) {
+  try {
+    return decodeURI(s);
+  } catch {
+    return s;
+  }
+}
+function safeName(name) {
+  const n = name.replace(/[^A-Za-z0-9._ -]/g, "_").replace(/^\.+/, "_").slice(0, 120);
+  return n || "file";
+}
+function errText(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+const MAX_COPY_BYTES = 200 * 1024 * 1024;
+const COPY_MS = 5 * 6e4;
+const NO_FILE = 3;
+const TOO_BIG = 4;
+function remoteFiles(remote, opts = {}) {
+  const max = opts.maxBytes ?? MAX_COPY_BYTES;
+  const ms = opts.timeoutMs ?? COPY_MS;
+  return {
+    async fetch(from, to) {
+      await mkdir(dirname(to), { recursive: true });
+      const part = `${to}.part-${process.pid}`;
+      const out = createWriteStream(part);
+      const closed = once(out, "close").catch(() => void 0);
+      const script = [
+        `f=${sq(from)}`,
+        `[ -f "$f" ] || exit ${NO_FILE}`,
+        `s=$(wc -c < "$f" | tr -d ' ')`,
+        `if [ "$s" -gt ${max} ]; then echo "$s bytes" >&2; exit ${TOO_BIG}; fi`,
+        `exec cat -- "$f"`
+      ].join("\n");
+      let r;
+      try {
+        r = await remote.stream(script, { output: out }, AbortSignal.timeout(ms));
+      } catch (err) {
+        out.destroy();
+        await closed;
+        await rm(part, { force: true });
+        throw err;
+      }
+      await closed;
+      if (r.code !== 0) {
+        await rm(part, { force: true });
+        if (r.code === NO_FILE) return false;
+        if (r.code === TOO_BIG) throw new Error(`it is ${r.stderr.trim()}, over the ${Math.round(max / 1048576)} MB a copy may be`);
+        throw new Error(r.stderr.trim() || `exit ${r.code}`);
+      }
+      await rename(part, to);
+      return true;
+    },
+    async upload(from, to) {
+      const st = await stat(from);
+      if (st.size > max) throw new Error(`it is ${st.size} bytes, over the ${Math.round(max / 1048576)} MB a copy may be`);
+      const script = [
+        `d=${sq(posix.dirname(to))}`,
+        `t=${sq(to)}.part-$$`,
+        `mkdir -p "$d" || exit 1`,
+        `if cat > "$t" && mv -f "$t" ${sq(to)}; then exit 0; fi`,
+        `rm -f "$t"; exit 1`
+      ].join("\n");
+      const r = await remote.stream(script, { input: (ch) => pipeline(createReadStream(from), ch) }, AbortSignal.timeout(ms));
+      if (r.code !== 0) throw new Error(r.stderr.trim() || `exit ${r.code}`);
+    }
+  };
+}
+const CHROME_PLAYWRIGHT_CORE = "1.65.0";
+class PlacementRefused extends Error {
+}
+function planProcess(info, ctx) {
+  const b = info.bundled;
+  if (b) {
+    if (b.server === "playwright" || b.package === "@playwright/mcp") return planPlaywright(b, ctx);
+    if (b.server === "chrome-devtools" || b.package === "chrome-devtools-mcp") return planChromeDevtools(b, ctx);
+    throw new PlacementRefused(`${ctx.label} doesn't know how to run Dispatch's bundled server ${JSON.stringify(b.server)} (${b.package}@${b.version}); update the remote-host plugin`);
+  }
+  if (!info.command) throw new PlacementRefused(`MCP server ${info.name} names nothing to run`);
+  const argv = [info.command, ...info.args ?? []];
+  const env = { ...info.env ?? {} };
+  return { argv: () => argv, env: () => env, ownRoots: false, notes: [] };
+}
+function desktopNeeded(ctx, what) {
+  return new PlacementRefused(
+    `${what} needs a desktop session on ${ctx.label}, which it doesn't have yet (remote-host runs browsers there headless until its desktop agent is set up). Use the default headless Chromium there, or set this server's location to local.`
+  );
+}
+function planPlaywright(b, ctx) {
+  const args = [...b.args];
+  const notes = [];
+  const headless = takeFlag(args, "--headless");
+  const engine = takeOption(args, "--browser") ?? "chrome";
+  takeOption(args, "--output-dir");
+  if (engine === "webkit" && true) throw desktopNeeded(ctx, "WebKit");
+  if (!headless && true) throw desktopNeeded(ctx, "A headed browser (browser.headless: false)");
+  let browser;
+  if (engine === "firefox") browser = "firefox";
+  else {
+    browser = "chromium";
+    if (engine !== "chromium") notes.push(`${engine} → Playwright's Chromium (Chrome for Testing); no system ${engine} is installed for it there`);
+  }
+  return {
+    provision: { packages: [{ name: b.package, version: b.version }], entry: { name: b.package, bin: b.bin }, browser },
+    argv: (p) => [p.node, need(p.entry, "entry"), ...args, "--browser", browser, "--output-dir", p.out, "--headless"],
+    env: (p) => ({ ...b.env ?? {}, PLAYWRIGHT_BROWSERS_PATH: need(p.browsersPath, "browsersPath"), TMPDIR: p.tmp }),
+    ownRoots: true,
+    notes
+  };
+}
+function planChromeDevtools(b, ctx) {
+  const args = [...b.args];
+  const headless = takeFlag(args, "--headless");
+  takeOption(args, "--executablePath");
+  takeOption(args, "-e");
+  takeOption(args, "--channel");
+  if (!headless && true) throw desktopNeeded(ctx, "A headed browser (browser.headless: false)");
+  return {
+    provision: {
+      packages: [
+        { name: b.package, version: b.version },
+        { name: "playwright-core", version: CHROME_PLAYWRIGHT_CORE }
+      ],
+      entry: { name: b.package, bin: b.bin },
+      browser: "chromium",
+      executable: true
+    },
+    argv: (p) => [p.node, need(p.entry, "entry"), ...args, "--executablePath", need(p.executablePath, "executablePath"), "--headless"],
+    env: (p) => ({ ...b.env ?? {}, TMPDIR: p.tmp }),
+    ownRoots: true,
+    notes: ["Chrome → Playwright's Chromium (Chrome for Testing) there"]
+  };
+}
+function need(v, what) {
+  if (v === void 0) throw new Error(`provisioning gave no ${what}`);
+  return v;
+}
+function takeFlag(args, flag) {
+  let had = false;
+  for (let i = args.length - 1; i >= 0; i--) {
+    if (args[i] === flag || args[i] === `${flag}=true`) {
+      args.splice(i, 1);
+      had = true;
+    } else if (args[i] === `${flag}=false`) args.splice(i, 1);
+  }
+  return had;
+}
+function takeOption(args, opt) {
+  let value;
+  for (let i = 0; i < args.length; ) {
+    const a = args[i];
+    if (a === opt && i + 1 < args.length) {
+      value = args[i + 1];
+      args.splice(i, 2);
+    } else if (a.startsWith(`${opt}=`)) {
+      value = a.slice(opt.length + 1);
+      args.splice(i, 1);
+    } else i++;
+  }
+  return value;
 }
 const PORT_POLL_MS = 4e3;
 const DEFAULT_RESERVED = [
@@ -22751,7 +23277,7 @@ class PortForwards {
       report = await this.deps.list();
       this.listFailing = false;
     } catch (err) {
-      if (!this.listFailing) this.deps.log.warn(`remote-host ${this.deps.label()}: could not list its listening ports: ${errText(err)}`);
+      if (!this.listFailing) this.deps.log.warn(`remote-host ${this.deps.label()}: could not list its listening ports: ${errText$1(err)}`);
       this.listFailing = true;
       return;
     }
@@ -22784,7 +23310,7 @@ class PortForwards {
         this.failed.delete(k);
         if (this.disposed || !this.deps.chats().has(chat)) this.close(k);
       } catch (err) {
-        if (!this.failed.has(k)) this.deps.log.warn(`remote-host ${this.deps.label()}: could not forward port ${l.port}: ${errText(err)}`);
+        if (!this.failed.has(k)) this.deps.log.warn(`remote-host ${this.deps.label()}: could not forward port ${l.port}: ${errText$1(err)}`);
         this.failed.add(k);
       }
     }
@@ -22818,7 +23344,7 @@ class PortForwards {
         this.reservedFailing = false;
       } catch (err) {
         if (!this.reservedFailing) {
-          this.deps.log.warn(`remote-host ${this.deps.label()}: could not ask Dispatch which ports are reserved, so only its own are kept clear: ${errText(err)}`);
+          this.deps.log.warn(`remote-host ${this.deps.label()}: could not ask Dispatch which ports are reserved, so only its own are kept clear: ${errText$1(err)}`);
         }
         this.reservedFailing = true;
       }
@@ -22941,6 +23467,7 @@ class HostShell extends EventEmitter {
       giveUpMs: 10 * 6e4,
       retryMs: [1e3, 2e3, 5e3, 1e4],
       maxQueuedBytes: 4 * 1024 * 1024,
+      lossIsFatal: false,
       now: () => performance.now(),
       ...opts
     };
@@ -23236,7 +23763,14 @@ class HostShell extends EventEmitter {
     const have = this.got[stream];
     if (offset + data.length <= have) return;
     const from = Math.max(offset, have);
-    if (offset > have) this.notice(`${offset - have} bytes of output were lost while Dispatch was disconnected.`);
+    if (offset > have) {
+      if (this.o.lossIsFatal && stream === "out") {
+        this.opener.killDetached?.();
+        this.exit(null, { kind: "transport-lost", detail: `${offset - have} bytes of its output were lost while ${this.o.label} was unreachable` });
+        return;
+      }
+      this.notice(`${offset - have} bytes of output were lost while Dispatch was disconnected.`);
+    }
     this.got[stream] = offset + data.length;
     const text = this.text[stream].write(data.subarray(from - offset));
     if (text) this.deliver(() => (stream === "out" ? this.stdout : this.stderr).emit("data", text));
@@ -24062,7 +24596,7 @@ class ChatSync {
         } catch (err) {
           if (info.signal.aborted) throw err;
           notices.push(
-            `[${this.d.label}] Could not check for changes made there (${errText(err)}). Whatever changed there stays, and isn't overwritten.`
+            `[${this.d.label}] Could not check for changes made there (${errText$1(err)}). Whatever changed there stays, and isn't overwritten.`
           );
         }
         if (this.rec.held) return { refuse: `Not run: ${this.heldText(void 0)}`, notices };
@@ -24071,7 +24605,7 @@ class ChatSync {
         if (this.rec.conflicts.length) return { refuse: `Not run: ${this.conflictText()}`, notices };
       } catch (err) {
         return {
-          refuse: `Not run: your files could not be synced to ${this.d.label} (${errText(err)}). The command would have run against stale files.`,
+          refuse: `Not run: your files could not be synced to ${this.d.label} (${errText$1(err)}). The command would have run against stale files.`,
           notices
         };
       }
@@ -24101,7 +24635,7 @@ class ChatSync {
         }
       } catch (err) {
         notices.push(
-          `[${this.d.label}] Could not check for changes the command made there (${errText(err)}). They are brought back before the next command.`
+          `[${this.d.label}] Could not check for changes the command made there (${errText$1(err)}). They are brought back before the next command.`
         );
       }
       if (this.rec.held) notices.push(this.heldText(info.command));
@@ -24331,7 +24865,7 @@ class ChatSync {
       try {
         raw = await writeCopy(root, x.c.to.sha, x.c.path, x.copy);
       } catch (err) {
-        aside.push({ c: x.c, why: `changed here too, and the machine's version couldn't be saved beside it: ${errText(err)}` });
+        aside.push({ c: x.c, why: `changed here too, and the machine's version couldn't be saved beside it: ${errText$1(err)}` });
         continue;
       }
       accept.push(x.c);
@@ -24519,7 +25053,7 @@ class ChatSync {
       try {
         raw = await writeCopy(this.d.root, c.to.sha, c.path, c.copy);
       } catch (err) {
-        blocked.push(`${c.path} (its copy couldn't be saved here: ${errText(err)})`);
+        blocked.push(`${c.path} (its copy couldn't be saved here: ${errText$1(err)})`);
         continue;
       }
       adopt.push({ path: c.path, from: ABSENT, to: c.to });
@@ -24619,7 +25153,7 @@ class ChatSync {
     try {
       await this.d.kv?.set(this.key(), this.rec);
     } catch (err) {
-      this.d.log.warn(`remote-host ${this.d.slug}: could not save chat ${this.d.chatId}'s sync state: ${errText(err)}`);
+      this.d.log.warn(`remote-host ${this.d.slug}: could not save chat ${this.d.chatId}'s sync state: ${errText$1(err)}`);
     }
   }
 }
@@ -24813,7 +25347,7 @@ function linkRemote(link) {
       const ch = await link.openSession(shCommand(script), signal);
       return new Promise((resolve2) => {
         let stderr = "";
-        let code = null;
+        let code;
         const onAbort = () => ch.close();
         signal?.addEventListener("abort", onAbort, { once: true });
         ch.stderr.on("data", (d) => stderr = (stderr + d.toString("utf8")).slice(-4e3));
@@ -24822,7 +25356,7 @@ function linkRemote(link) {
         });
         ch.on("close", () => {
           signal?.removeEventListener("abort", onAbort);
-          resolve2({ code, stderr });
+          resolve2({ code: code !== void 0 ? code : channelExit(ch)?.code ?? null, stderr });
         });
         if (io.output) ch.pipe(io.output, { end: true });
         else ch.resume();
@@ -24901,20 +25435,19 @@ class HostBackend {
   forgetting = false;
   /** Running commands as root there, with the user's approval (elevation.ts). */
   elevation;
+  /** MCP servers running there for chats (core's E7 placement), by chat + server name. */
+  processes = /* @__PURE__ */ new Map();
+  /**
+   * Installs under way there, by package set. Not tied to the spawn that
+   * asked: a first install (npm, a 150 MB browser) can outlast core's spawn
+   * timeout, and the agent's next call then waits for the same one.
+   */
+  provisions = /* @__PURE__ */ new Map();
   async spawn(info) {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
     await this.markServed(chatId);
-    const root = await repoTop(info.worktreePath ?? info.repoPath);
-    const local = root ? await realpath(info.cwd).catch(() => info.cwd) : info.cwd;
-    const cwd = root ? posix.join(chatWorktreePath(linked.paths.root, this.deps.instanceId, chatId, repoName(root)), within(root, local)) : chatDir(linked.paths, this.deps.instanceId, chatId);
-    if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
-    if (root) {
-      await this.syncs.get(chatId).ensureCheckout(within(root, local));
-    } else {
-      const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 3e4 });
-      if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
-    }
+    const { cwd } = await this.place(chatId, info.worktreePath ?? info.repoPath, info.cwd, linked.paths, true);
     const sid = newSid();
     const instance = this.deps.instanceId;
     const opener = {
@@ -24924,7 +25457,7 @@ class HostBackend {
       },
       killDetached: () => {
         void this.deps.link.agent(["kill", "--instance", instance, "--sid", sid], 15e3).catch((err) => {
-          this.deps.log.info(`remote-host ${this.deps.host().slug}: could not end session ${sid}: ${errText(err)}`);
+          this.deps.log.info(`remote-host ${this.deps.host().slug}: could not end session ${sid}: ${errText$1(err)}`);
         });
       }
     };
@@ -24944,13 +25477,152 @@ class HostBackend {
     return sh;
   }
   /**
+   * Where a chat's work happens there. In a repository, the same place in the
+   * chat's checkout; the checkout itself is filled by the first command's
+   * sync, not here, so a spawn stays quick. Elsewhere, the chat's directory.
+   * `ensure` makes it (a shell starts in it); without it only the paths are worked out.
+   */
+  async place(chatId, repoDir, localCwd, paths, ensure) {
+    const root = await repoTop(repoDir);
+    const local = root ? await realpath(localCwd).catch(() => localCwd) : localCwd;
+    const checkout = root ? chatWorktreePath(paths.root, this.deps.instanceId, chatId, repoName(root)) : void 0;
+    const cwd = checkout ? posix.join(checkout, within(root, local)) : chatDir(paths, this.deps.instanceId, chatId);
+    if (root && this.syncs.get(chatId)?.root !== root) this.syncs.set(chatId, this.chatSync(chatId, root));
+    if (ensure && root) {
+      await this.syncs.get(chatId).ensureCheckout(within(root, local));
+    } else if (ensure) {
+      const mk = await this.deps.link.exec(`mkdir -p ${sq(cwd)}`, { timeoutMs: 3e4 });
+      if (mk.code !== 0) throw new Error(`could not make ${cwd} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
+    }
+    return { cwd, ...checkout && root ? { checkout: { remote: checkout, local: root } } : {} };
+  }
+  /**
+   * Run an MCP server there for a chat (core's E7 placement). The process is a
+   * dispatch-host session like a shell, with its journal, heartbeat and kill,
+   * so a dropped link stalls it and re-attaches to the SAME process. Dispatch's
+   * bundled browser servers are installed there first (mcp/plan.ts), and an
+   * {@link McpBridge} maps the files and roots that cross machines.
+   */
+  async spawnProcess(info) {
+    const chatId = assertId("chat", info.chatId);
+    const plan = planProcess(info, { label: this.label });
+    const linked = await this.deps.link.ready(info.signal);
+    await this.markServed(chatId);
+    const paths = linked.paths;
+    const dir = chatMcpPath(paths.root, this.deps.instanceId, chatId, info.name);
+    const out = posix.join(dir, "out");
+    const tmp = mcpTmpPath(paths.root, this.deps.instanceId, chatId, mcpDirName(info.name));
+    const mk = await this.deps.link.exec(`umask 077 && mkdir -p ${sq(out)} ${sq(tmp)}`, { timeoutMs: 3e4 });
+    if (mk.code !== 0) throw new Error(`could not make ${dir} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
+    const where = await this.place(chatId, info.worktreePath ?? info.cwd, info.cwd, paths, !plan.ownRoots);
+    const prov = plan.provision ? await withAbort(this.provisioned(plan.provision), info.signal) : void 0;
+    const pp = {
+      node: paths.node,
+      dir,
+      out,
+      tmp,
+      ...prov?.entry ? { entry: prov.entry } : {},
+      ...prov?.browsersPath ? { browsersPath: prov.browsersPath } : {},
+      ...prov?.executablePath ? { executablePath: prov.executablePath } : {}
+    };
+    const exec = plan.argv(pp);
+    const env = plan.env(pp);
+    const cwd = plan.ownRoots ? dir : where.cwd;
+    const sid = newSid();
+    const instance = this.deps.instanceId;
+    let envFile;
+    if (Object.keys(env).length) {
+      envFile = posix.join(dir, `.env-${sid}`);
+      const payload = encodeEnvArg(env);
+      const w = await this.deps.link.exec(`umask 077 && cat > ${sq(envFile)}`, {
+        timeoutMs: 3e4,
+        stdin: (ch) => new Promise((res, rej) => ch.end(payload, (err) => err ? rej(err) : res()))
+      });
+      if (w.code !== 0) throw new Error(`could not pass ${info.name} its environment on ${this.label}: ${w.stderr.trim() || `exit ${w.code}`}`);
+    }
+    const opener = {
+      open: async (resume) => {
+        const l = await this.deps.link.ready();
+        const file = resume ? void 0 : envFile;
+        return this.deps.link.openSession(`exec ${sessionCommand(l.paths, { instance, chatId, sid, cwd, resume, exec, envFile: file })}`);
+      },
+      killDetached: () => {
+        void this.deps.link.agent(["kill", "--instance", instance, "--sid", sid], 15e3).catch((err) => {
+          this.deps.log.info(`remote-host ${this.deps.host().slug}: could not end MCP server ${info.name} (${sid}): ${errText$1(err)}`);
+        });
+      }
+    };
+    let sh;
+    try {
+      sh = await HostShell.start(opener, { label: this.label, log: this.deps.log, ...this.deps.shell, lossIsFatal: true }, info.signal);
+    } catch (err) {
+      if (envFile) void this.deps.link.exec(`rm -f ${sq(envFile)}`, { timeoutMs: 15e3 }).catch(() => void 0);
+      throw err;
+    }
+    this.remote ??= linkRemote(this.deps.link);
+    const bridge = new McpBridge(sh, {
+      label: this.label,
+      dir,
+      out,
+      ...where.checkout ? { checkout: where.checkout } : {},
+      localDir: join(this.mcpLocalDir(chatId), mcpDirName(info.name)),
+      ownRoots: plan.ownRoots,
+      files: remoteFiles(this.remote),
+      log: this.deps.log
+    });
+    const key2 = shellKey(chatId, info.name);
+    const old = this.processes.get(key2);
+    this.processes.set(key2, bridge);
+    old?.kill();
+    bridge.on("exit", () => {
+      if (this.processes.get(key2) === bridge) this.processes.delete(key2);
+    });
+    this.deps.log.info(
+      `remote-host ${this.deps.host().slug}: MCP server ${info.name} for chat ${chatId} runs there` + (info.bundled ? ` (${info.bundled.package}@${info.bundled.version})` : "") + (plan.notes.length ? `; ${plan.notes.join("; ")}` : "")
+    );
+    return bridge;
+  }
+  /**
+   * Make sure a package set is installed there. Each spawn asks (quick when it
+   * is: a file check, and Playwright's own check of its browser), so a
+   * machine whose `~/.dispatch-host` was wiped is repaired, not left failing.
+   * Spawns asking while an install runs wait for that one.
+   */
+  provisioned(spec) {
+    const key2 = JSON.stringify(spec);
+    let p = this.provisions.get(key2);
+    if (!p) {
+      const what = spec.packages.map((x) => `${x.name}@${x.version}`).join(", ");
+      this.deps.log.info(`remote-host ${this.deps.host().slug}: making sure ${what}${spec.browser ? ` and ${spec.browser}` : ""} are installed there`);
+      p = this.deps.link.agent(["mcp-provision", "--spec", Buffer.from(JSON.stringify(spec), "utf8").toString("base64")], PROVISION_MS).then(
+        (r) => {
+          if (r.installed.length) this.deps.log.info(`remote-host ${this.deps.host().slug}: installed ${r.installed.join(", ")} there`);
+          return r;
+        },
+        (err) => {
+          throw new Error(`installing ${what} on ${this.label} failed: ${errText$1(err)}`);
+        }
+      ).finally(() => this.provisions.delete(key2));
+      this.provisions.set(key2, p);
+    }
+    return p;
+  }
+  /** This chat's local folder for copies of what its MCP servers there wrote. */
+  mcpLocalDir(chatId) {
+    return join(this.mcpLocalHostDir(), assertId("chat", chatId));
+  }
+  mcpLocalHostDir() {
+    return join(this.deps.mcpLocalRoot ?? join(tmpdir(), "dispatch-remote-host"), this.deps.instanceId, this.deps.host().slug);
+  }
+  /**
    * End every shell this backend holds, KILL down each channel, and wait
    * (briefly) for the channels to close, so the KILLs are out before the
    * connections go. For teardown: removing the machine, the plugin stopping.
    */
   async killAll(waitMs = 1500) {
-    const shells = [...this.shells.values()];
+    const shells = [...this.shells.values(), ...this.processes.values()];
     this.shells.clear();
+    this.processes.clear();
     this.ports.dispose();
     for (const sh of shells) sh.kill();
     if (shells.length) await new Promise((r) => setTimeout(r, waitMs).unref?.());
@@ -24972,7 +25644,7 @@ class HostBackend {
     if (!ended && !await this.wasServed(chatId)) return;
     if (!this.deps.link.connected) return;
     await this.deps.link.agent(["kill", "--instance", this.deps.instanceId, "--chat", chatId], 3e4).catch((err) => {
-      this.deps.log.info(`remote-host ${this.deps.host().slug}: ending idle chat ${chatId}'s sessions: ${errText(err)}`);
+      this.deps.log.info(`remote-host ${this.deps.host().slug}: ending idle chat ${chatId}'s sessions: ${errText$1(err)}`);
     });
   }
   /**
@@ -24987,6 +25659,8 @@ class HostBackend {
     this.endShells(chatId);
     this.syncs.delete(chatId);
     this.live?.delete(chatId);
+    await rm(this.mcpLocalDir(chatId), { recursive: true, force: true }).catch(() => {
+    });
     if (!await this.wasServed(chatId)) return;
     try {
       await this.forget(chatId);
@@ -25023,7 +25697,7 @@ class HostBackend {
           this.pendingDeletes.delete(chat);
         } catch (err) {
           if (this.deps.link.connected) this.pendingDeletes.delete(chat);
-          this.deps.log.warn(`remote-host ${this.deps.host().slug}: removing deleted chat ${chat}'s files failed: ${errText(err)}`);
+          this.deps.log.warn(`remote-host ${this.deps.host().slug}: removing deleted chat ${chat}'s files failed: ${errText$1(err)}`);
         }
       }
     } finally {
@@ -25033,6 +25707,8 @@ class HostBackend {
   /** The plugin is being uninstalled: end every session of this instance there and remove its files. */
   async forgetAll(timeoutMs) {
     await this.killAll(0);
+    await rm(this.mcpLocalHostDir(), { recursive: true, force: true }).catch(() => {
+    });
     if (!this.deps.link.connected) return;
     await this.deps.link.agent(["forget", "--instance", this.deps.instanceId, "--all"], timeoutMs);
   }
@@ -25057,12 +25733,12 @@ class HostBackend {
           this.deps.log.info(`remote-host ${slug}: removed chat ${chat}'s files there; it was deleted while Dispatch wasn't watching`);
         } catch (err) {
           failed++;
-          this.deps.log.warn(`remote-host ${slug}: removing deleted chat ${chat}'s files there failed: ${errText(err)}`);
+          this.deps.log.warn(`remote-host ${slug}: removing deleted chat ${chat}'s files there failed: ${errText$1(err)}`);
         }
       }
       if (!failed && this.orphansSince === since) this.orphansSince = void 0;
     } catch (err) {
-      this.deps.log.warn(`remote-host ${slug}: looking for deleted chats' files failed: ${errText(err)}`);
+      this.deps.log.warn(`remote-host ${slug}: looking for deleted chats' files failed: ${errText$1(err)}`);
     } finally {
       this.cleaning = false;
     }
@@ -25081,7 +25757,7 @@ class HostBackend {
       );
     }
   }
-  /** End this backend's shells for one chat, and its forwards. Returns how many shells there were. */
+  /** End this backend's shells for one chat, its MCP servers there, and its forwards. Returns how many shells there were. */
   endShells(chatId) {
     let n = 0;
     for (const [k, sh] of [...this.shells]) {
@@ -25089,6 +25765,11 @@ class HostBackend {
       this.shells.delete(k);
       sh.kill();
       n++;
+    }
+    for (const [k, p] of [...this.processes]) {
+      if (k.slice(0, k.indexOf("\0")) !== chatId) continue;
+      this.processes.delete(k);
+      p.kill();
     }
     this.ports.dropChat(chatId);
     return n;
@@ -25103,7 +25784,7 @@ class HostBackend {
       await this.deps.kv?.set(this.servedKey(chatId), { at: Date.now() });
       this.served.add(chatId);
     } catch (err) {
-      this.deps.log.warn(`remote-host ${this.deps.host().slug}: could not record chat ${chatId}: ${errText(err)}`);
+      this.deps.log.warn(`remote-host ${this.deps.host().slug}: could not record chat ${chatId}: ${errText$1(err)}`);
     }
   }
   async wasServed(chatId) {
@@ -25167,7 +25848,8 @@ class HostBackend {
       rootNote(host.label, this.elevation.state),
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB aren't sent.`,
       `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command; one that timed out holds every terminal until it ends (Ctrl-C it). Likewise while a terminal on this computer (or this chat's terminal on another machine) runs a command in the same files: a command in this terminal is refused, so run them one after the other, not side by side. Outside a git repository nothing is synced.`,
-      `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on another, which the terminal result and Ports & processes give. Open that URL, not the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started from this chat's terminals; nothing else on the machine is.`,
+      `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started from this chat's terminals; nothing else on the machine is.`,
+      mcpNote(host.label, this.mcpLocalDir(info.chatId)),
       `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its checkout there.`,
       `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
       `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you started (Ctrl-C the terminal, \`kill %1\`).`
@@ -25185,8 +25867,8 @@ async function repoTop(dir) {
     const top = await git(dir, ["rev-parse", "--show-toplevel"], { LC_ALL: "C" });
     return top ? resolve(top) : void 0;
   } catch (err) {
-    if (/not a git repository|must be run in a work tree/i.test(errText(err))) return void 0;
-    throw new Error(`can't read the git repository at ${dir}, so its files can't be synced: ${errText(err)}`);
+    if (/not a git repository|must be run in a work tree/i.test(errText$1(err))) return void 0;
+    throw new Error(`can't read the git repository at ${dir}, so its files can't be synced: ${errText$1(err)}`);
   }
 }
 function within(root, cwd) {
@@ -25194,6 +25876,7 @@ function within(root, cwd) {
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return "";
   return rel.split(/[\\/]+/).join("/");
 }
+const PROVISION_MS = 20 * 6e4;
 function sessionCommand(paths, s) {
   return agentCommand(paths, [
     "session",
@@ -25207,6 +25890,8 @@ function sessionCommand(paths, s) {
     s.cwd,
     "--heartbeat-ms",
     String(HEARTBEAT_TIMEOUT_MS),
+    ...s.exec ? ["--exec", encodeExecArg(s.exec)] : [],
+    ...s.envFile ? ["--env-file", s.envFile] : [],
     ...s.resume ? ["--resume-out", String(s.resume.out), "--resume-err", String(s.resume.err)] : []
   ]);
 }
@@ -25244,6 +25929,9 @@ function rootNote(label, state) {
     return `- Root: nothing can run as root on ${label}: \`sudo\` there fails, because this Dispatch can't ask the user for approval. If something truly needs root, tell the user what and why.`;
   }
   return `- Root: if elevation is set up on ${label}, ${how} If it isn't, \`sudo\` says so and fails: then tell the user.`;
+}
+function mcpNote(label, localDir) {
+  return `- Browser tools that run on ${label} (core lists which, under "Where your MCP servers run") drive a headless Chromium (Chrome for Testing) THERE, not a browser on this computer. In them \`localhost\` is the machine: open a dev server you started in a terminal there by its \`there:\` URL (http://localhost:<its port>), not the forwarded \`here:\` one. Files they save (screenshots, snapshots, traces) are copied back here, under ${localDir}, and their results name the copies; a path you give one to save to is where its copy lands. A local file you pass to an upload, or open as a file:// page, is copied there first (just that file, not the folder around it). The browser sees the chat's files there as of the last terminal command's sync. Headed browsers and WebKit need a desktop session on ${label}, which isn't set up yet: they fail and say so. Their first use there installs the browser, which takes a minute or two.`;
 }
 function brewNote(brew) {
   const at = /^\/[\w./+-]+$/.test(brew.path) ? ` (\`${brew.path}\`)` : "";
@@ -25286,7 +25974,7 @@ class HostRegistry {
         });
         e.backend.dispose();
         await terminals.unregisterBackend(backendId(slug)).catch((err) => {
-          ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText(err)}`);
+          ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText$1(err)}`);
         });
         e.link.dispose();
       })();
@@ -25305,7 +25993,7 @@ class HostRegistry {
         try {
           terminals.updateBackend(backendId(host.slug), { label: host.label });
         } catch (err) {
-          ctx.log.warn(`remote-host ${host.slug}: relabelling failed: ${errText(err)}`);
+          ctx.log.warn(`remote-host ${host.slug}: relabelling failed: ${errText$1(err)}`);
         }
       }
       e.link.update(host, connectionChanged(before, host));
@@ -25398,7 +26086,7 @@ class HostRegistry {
     await Promise.all(
       [...this.entries.values()].flatMap((e) => [
         e.backend.forgetAll(timeoutMs).catch((err) => {
-          ctx.log.warn(`remote-host ${e.host.slug}: could not remove this Dispatch's files there: ${errText(err)}`);
+          ctx.log.warn(`remote-host ${e.host.slug}: could not remove this Dispatch's files there: ${errText$1(err)}`);
         }),
         this.elevationOff(e, timeoutMs)
       ])
@@ -25441,9 +26129,9 @@ function wrap(log, fn) {
       return await fn(req);
     } catch (err) {
       const status = err instanceof UserError ? err.status : 500;
-      if (status >= 500) log.warn(`remote-host ${req.method} ${req.url}: ${errText(err)}`);
+      if (status >= 500) log.warn(`remote-host ${req.method} ${req.url}: ${errText$1(err)}`);
       reply.code(status);
-      return { error: errText(err) };
+      return { error: errText$1(err) };
     }
   };
 }
@@ -25549,7 +26237,7 @@ function defineRoutes(deps) {
           const res = await e.link.exec(shCommand(removeKeyScript(keyBlobOf(publicKeyOf(key2)))), { timeoutMs: 3e4 });
           keyLine = res.code === 0 ? res.stdout.includes("removed") ? "removed" : "absent" : "unreachable";
         } catch (err) {
-          ctx.log.warn(`remote-host ${host.slug}: removing its key on the machine failed: ${errText(err)}`);
+          ctx.log.warn(`remote-host ${host.slug}: removing its key on the machine failed: ${errText$1(err)}`);
         }
       }
       await deps.saveHosts(deps.hosts().filter((x) => x.slug !== host.slug));
@@ -25619,7 +26307,7 @@ const server = definePlugin({
       try {
         registry.sync(hosts());
       } catch (err) {
-        ctx.log.error(`remote-host: applying new settings failed: ${errText(err)}`, err);
+        ctx.log.error(`remote-host: applying new settings failed: ${errText$1(err)}`, err);
       }
     });
     const setups = new ElevationSetups();
