@@ -28,11 +28,26 @@
  * can't be brought back safely (a name Windows can't hold, a file here that
  * git ignores, a directory where a file goes) is set aside: left as it is on
  * both sides, and said once.
+ *
+ * Deletes are trusted least, because a damaged checkout there looks like a
+ * command that deleted files:
+ * - A checkout is known by an id written into its `.git` at setup and kept in
+ *   the record. One without it, or with another, is set up again from your
+ *   files, never read against the base. Only setup makes a checkout (a new
+ *   terminal included); nothing makes a bare directory where one was.
+ * - A pull-back that would delete more than half the files here, or more than
+ *   {@link MASS_DELETE_MAX}, takes nothing and refuses the command (or says
+ *   so, after one). The next command finds them deleted here too and syncs as
+ *   usual, or puts them back there.
+ * - Every delete it does bring back names the snapshot of your files just
+ *   before, with the one line that gets them back.
  */
 import type { PluginContext, PluginLog, TerminalAfterRunInfo, TerminalBeforeRunResult, TerminalRunInfo } from "@dispatch/plugin-sdk";
-import { errText } from "@dispatch-plugins/remote-core";
+import { errText, git } from "@dispatch-plugins/remote-core";
+import { randomUUID } from "node:crypto";
 import { PassThrough } from "node:stream";
-import { access } from "node:fs/promises";
+import { access, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
   ABSENT,
   DIR_HERE,
@@ -70,14 +85,18 @@ import {
   checkoutCommit,
   checkoutHasFiles,
   checkoutStatus,
+  dropCheckoutGit,
   hashThere,
   initCheckout,
   missingObjects,
   receiveObjects,
   remotePaths,
+  restoreThere,
   sendCommit,
   sendObjects,
   setBase,
+  setCheckoutId,
+  shellDir,
   type RemotePaths,
   type RemoteSide,
 } from "./remote.js";
@@ -114,7 +133,18 @@ export interface SyncRecord {
   skippedHost: Record<string, string>;
   /** Untracked local files too big to send, by path → size (said once per size). */
   skippedLocal: Record<string, number>;
+  /** The id of the checkout `base` describes, written into its `.git` at setup (remote.ts's CHECKOUT_ID_FILE). */
+  checkout?: string;
+  /**
+   * A bulk delete there that was held back ({@link MASS_DELETE_MAX}): against
+   * which base, how many of how many files. The next command that still finds
+   * it puts the files back there.
+   */
+  held?: { base: string; count: number; total: number };
 }
+
+/** A pull-back that would delete more files here than this, or more than half of them, is held back. */
+export const MASS_DELETE_MAX = 50;
 
 export interface ChatSyncDeps {
   chatId: string;
@@ -150,6 +180,10 @@ export class ChatSync {
   private chain: Promise<unknown> = Promise.resolve();
   private holder?: Holder;
   private readonly cap: number;
+  /** Said with the next command: what a new terminal's setup found. */
+  private pending: string[] = [];
+  /** The paths of the bulk delete last held back, for its notice (the record keeps only counts). */
+  private heldPaths: string[] = [];
 
   constructor(private readonly d: ChatSyncDeps) {
     this.rec = empty(d.root);
@@ -166,7 +200,7 @@ export class ChatSync {
       const h = this.holder;
       // A command core stopped waiting for may still be running, even in this terminal.
       if (h && (h.terminal !== info.terminal || h.ended)) return { refuse: this.busyText(h) };
-      const notices: string[] = [];
+      const notices: string[] = this.pending.splice(0);
       try {
         await this.prepare();
         try {
@@ -179,6 +213,8 @@ export class ChatSync {
             `[${this.d.label}] Could not check for changes made there (${errText(err)}). Whatever changed there stays, and isn't overwritten.`,
           );
         }
+        // A bulk delete there, just held back: fail closed until it is settled one way or the other.
+        if (this.rec.held) return { refuse: `Not run: ${this.heldText(undefined)}`, notices };
         await this.resolved(notices);
         if (!this.rec.conflicts.length) await this.push(notices, info.signal);
         if (this.rec.conflicts.length) return { refuse: `Not run: ${this.conflictText()}`, notices };
@@ -214,8 +250,33 @@ export class ChatSync {
             `They are brought back before the next command.`,
         );
       }
+      if (this.rec.held) notices.push(this.heldText(info.command));
       if (this.rec.conflicts.length) notices.push(`The next command won't run until this is settled: ${this.conflictText()}`);
       return notices.length ? { notices } : {};
+    });
+  }
+
+  /**
+   * For a new shell: the directory it starts in, `sub` within the checkout.
+   * A checkout that isn't there is set up (with a new id) rather than made by
+   * a bare `mkdir -p`. If it had synced before, it is gone, so the record
+   * starts again from your files and the next command says so.
+   */
+  async ensureCheckout(sub: string): Promise<void> {
+    return this.serial(async () => {
+      const p = await this.prepare();
+      if ((await shellDir(this.d.remote, p, sub)) === "ready") return;
+      const id = newCheckoutId();
+      await initCheckout(this.d.remote, p, id);
+      if (this.rec.base) {
+        this.pending.push(`[${this.d.label}] This chat's checkout there was gone; it is set up again from your files. Nothing was deleted here.`);
+      }
+      this.rec.base = undefined;
+      this.rec.conflicts = [];
+      this.rec.held = undefined;
+      this.rec.checkout = id;
+      await this.save();
+      if ((await shellDir(this.d.remote, p, sub)) !== "ready") throw new Error(`the checkout there could not be set up (${p.work})`);
     });
   }
 
@@ -263,48 +324,62 @@ export class ChatSync {
    * command, for the notice (absent before a command: something running in
    * the background made the change).
    */
-  private async pullBack(notices: string[], by: string | undefined, signal: AbortSignal): Promise<void> {
+  private async pullBack(notices: string[], by: string | undefined, signal: AbortSignal, restored = false): Promise<void> {
     const p = this.paths!;
     const root = this.d.root;
     let base = this.rec.base;
     let st = await checkoutStatus(this.d.remote, p, base?.tree);
-    const broken = st.state === "nogit" || (st.state === "ok" && !!base && !st.head);
-    // Only directories left, the ones a new terminal made to start in: wiped
-    // (the machine re-paired, its ~/.dispatch-host deleted), not a .git a
-    // command removed. Rebuilt on the base, every file would read as deleted
-    // there and be deleted here; it did, live, on cvx-mac.
-    const wiped = st.state === "missing" || (broken && !!base && !(await checkoutHasFiles(this.d.remote, p)));
-    if (wiped || (st.state === "nogit" && !base)) {
-      if (!base) return;
-      // Wiped: start again from the local files.
+    if (!base && st.state !== "ok") return; // the first push sets it up
+    // Is this the checkout the base describes? Not when it is gone, has no
+    // .git (a command removed it, or it was wiped and its directory made
+    // again), or carries another id than the record's. Read against the base,
+    // its missing files would come back here as deletions: it did, live, on
+    // cvx-mac. Such a checkout is set up again from your files instead.
+    let foreign = st.state !== "ok";
+    if (base && st.state === "ok") {
+      if (this.rec.checkout) foreign = st.id !== this.rec.checkout;
+      else await this.adoptCheckout(p, st.id);
+      // Still the same checkout, its HEAD lost, and nothing but directories in it.
+      if (!foreign && !st.head && !(await checkoutHasFiles(this.d.remote, p))) foreign = true;
+    }
+    if (foreign && base) {
+      // Its files stay; the first push meets them as on any first sync (the same
+      // file joins, a different one becomes a conflict copy here).
+      if (st.state === "ok") await dropCheckoutGit(this.d.remote, p);
       this.rec.base = undefined;
+      this.rec.checkout = undefined;
       this.rec.conflicts = [];
-      notices.push(`[${this.d.label}] This chat's checkout there was gone; it is set up again from your files.`);
+      this.rec.held = undefined;
+      notices.push(
+        `[${this.d.label}] This chat's checkout there was gone, or isn't the one last synced; it is set up again from your files. ` +
+          `Nothing was deleted here.`,
+      );
       await this.save();
       return;
     }
-    if (broken) {
-      // A command removed the checkout's .git (or its HEAD; or rebuilding it
-      // was cut short), but its files are there: rebuild it on the base, so
-      // what changed there is still seen as a change.
+    if (base && st.state === "ok" && !st.head) {
+      // The same checkout (its id says so), its HEAD lost (rebuilding it was
+      // cut short, or HEAD names a commit it can't read), its files there:
+      // rebuild it on the base, so what changed there is still seen as a change.
       await initCheckout(this.d.remote, p);
-      await this.sendObjects(await objectsFor(root, base!.commit, base!.tree), signal);
-      await setBase(this.d.remote, p, this.d.chatId, base!.commit);
-      notices.push(`[${this.d.label}] The checkout's .git there was gone or broken (a command removed it?); it was rebuilt, and the files there kept.`);
-      st = await checkoutStatus(this.d.remote, p, base!.tree);
+      await this.sendObjects(await objectsFor(root, base.commit, base.tree), signal);
+      await setBase(this.d.remote, p, this.d.chatId, base.commit);
+      notices.push(`[${this.d.label}] The checkout's HEAD there was gone or broken; it was rebuilt on the last sync, and the files there kept.`);
+      st = await checkoutStatus(this.d.remote, p, base.tree);
       if (st.state !== "ok") throw new Error("the machine's checkout could not be rebuilt");
     }
-    // Missing and no .git returned or were rebuilt above; this only says so to the compiler.
+    // Missing and no .git returned above; this only says so to the compiler.
     if (st.state !== "ok") return;
     if (!base) {
       // Dispatch lost its record (kv), the machine kept its own: carry on from it
       // rather than overwrite whatever changed there since.
       if (!st.base) return;
       base = this.rec.base = st.base;
+      await this.adoptCheckout(p, st.id);
       st = await checkoutStatus(this.d.remote, p, base.tree);
       if (st.state !== "ok") return;
     }
-    if (st.tree === base.tree) return;
+    if (st.tree === base.tree) return this.unhold();
     if (!st.changes) {
       // The checkout can't see the base's objects (a gc there, a re-made .git
       // without its alternates): restore its link to the shared repository
@@ -315,7 +390,7 @@ export class ChatSync {
       if (st.state !== "ok" || !st.changes) throw new Error("the machine's checkout has lost track of the last sync");
     }
     const host = st.changes;
-    if (!host.length) return;
+    if (!host.length) return this.unhold();
 
     await this.ensureLocal(base.commit, signal);
     // Each change must start from the base: a machine is not trusted to say
@@ -408,6 +483,29 @@ export class ChatSync {
       if (isAbsent(c.from) && (await holdsOnly(root, c.path, deleting))) take(c, "dir");
       else aside.push({ c, why: DIR_HERE });
     }
+    // Fail closed on a bulk delete: a checkout damaged there (half wiped, a
+    // stray `rm -rf`) must not empty your worktree. Nothing of it is taken;
+    // the next command either finds them deleted here too (meant: synced as
+    // usual) or puts them back there from the last sync.
+    const total = [...was.values()].filter((e) => e.mode !== "160000").length;
+    if (deletes.length > MASS_DELETE_MAX || deletes.length * 2 > total) {
+      const held = this.rec.held;
+      if (!restored && held?.base === base.commit) {
+        await restoreThere(this.d.remote, p, base.commit, deletes);
+        this.rec.held = undefined;
+        await this.save();
+        notices.push(
+          `[${this.d.label}] Put back there, from the last sync, the ${deletes.length} files deleted there that you didn't delete here: ` +
+            `${list(deletes)}`,
+        );
+        return this.pullBack(notices, by, signal, true);
+      }
+      this.rec.held = { base: base.commit, count: deletes.length, total };
+      this.heldPaths = deletes;
+      await this.save();
+      return;
+    }
+    if (this.rec.held) this.rec.held = undefined;
     // What was set aside last time and can be written now.
     await this.fetchMissing([...writes.map((w) => w.sha), ...copies.map((x) => x.c.to.sha)], signal);
 
@@ -453,6 +551,14 @@ export class ChatSync {
 
     const from = by ? ` by \`${short(by)}\`` : " (by something still running there)";
     if (said.back.length) notices.push(`[${this.d.label}] Brought back the changes made there${from}: ${list(said.back)}`);
+    const gone = deletes.filter((d) => !lost.has(d));
+    if (gone.length) {
+      // The snapshot just taken holds them as they were here: name it, and the line that gets them back.
+      notices.push(
+        `[${this.d.label}] Deleted here, as they were deleted there${from}: ${list(gone)}. Your files from just before are in ` +
+          `commit ${snap.commit}. To get these back: ${await restoreLine(root, snap.commit, gone)}`,
+      );
+    }
     if (said.kept.length) notices.push(`[${this.d.label}] Deleted there${from} but changed here, so your version was kept and goes back: ${list(said.kept)}`);
     if (fresh.length) {
       notices.push(
@@ -467,6 +573,39 @@ export class ChatSync {
           `commit on this computer — the machine's checkout follows yours.`,
       );
     }
+  }
+
+  /** A held bulk delete settled outside the sync (put back there by hand): nothing left to hold. */
+  private async unhold(): Promise<void> {
+    if (!this.rec.held) return;
+    this.rec.held = undefined;
+    await this.save();
+  }
+
+  /**
+   * A record from before checkout ids, or one Dispatch lost and took back from
+   * the machine: take the checkout's id, or give it one now.
+   */
+  private async adoptCheckout(p: RemotePaths, id: string | undefined): Promise<void> {
+    if (id) {
+      this.rec.checkout = id;
+      return;
+    }
+    const mine = newCheckoutId();
+    await setCheckoutId(this.d.remote, p, mine);
+    this.rec.checkout = mine;
+  }
+
+  private heldText(by: string | undefined): string {
+    const h = this.rec.held!;
+    const why = h.count > MASS_DELETE_MAX ? `more than ${MASS_DELETE_MAX}` : "more than half of them";
+    const what = this.heldPaths.length ? `: ${list(this.heldPaths)}` : "";
+    return (
+      `${by ? `\`${short(by)}\` deleted` : "Something deleted"} ${h.count} of the ${h.total} files in this chat's checkout on ` +
+      `${this.d.label}${what}. That is ${why}, so none of it was deleted here${by ? "" : ", and the command didn't run"}. ` +
+      `If that is what you meant, delete them here too, then run the next command. If not, just run the next command: ` +
+      `they are put back there from your files.`
+    );
   }
 
   /** Conflicts whose copy is gone are settled: what the local file says now wins. */
@@ -533,7 +672,12 @@ export class ChatSync {
     }
     const first = !base;
     const started = Date.now();
-    if (first) await initCheckout(this.d.remote, p);
+    if (first) {
+      // Setting it up: the checkout gets its id, kept (once saved with the base) to know it by later.
+      const id = this.rec.checkout ?? newCheckoutId();
+      await initCheckout(this.d.remote, p, id);
+      this.rec.checkout = id;
+    }
     const sent = await this.sendObjects(await objectsFor(this.d.root, snap.commit, snap.tree, base?.tree), signal);
     if (signal.aborted) throw new Error("cancelled");
     for (let attempt = 0; ; attempt++) {
@@ -744,6 +888,26 @@ export function legacySyncKey(chatId: string): string {
 
 function empty(root: string): SyncRecord {
   return { v: 1, root, overlay: {}, pins: {}, conflicts: [], skippedHost: {}, skippedLocal: {} };
+}
+
+/** A checkout's id (remote.ts's CHECKOUT_ID_FILE): a fresh one at every setup. */
+function newCheckoutId(): string {
+  return randomUUID();
+}
+
+/**
+ * One line that puts `paths` back in the worktree as `commit` has them, in
+ * any shell. A few plain names are listed in it; otherwise they go in a
+ * pathspec file in this repository's git directory, each taken literally.
+ */
+async function restoreLine(root: string, commit: string, paths: readonly string[]): Promise<string> {
+  const cmd = `git restore --source=${commit} --worktree`;
+  if (paths.length <= 5 && paths.every((x) => /^[\w.@+/-]+$/.test(x) && !x.startsWith("-"))) {
+    return `\`${cmd} -- ${paths.map((x) => `'${x}'`).join(" ")}\``;
+  }
+  const file = resolve(root, await git(root, ["rev-parse", "--git-path", `dispatch-restore-${commit.slice(0, 12)}`])).replace(/\\/g, "/");
+  await writeFile(file, paths.map((x) => `:(literal)${x}\0`).join(""));
+  return `\`${cmd} --pathspec-file-nul --pathspec-from-file=${file}\``;
 }
 
 /** The same content (or both absent), whatever the modes. */

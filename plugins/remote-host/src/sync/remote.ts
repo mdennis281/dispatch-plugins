@@ -58,6 +58,15 @@ const PRELUDE = [
   "export GIT_AUTHOR_NAME=Dispatch GIT_AUTHOR_EMAIL=dispatch@localhost GIT_COMMITTER_NAME=Dispatch GIT_COMMITTER_EMAIL=dispatch@localhost",
 ].join("\n");
 
+/**
+ * Which checkout this is: an id written into its `.git` when it is set up,
+ * and kept in the sync record. A checkout without it, or with another, isn't
+ * the one the record's base describes (wiped and made again, a `.git` a
+ * command removed and git re-made), and is never read against that base.
+ */
+export const CHECKOUT_ID_FILE = ".git/dispatch-checkout";
+const CHECKOUT_ID = /^[A-Za-z0-9-]{8,64}$/;
+
 export type CheckoutStatus =
   | { state: "missing" }
   /** The checkout's directory is there but its `.git` isn't (a command removed it, or it was never made). */
@@ -66,6 +75,8 @@ export type CheckoutStatus =
       state: "ok";
       tree: string;
       head?: string;
+      /** The id written into its `.git` when it was set up ({@link CHECKOUT_ID_FILE}); absent for one set up before ids. */
+      id?: string;
       /** The base the machine last recorded (`refs/dispatch/base`), for picking up after Dispatch lost its own record. */
       base?: { commit: string; tree: string };
       /** Against the base asked about; absent when the machine no longer has that base's objects. */
@@ -84,6 +95,8 @@ export async function checkoutStatus(remote: RemoteSide, p: RemotePaths, baseTre
     `W=${sq(p.work)}; B=${sq(baseTree ?? "")}`,
     `cd "$W" 2>/dev/null || { echo missing; exit 0; }`,
     `[ -d .git ] || { echo nogit; exit 0; }`,
+    // Shell builtins, not a process: this runs before and after every command.
+    `CID=; [ -f ${CHECKOUT_ID_FILE} ] && read -r CID < ${CHECKOUT_ID_FILE}; echo "id $CID"`,
     `I=.git/dispatch-status.$$`,
     // -p: the copy keeps the index's mtime, which git's racy check needs (see remote-core's copyIndex).
     `cp -p .git/index "$I" 2>/dev/null || rm -f "$I"`,
@@ -120,7 +133,14 @@ export async function checkoutStatus(remote: RemoteSide, p: RemotePaths, baseTre
   if (!tree) throw new Error(`reading the checkout failed: unexpected answer ${JSON.stringify(out.slice(0, 120))}`);
   const head = out.match(/^head ([0-9a-f]{40})$/m)?.[1];
   const b = out.match(/^base ([0-9a-f]{40}) ([0-9a-f]{40})$/m);
-  const known = { state: "ok" as const, tree, ...(head ? { head } : {}), ...(b ? { base: { commit: b[1]!, tree: b[2]! } } : {}) };
+  const id = out.match(/^id (\S+)$/m)?.[1];
+  const known = {
+    state: "ok" as const,
+    tree,
+    ...(head ? { head } : {}),
+    ...(id && CHECKOUT_ID.test(id) ? { id } : {}),
+    ...(b ? { base: { commit: b[1]!, tree: b[2]! } } : {}),
+  };
   const sizes = new Map<string, number>();
   if (/^nobase$/m.test(out)) return { ...known, sizes };
   const at = out.indexOf("\ndiff\n");
@@ -149,8 +169,12 @@ export async function checkoutHasFiles(remote: RemoteSide, p: RemotePaths): Prom
   return /^files\s*$/m.test(r.stdout);
 }
 
-/** Make the shared repository and the chat's checkout, if they aren't there. Idempotent. */
-export async function initCheckout(remote: RemoteSide, p: RemotePaths): Promise<void> {
+/**
+ * Make the shared repository and the chat's checkout, if they aren't there.
+ * Idempotent. `id`: write it as the checkout's identity (setting it up).
+ */
+export async function initCheckout(remote: RemoteSide, p: RemotePaths, id?: string): Promise<void> {
+  if (id !== undefined && !CHECKOUT_ID.test(id)) throw new Error(`not a checkout id: ${JSON.stringify(id)}`);
   const script = [
     PRELUDE,
     "set -e",
@@ -160,9 +184,62 @@ export async function initCheckout(remote: RemoteSide, p: RemotePaths): Promise<
     `if [ ! -d .git ]; then git init -q .; git config core.autocrlf false; git config gc.auto 0; fi`,
     `mkdir -p .git/objects/info`,
     `printf '%s\\n' "$A" > .git/objects/info/alternates`,
+    ...(id ? [`printf '%s\\n' ${sq(id)} > ${CHECKOUT_ID_FILE}`] : []),
   ].join("\n");
   const r = await remote.run(script, { timeoutMs: 60_000 });
   if (r.code !== 0) throw new Error(`setting up the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+
+/** Give a checkout set up before ids its id (once: the record keeps it from then on). */
+export async function setCheckoutId(remote: RemoteSide, p: RemotePaths, id: string): Promise<void> {
+  if (!CHECKOUT_ID.test(id)) throw new Error(`not a checkout id: ${JSON.stringify(id)}`);
+  const script = [PRELUDE, `cd ${sq(p.work)} || exit 1`, `printf '%s\\n' ${sq(id)} > ${CHECKOUT_ID_FILE}`].join("\n");
+  const r = await remote.run(script, { timeoutMs: 30_000 });
+  if (r.code !== 0) throw new Error(`marking the checkout failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+
+/**
+ * Drop the `.git` of a checkout that isn't the one last synced, so the next
+ * push sets it up afresh, as a first sync: its files stay, and any that
+ * differ from yours become conflict copies. Only git's own data goes.
+ */
+export async function dropCheckoutGit(remote: RemoteSide, p: RemotePaths): Promise<void> {
+  const r = await remote.run([PRELUDE, `cd ${sq(p.work)} 2>/dev/null || exit 0`, `rm -rf .git`].join("\n"), { timeoutMs: 60_000 });
+  if (r.code !== 0) throw new Error(`clearing the checkout's .git failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+}
+
+/**
+ * For a new shell: make `sub` (relative) in the checkout, only when the
+ * checkout is there, and say "missing" when it isn't. A missing checkout is
+ * made by setup alone, never by a bare `mkdir -p`: a wiped checkout made
+ * again that way passed for one whose `.git` a command had removed, and its
+ * missing files came back here as deletions.
+ */
+export async function shellDir(remote: RemoteSide, p: RemotePaths, sub: string): Promise<"ready" | "missing"> {
+  const script = [
+    PRELUDE,
+    `cd ${sq(p.work)} 2>/dev/null && [ -d .git ] || { echo missing; exit 0; }`,
+    ...(sub && sub !== "." ? [`mkdir -p -- ${sq(sub)} || exit 1`] : []),
+    `echo ready`,
+  ].join("\n");
+  const r = await remote.run(script, { timeoutMs: 30_000 });
+  if (r.code !== 0) throw new Error(`could not make ${posix.join(p.work, sub)}: ${r.stderr.trim() || `exit ${r.code}`}`);
+  return /^missing\s*$/m.test(r.stdout) ? "missing" : "ready";
+}
+
+/**
+ * Put `paths` back in the checkout as `commit` has them: files found deleted
+ * there in bulk, which weren't deleted here (chat-sync's mass-delete guard).
+ */
+export async function restoreThere(remote: RemoteSide, p: RemotePaths, commit: string, paths: readonly string[]): Promise<void> {
+  if (!paths.length) return;
+  const script = [
+    PRELUDE,
+    `cd ${sq(p.work)} || exit 1`,
+    `GIT_LITERAL_PATHSPECS=1 git checkout ${sq(commit)} --pathspec-from-file=- --pathspec-file-nul`,
+  ].join("\n");
+  const r = await remote.run(script, { input: paths.join("\0") + "\0", timeoutMs: 5 * 60_000 });
+  if (r.code !== 0) throw new Error(`putting the files back there failed: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
 
 /** Which of `shas` the checkout can't see. */
