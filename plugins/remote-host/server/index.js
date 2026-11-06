@@ -23099,7 +23099,12 @@ function errText(err) {
 const MAX_COPY_BYTES = 200 * 1024 * 1024;
 const COPY_MS = 5 * 6e4;
 const NO_FILE = 3;
+const DROPPED = "the connection to the machine dropped during the copy";
 const TOO_BIG = 4;
+function tookTooLong(ms) {
+  const span = ms >= 6e4 ? `${Math.round(ms / 6e4)} minutes` : `${Math.max(1, Math.round(ms / 1e3))} seconds`;
+  return `it took longer than ${span}, so it was stopped`;
+}
 function remoteFiles(remote, opts = {}) {
   const max = opts.maxBytes ?? MAX_COPY_BYTES;
   const ms = opts.timeoutMs ?? COPY_MS;
@@ -23117,8 +23122,9 @@ function remoteFiles(remote, opts = {}) {
         `exec cat -- "$f"`
       ].join("\n");
       let r;
+      const limit = AbortSignal.timeout(ms);
       try {
-        const stop = signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
+        const stop = signal ? AbortSignal.any([signal, limit]) : limit;
         r = await remote.stream(script, { output: out }, stop);
       } catch (err) {
         out.destroy();
@@ -23126,6 +23132,7 @@ function remoteFiles(remote, opts = {}) {
         await rm(part, { force: true });
         throw err;
       }
+      if (!out.writableEnded) out.end();
       await closed;
       if (signal?.aborted) {
         await rm(part, { force: true });
@@ -23135,6 +23142,7 @@ function remoteFiles(remote, opts = {}) {
         await rm(part, { force: true });
         if (r.code === NO_FILE) return false;
         if (r.code === TOO_BIG) throw new Error(`it is ${r.stderr.trim()}, over the ${Math.round(max / 1048576)} MB a copy may be`);
+        if (r.code === null) throw new Error(limit.aborted ? tookTooLong(ms) : DROPPED);
         throw new Error(r.stderr.trim() || `exit ${r.code}`);
       }
       await rename(part, to);
@@ -23150,7 +23158,9 @@ function remoteFiles(remote, opts = {}) {
         `if cat > "$t" && mv -f "$t" ${sq(to)}; then exit 0; fi`,
         `rm -f "$t"; exit 1`
       ].join("\n");
-      const r = await remote.stream(script, { input: (ch) => pipeline(createReadStream(from), ch) }, AbortSignal.timeout(ms));
+      const limit = AbortSignal.timeout(ms);
+      const r = await remote.stream(script, { input: (ch) => pipeline(createReadStream(from), ch) }, limit);
+      if (r.code === null) throw new Error(limit.aborted ? tookTooLong(ms) : DROPPED);
       if (r.code !== 0) throw new Error(r.stderr.trim() || `exit ${r.code}`);
     }
   };
@@ -26168,7 +26178,7 @@ async function look(remote, path) {
     ].join("\n"),
     { timeoutMs: 6e4 }
   );
-  if (r.code !== 0) throw new Error(r.stderr.trim() || `exit ${r.code}`);
+  if (r.code !== 0) throw new Error(r.code === null ? "the connection to the machine dropped" : r.stderr.trim() || `exit ${r.code}`);
   const m = /^([dfon])(?: (\d+))?/.exec(r.stdout.trim());
   if (!m) throw new Error(`unexpected answer: ${r.stdout.trim().slice(0, 80)}`);
   if (m[1] === "d") return { kind: "dir", bytes: Number(m[2] ?? 0) * 1024 };
@@ -26211,7 +26221,11 @@ async function streamTar(remote, from, archive, max, signal) {
   const abort = new AbortController();
   const stop = () => abort.abort();
   signal?.addEventListener("abort", stop, { once: true });
-  const timer = setTimeout(stop, PULL_MS);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    stop();
+  }, PULL_MS);
   const counter = new Transform({
     transform(c, _enc, cb) {
       seen += c.length;
@@ -26231,18 +26245,31 @@ async function streamTar(remote, from, archive, max, signal) {
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", stop);
+    if (!counter.writableEnded && !counter.destroyed) counter.end();
     await closed;
   }
   if (seen > max + 1024 * 1024) throw new Error(`it grew past the ${mb(max)} one copy may be while it was copied`);
   if (signal?.aborted) throw new Error("cancelled");
-  if (r.code !== 0) throw new Error(r.stderr.trim().split("\n").slice(-3).join("; ") || `tar exited ${r.code ?? "without a status"}`);
+  if (timedOut) throw new Error(tookTooLong(PULL_MS));
+  if (r.code === null) throw new Error(DROPPED);
+  if (r.code !== 0) throw new Error(r.stderr.trim().split("\n").slice(-3).join("; ") || `tar exited ${r.code}`);
 }
 function cancelled(signal) {
   if (signal?.aborted) throw new Error("cancelled; nothing was replaced");
 }
+class ReplaceFailed extends Error {
+  constructor(to, cause) {
+    super(`putting the copy at ${to} failed part-way (${cause instanceof Error ? cause.message : String(cause)})`);
+    this.to = to;
+  }
+}
 async function replace(part, to) {
-  await rm(to, { recursive: true, force: true });
-  await rename(part, to);
+  try {
+    await rm(to, { recursive: true, force: true });
+    await rename(part, to);
+  } catch (err) {
+    throw new ReplaceFailed(to, err);
+  }
 }
 function mb(bytes) {
   return bytes >= 1024 * 1024 ? `${(bytes / 1048576).toFixed(bytes >= 100 * 1048576 ? 0 : 1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -26298,15 +26325,19 @@ const STATUS_DESCRIPTION = "Report the remote machines this chat's terminals run
 class ToolRefusal extends Error {
 }
 async function remoteFetch(deps, args, call) {
+  let label = "the machine";
+  let from;
+  let dest;
+  let replacing = false;
   try {
     const path = text(args.path, "path");
     if (!path) throw new ToolRefusal("`path` is required: the file or folder on the machine to copy.");
     const to = args.to === void 0 ? void 0 : text(args.to, "to");
     const e = await pickOne(deps.registry, call.chatId, args.host === void 0 ? void 0 : text(args.host, "host"));
-    const label = e.host.label;
+    label = e.host.label;
     const signal = call.signal;
     const there = await e.backend.whereThere(call.chatId, call.cwd, signal);
-    const from = remotePath(path, there);
+    from = remotePath(path, there);
     const remote = e.backend.remoteSide();
     const found = await look(remote, from);
     if (found.kind === "missing") {
@@ -26314,11 +26345,13 @@ async function remoteFetch(deps, args, call) {
       throw new ToolRefusal(`There is nothing at ${from} on ${label}${rel}.`);
     }
     if (found.kind === "other") throw new ToolRefusal(`${from} on ${label} is neither a file nor a folder.`);
-    let dest;
     if (to) {
       if (!isAbsolute(to) && !call.cwd) throw new ToolRefusal("`to` is relative, and this chat has no working directory to take it in; give an absolute path.");
       dest = isAbsolute(to) ? resolve(to) : resolve(call.cwd, to);
-      if (existsSync(dest)) await mayReplace(deps, call, dest, `${label}:${from}`, label);
+      if (existsSync(dest)) {
+        await mayReplace(deps, call, dest, `${label}:${from}`, label);
+        replacing = true;
+      }
     } else {
       dest = resolve(e.backend.fetchedDir(call.chatId), localName(from));
     }
@@ -26327,8 +26360,20 @@ async function remoteFetch(deps, args, call) {
     return await answer(got, from, dest, label, call, args.show === true);
   } catch (err) {
     if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
-    throw new Error(`remote_fetch failed: ${errText$1(err)}`);
+    const text2 = fetchFailure(err, { label, from, dest, replacing, cancelled: call.signal.aborted });
+    deps.log.warn(`remote-host: remote_fetch for ${call.chatId}: ${text2}`);
+    return { content: [{ type: "text", text: text2 }], isError: true };
   }
+}
+function fetchFailure(err, at) {
+  const why = errText$1(err);
+  const kept = at.replacing && at.dest ? `; ${at.dest} is as it was` : "";
+  if (err instanceof ReplaceFailed) {
+    return `${at.from} was copied from ${at.label}, but ${err.message}. Check what is at ${err.to} now before relying on it.`;
+  }
+  if (at.cancelled) return `Cancelled: nothing was copied${kept}.`;
+  if (!at.from) return `${at.label} can't be reached right now (${why}), so nothing was copied. machine_status says when it is back.`;
+  return `Couldn't copy ${at.from} from ${at.label}: ${why}. Nothing was written on this computer${kept}.` + (why === DROPPED ? ` Try again once ${at.label} is reachable (machine_status says).` : "");
 }
 async function mayReplace(deps, call, dest, source, label) {
   if (!deps.approvals) {
@@ -26422,7 +26467,7 @@ async function describe(e, v, call) {
   const p = v.probe;
   const lines = [`${v.label} (terminal location ${v.id}): ${v.status.state}${v.status.detail ? `, ${v.status.detail}` : ""}`];
   const facts = [];
-  if (v.address) facts.push(`at ${v.address}`);
+  if (v.address) facts.push(v.status.state === "offline" ? `last reached at ${v.address}` : `at ${v.address}`);
   if (p) {
     const os = [p.os.name, p.os.version].filter(Boolean).join(" ") || p.platform;
     facts.push(`${os} on ${p.arch}`, `user ${p.user}, home ${p.home}`);

@@ -19,7 +19,8 @@ import { errText } from "@dispatch-plugins/remote-core";
 import type { Approvals } from "../elevation.js";
 import { backendId } from "../hosts.js";
 import type { Entry, HostRegistry, HostView } from "../registry.js";
-import { look, localName, mb, pull, type Pulled } from "./pull.js";
+import { DROPPED } from "../mcp/files.js";
+import { ReplaceFailed, look, localName, mb, pull, type Pulled } from "./pull.js";
 
 type ToolsApi = NonNullable<PluginContext["tools"]>;
 
@@ -109,15 +110,20 @@ interface StatusArgs {
 class ToolRefusal extends Error {}
 
 async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall): Promise<PluginToolResult> {
+  // What the error says depends on how far it got: reaching the machine, or copying.
+  let label = "the machine";
+  let from: string | undefined;
+  let dest: string | undefined;
+  let replacing = false;
   try {
     const path = text(args.path, "path");
     if (!path) throw new ToolRefusal("`path` is required: the file or folder on the machine to copy.");
     const to = args.to === undefined ? undefined : text(args.to, "to");
     const e = await pickOne(deps.registry, call.chatId, args.host === undefined ? undefined : text(args.host, "host"));
-    const label = e.host.label;
+    label = e.host.label;
     const signal = call.signal as unknown as AbortSignal;
     const there = await e.backend.whereThere(call.chatId, call.cwd, signal);
-    const from = remotePath(path, there);
+    from = remotePath(path, there);
     const remote = e.backend.remoteSide();
     const found = await look(remote, from);
     if (found.kind === "missing") {
@@ -126,11 +132,13 @@ async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall
     }
     if (found.kind === "other") throw new ToolRefusal(`${from} on ${label} is neither a file nor a folder.`);
 
-    let dest: string;
     if (to) {
       if (!isAbsolute(to) && !call.cwd) throw new ToolRefusal("`to` is relative, and this chat has no working directory to take it in; give an absolute path.");
       dest = isAbsolute(to) ? resolve(to) : resolve(call.cwd!, to);
-      if (existsSync(dest)) await mayReplace(deps, call, dest, `${label}:${from}`, label);
+      if (existsSync(dest)) {
+        await mayReplace(deps, call, dest, `${label}:${from}`, label);
+        replacing = true;
+      }
     } else {
       dest = resolve(e.backend.fetchedDir(call.chatId), localName(from));
     }
@@ -140,8 +148,32 @@ async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall
     return await answer(got, from, dest, label, call, args.show === true);
   } catch (err) {
     if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
-    throw new Error(`remote_fetch failed: ${errText(err)}`);
+    const text = fetchFailure(err, { label, from, dest, replacing, cancelled: call.signal.aborted });
+    deps.log.warn(`remote-host: remote_fetch for ${call.chatId}: ${text}`);
+    return { content: [{ type: "text", text }], isError: true };
   }
+}
+
+/**
+ * What the agent is told when a fetch fails, from how far it got. Every
+ * failure before the copy is put in place leaves `dest` untouched, and says
+ * so; putting it in place ({@link ReplaceFailed}) is the one that may not.
+ */
+export function fetchFailure(
+  err: unknown,
+  at: { label: string; from?: string; dest?: string; replacing: boolean; cancelled: boolean },
+): string {
+  const why = errText(err);
+  const kept = at.replacing && at.dest ? `; ${at.dest} is as it was` : "";
+  if (err instanceof ReplaceFailed) {
+    return `${at.from} was copied from ${at.label}, but ${err.message}. Check what is at ${err.to} now before relying on it.`;
+  }
+  if (at.cancelled) return `Cancelled: nothing was copied${kept}.`;
+  if (!at.from) return `${at.label} can't be reached right now (${why}), so nothing was copied. machine_status says when it is back.`;
+  return (
+    `Couldn't copy ${at.from} from ${at.label}: ${why}. Nothing was written on this computer${kept}.` +
+    (why === DROPPED ? ` Try again once ${at.label} is reachable (machine_status says).` : "")
+  );
 }
 
 /** Ask the user before replacing what is at `dest`; throws a refusal unless they approve. */
@@ -244,7 +276,7 @@ async function describe(e: Entry, v: HostView, call: PluginToolCall): Promise<st
   const p = v.probe;
   const lines = [`${v.label} (terminal location ${v.id}): ${v.status.state}${v.status.detail ? `, ${v.status.detail}` : ""}`];
   const facts: string[] = [];
-  if (v.address) facts.push(`at ${v.address}`);
+  if (v.address) facts.push(v.status.state === "offline" ? `last reached at ${v.address}` : `at ${v.address}`);
   if (p) {
     const os = [p.os.name, p.os.version].filter(Boolean).join(" ") || p.platform;
     facts.push(`${os} on ${p.arch}`, `user ${p.user}, home ${p.home}`);

@@ -19,7 +19,18 @@ export const MAX_COPY_BYTES = 200 * 1024 * 1024;
 const COPY_MS = 5 * 60_000;
 
 const NO_FILE = 3;
+/**
+ * A copy that ended with no exit status, though neither the caller nor the
+ * copy's own time limit stopped it: the channel went with the connection.
+ */
+export const DROPPED = "the connection to the machine dropped during the copy";
 const TOO_BIG = 4;
+
+/** A copy stopped by its own time limit. */
+export function tookTooLong(ms: number): string {
+  const span = ms >= 60_000 ? `${Math.round(ms / 60_000)} minutes` : `${Math.max(1, Math.round(ms / 1000))} seconds`;
+  return `it took longer than ${span}, so it was stopped`;
+}
 
 export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeoutMs?: number } = {}): BridgeFiles {
   const max = opts.maxBytes ?? MAX_COPY_BYTES;
@@ -38,8 +49,9 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
         `exec cat -- "$f"`,
       ].join("\n");
       let r: { code: number | null; stderr: string };
+      const limit = AbortSignal.timeout(ms);
       try {
-        const stop = signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
+        const stop = signal ? AbortSignal.any([signal, limit]) : limit;
         r = await remote.stream(script, { output: out }, stop);
       } catch (err) {
         // No channel (the machine is offline): nothing was piped, so close and drop the temporary here.
@@ -48,6 +60,8 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
         await rm(part, { force: true });
         throw err;
       }
+      // The channel normally ends `out` through the pipe; one closed by a dropped connection may not.
+      if (!out.writableEnded) out.end();
       await closed;
       if (signal?.aborted) {
         await rm(part, { force: true });
@@ -57,6 +71,7 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
         await rm(part, { force: true });
         if (r.code === NO_FILE) return false;
         if (r.code === TOO_BIG) throw new Error(`it is ${r.stderr.trim()}, over the ${Math.round(max / 1048576)} MB a copy may be`);
+        if (r.code === null) throw new Error(limit.aborted ? tookTooLong(ms) : DROPPED);
         throw new Error(r.stderr.trim() || `exit ${r.code}`);
       }
       await rename(part, to);
@@ -75,7 +90,9 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
         `if cat > "$t" && mv -f "$t" ${sq(to)}; then exit 0; fi`,
         `rm -f "$t"; exit 1`,
       ].join("\n");
-      const r = await remote.stream(script, { input: (ch) => pipeline(createReadStream(from), ch) }, AbortSignal.timeout(ms));
+      const limit = AbortSignal.timeout(ms);
+      const r = await remote.stream(script, { input: (ch) => pipeline(createReadStream(from), ch) }, limit);
+      if (r.code === null) throw new Error(limit.aborted ? tookTooLong(ms) : DROPPED);
       if (r.code !== 0) throw new Error(r.stderr.trim() || `exit ${r.code}`);
     },
   };
