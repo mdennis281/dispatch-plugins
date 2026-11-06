@@ -1,11 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestContext } from "@dispatch/plugin-sdk/testing";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { Approvals, ApprovalRequest } from "../src/elevation.js";
 import type { HostRegistry } from "../src/registry.js";
-import { registerTools, remotePath } from "../src/tools/index.js";
+import { DROPPED, tookTooLong } from "../src/mcp/files.js";
+import { fetchFailure, registerTools, remotePath } from "../src/tools/index.js";
+import { ReplaceFailed, replace } from "../src/tools/pull.js";
 import { SH, localRemote } from "./local-remote.js";
 
 /** Paths as the machine's `sh` takes them (Git's sh on Windows reads C:/…). */
@@ -253,5 +255,41 @@ describe.skipIf(!SH)("the agent's tools (the machine played by the local sh)", (
     expect(out).toContain("this chat there: terminals build; forwarded ports 5173 → http://localhost:41000");
     expect(out).toContain(`this chat's checkout there: ${fwd(checkout)}`);
     expect(out).not.toContain("Mac mini"); // only the chat's own machine
+  });
+});
+
+describe("what a failed remote_fetch tells the agent", () => {
+  const at = { label: "CVX Mac", from: "/w/a.bin", dest: "/here/a.bin", replacing: true, cancelled: false };
+
+  it("says exactly what happened to `to`, and only offers a retry for a dropped connection", () => {
+    expect(fetchFailure(new Error(DROPPED), at)).toBe(
+      "Couldn't copy /w/a.bin from CVX Mac: the connection to the machine dropped during the copy. Nothing was written on this computer; " +
+        "/here/a.bin is as it was. Try again once CVX Mac is reachable (machine_status says).",
+    );
+    expect(fetchFailure(new Error(tookTooLong(20 * 60_000)), at)).toBe(
+      "Couldn't copy /w/a.bin from CVX Mac: it took longer than 20 minutes, so it was stopped. Nothing was written on this computer; /here/a.bin is as it was.",
+    );
+    expect(fetchFailure(new ReplaceFailed("/here/a.bin", new Error("EBUSY: resource busy")), at)).toBe(
+      "/w/a.bin was copied from CVX Mac, but putting the copy at /here/a.bin failed part-way (EBUSY: resource busy). Check what is at /here/a.bin now before relying on it.",
+    );
+    expect(fetchFailure(new Error("x"), { ...at, from: undefined, replacing: false })).toBe(
+      "CVX Mac can't be reached right now (x), so nothing was copied. machine_status says when it is back.",
+    );
+    expect(fetchFailure(new Error("cancelled; nothing was replaced"), { ...at, cancelled: true })).toBe("Cancelled: nothing was copied; /here/a.bin is as it was.");
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("reports putting the copy in place failing part-way as that", async () => {
+    const d = mkdtempSync(join(tmpdir(), "rh-replace-"));
+    const box = join(d, "box");
+    mkdirSync(box);
+    writeFileSync(join(box, "to"), "old");
+    writeFileSync(join(box, "part"), "new");
+    chmodSync(box, 0o555); // nothing in it can be removed or renamed
+    try {
+      await expect(replace(join(box, "part"), join(box, "to"))).rejects.toBeInstanceOf(ReplaceFailed);
+    } finally {
+      chmodSync(box, 0o755);
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 });

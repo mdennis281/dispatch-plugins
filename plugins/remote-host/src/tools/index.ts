@@ -19,7 +19,8 @@ import { errText } from "@dispatch-plugins/remote-core";
 import type { Approvals } from "../elevation.js";
 import { backendId } from "../hosts.js";
 import type { Entry, HostRegistry, HostView } from "../registry.js";
-import { look, localName, mb, pull, type Pulled } from "./pull.js";
+import { DROPPED } from "../mcp/files.js";
+import { ReplaceFailed, look, localName, mb, pull, type Pulled } from "./pull.js";
 
 type ToolsApi = NonNullable<PluginContext["tools"]>;
 
@@ -147,17 +148,32 @@ async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall
     return await answer(got, from, dest, label, call, args.show === true);
   } catch (err) {
     if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
-    const why = errText(err);
-    const kept = replacing && dest ? `; ${dest} is as it was` : "";
-    const text = call.signal.aborted
-      ? `Cancelled: nothing was copied${kept}.`
-      : !from
-      ? `${label} can't be reached right now (${why}), so nothing was copied. machine_status says when it is back.`
-      : `Couldn't copy ${from} from ${label}: ${why}. Nothing was written on this computer${kept}. ` +
-        `Try again once ${label} is reachable (machine_status says).`;
+    const text = fetchFailure(err, { label, from, dest, replacing, cancelled: call.signal.aborted });
     deps.log.warn(`remote-host: remote_fetch for ${call.chatId}: ${text}`);
     return { content: [{ type: "text", text }], isError: true };
   }
+}
+
+/**
+ * What the agent is told when a fetch fails, from how far it got. Every
+ * failure before the copy is put in place leaves `dest` untouched, and says
+ * so; putting it in place ({@link ReplaceFailed}) is the one that may not.
+ */
+export function fetchFailure(
+  err: unknown,
+  at: { label: string; from?: string; dest?: string; replacing: boolean; cancelled: boolean },
+): string {
+  const why = errText(err);
+  const kept = at.replacing && at.dest ? `; ${at.dest} is as it was` : "";
+  if (err instanceof ReplaceFailed) {
+    return `${at.from} was copied from ${at.label}, but ${err.message}. Check what is at ${err.to} now before relying on it.`;
+  }
+  if (at.cancelled) return `Cancelled: nothing was copied${kept}.`;
+  if (!at.from) return `${at.label} can't be reached right now (${why}), so nothing was copied. machine_status says when it is back.`;
+  return (
+    `Couldn't copy ${at.from} from ${at.label}: ${why}. Nothing was written on this computer${kept}.` +
+    (why === DROPPED ? ` Try again once ${at.label} is reachable (machine_status says).` : "")
+  );
 }
 
 /** Ask the user before replacing what is at `dest`; throws a refusal unless they approve. */
