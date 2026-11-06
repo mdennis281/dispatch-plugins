@@ -123,7 +123,15 @@ through each plugin's rebuilt bundle.
       - **Approval vs. the run timeout:** a request waiting on the user (or its turn) holds its shell `stalled`, so core pauses the command's timeout, up to core's 10-min cap. The approval itself times out after 5 min.
       - **Cancelling:** Ctrl-C or the shell ending withdraws the approval card (its signal aborts), or closes the helper's channel, which stops the command there.
       - **Concurrency:** one at a time per machine. A second request waits its turn, and is asked only after the first is over.
-    - **Setup** (one-liner from the Remote hosts pane, run once with sudo at the Mac): the hidden account, the root-owned helper in `/usr/local/libexec` (every directory above it must be root-owned and writable by no one else), `/etc/sudoers.d/dispatch-elevate` (checked with `visudo -c`), and the key line. Turning it off, or removing the machine, runs the helper's `uninstall` over the elevation login itself.
+    - **Setup** (elevation-setup.ts, elevate-setup.sh; the Remote hosts pane's **Root** row): the one-liner is run once with sudo at the Mac. It installs:
+      - the hidden account;
+      - the root-owned helper in `/usr/local/libexec` (every directory above it must be root-owned and writable by no one else);
+      - `/etc/sudoers.d/dispatch-elevate`, as `<account> ALL=(root) NOPASSWD: <helper> --root *`, checked with `visudo -cf` before it goes in and `visudo -c` after;
+      - the key line.
+
+      The helper (elevate-helper.sh, bash 3.2) re-runs itself through `sudo -n … --root`, and checks the request again as root.
+    - **Verify:** the pane logs in with the new key and runs the helper's fixed `check`, which must answer `uid=0`. Only then is the key stored. It has no approval card: `check` runs nothing of the agent's, the button is the user's own, and `ctx.approvals.request` needs a chat that the pane doesn't have.
+    - **Off:** turning it off, removing the machine, or uninstalling the plugin runs the helper's `uninstall` over the elevation login itself. When the machine can't be reached, the key is deleted here anyway, and the user is shown `sudo /usr/local/libexec/dispatch-elevate uninstall`. On uninstall the key is kept in that case, so the plugin installed again can still take it out.
 
 ## 3. Pairing flow
 1. On the Mac: create the `dispatch` user, then turn on Remote Login for that user only.

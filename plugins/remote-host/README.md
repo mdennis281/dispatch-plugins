@@ -108,6 +108,33 @@ The account Dispatch logs in as has no sudo password, and never gets one. Instea
 
 It needs a Dispatch that can ask for approval (core's approval requests). Without that, or until elevation is set up on the machine, `sudo` there says so and fails, and the agent is told to ask you instead.
 
+### Setting it up
+
+Once per machine, from Settings → Remote hosts → the machine's **Root: off · Set up**:
+
+1. **Make the setup command.** Dispatch mints the machine's elevation key, keeps it in memory, and shows one line to paste at the machine. **Show what it runs** shows the script it unpacks.
+2. **Run it at the machine**, in Terminal, as an administrator: it asks for your password (`sudo`). It does this, and says so as it goes:
+   - It refuses unless `/`, `/usr`, `/usr/local` and `/usr/local/libexec` are owned by root and writable by nobody else, so no one else could swap the helper.
+   - It creates a hidden account, `_dispatchelevate` (a free id below 500, no password, shell `/bin/bash`). Its home `/private/var/dispatch-elevate` and its one `authorized_keys` line are root's: `restrict,command="/usr/local/libexec/dispatch-elevate",from="<this computer's addresses>" <key>`. The `from=` list is the one the machine was paired with.
+   - It installs the helper, `/usr/local/libexec/dispatch-elevate`, owned by root.
+   - It writes `/etc/sudoers.d/dispatch-elevate`: that account, and nobody else, may run the helper as root without a password. The rule is checked with `visudo -cf` before it is installed, and the whole configuration with `visudo -c` after; if that fails, the rule is taken out again.
+   - It starts the helper's log, `/var/log/dispatch-elevate.log`, readable by root only.
+
+   Running it again is safe: it replaces the key and the helper.
+3. **Verify.** Dispatch logs in with the new key and has the helper prove it runs as root (`uid=0`). Only then is the key stored, and the row says **Root: with your approval, each time**.
+
+The command is good for 2 hours. Verify needs no approval card: it runs one fixed check, nothing of the agent's.
+
+### Turning it off
+
+**Manage → Turn off** logs in with the elevation key once more and runs the helper's `uninstall`. That removes the account, its key line, the sudoers rule and the helper; the log stays. Then the key is deleted here. **Removing the machine** and **uninstalling the plugin** do the same first.
+
+If the machine can't be reached, the key is deleted here anyway (nothing can use it then), and you get the command to run there yourself:
+
+```sh
+sudo /usr/local/libexec/dispatch-elevate uninstall
+```
+
 ## When a chat ends
 
 - **Idle.** When Dispatch retires an idle chat's session, its shells on the machine end, and whatever they were running (a dev server, a watcher) with them. Its checkout stays, so it picks up where it was when the chat is used again.
@@ -115,11 +142,12 @@ It needs a Dispatch that can ask for approval (core's approval requests). Withou
 - **Deleted while Dispatch wasn't listening** (the plugin was off, or Dispatch was down). After every start Dispatch lists the chats that exist, and anything a machine holds for any other chat goes: at once, or when the machine is next reachable. A chat directory made in the last ten minutes is never taken for one of these.
 - **Garbage, once a day per machine.** dispatch-host empties its trash, deletes a shared repository no chat has used for a week, and lets git collect garbage in the rest once enough has piled up. A chat's checkout borrows its objects from the shared repository, so before that repository is collected, each checkout's commits are pinned in it. Only objects unreachable for two weeks are pruned.
 - **This Dispatch's old id.** If this Dispatch's data directory moved or was copied, it got a new instance id, and what it left on a machine under the old one is shown on the machine's row. It is never adopted or cleaned up from here, since the old id may still be a live Dispatch: delete it there once you know it isn't. dispatch-host ends its sessions after 12 hours without contact either way.
-- **Uninstalling the plugin** ends this Dispatch's sessions on every machine it can reach and deletes its files there (`~/.dispatch-host/<instance>`). The key lines stay in each machine's `authorized_keys`: remove the machines first to take them out as well. Disabling the plugin, or stopping Dispatch, keeps everything; a session left without Dispatch ends itself when its heartbeat stops.
+- **Uninstalling the plugin** ends this Dispatch's sessions on every machine it can reach and deletes its files there (`~/.dispatch-host/<instance>`). Root with approval is taken out of every machine that has it and can be reached. On one that can't, it stays (the log says so), and its key is kept, so the plugin installed again can still take it out. The key lines stay in each machine's `authorized_keys`: remove the machines first to take them out as well. Disabling the plugin, or stopping Dispatch, keeps everything; a session left without Dispatch ends itself when its heartbeat stops.
 
 ## Removing a machine
 
-**Remove** on its row (`DELETE /hosts/<name>`) does three things:
+**Remove** on its row (`DELETE /hosts/<name>`) does four things:
+- turns root with approval off there, if it was on (see [Turning it off](#turning-it-off));
 - ends this Dispatch's sessions on the machine;
 - takes the key's line out of its `authorized_keys`;
 - forgets the machine and deletes its key.

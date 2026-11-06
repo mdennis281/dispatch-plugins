@@ -75,6 +75,7 @@ function RemoteHostsPage({ host }) {
   const [pairing, setPairing] = useState(null);
   const [editing, setEditing] = useState(null);
   const [removing, setRemoving] = useState(null);
+  const [elevating, setElevating] = useState(null);
   return /* @__PURE__ */ jsxs("div", { className: "space-y-4", children: [
     /* @__PURE__ */ jsxs("div", { className: "space-y-1.5", children: [
       /* @__PURE__ */ jsxs("p", { className: "text-xs leading-relaxed text-muted", children: [
@@ -94,6 +95,7 @@ function RemoteHostsPage({ host }) {
         onChanged: refresh,
         onEdit: () => setEditing(h),
         onRemove: () => setRemoving(h),
+        onElevation: () => setElevating(h),
         onRepair: () => setPairing({
           slug: h.slug,
           label: h.label,
@@ -138,6 +140,17 @@ function RemoteHostsPage({ host }) {
           void refresh();
         }
       }
+    ),
+    elevating && /* @__PURE__ */ jsx(
+      ElevationDialog,
+      {
+        host,
+        view: elevating,
+        onClose: () => {
+          setElevating(null);
+          void refresh();
+        }
+      }
     )
   ] });
 }
@@ -147,8 +160,9 @@ const TONE = {
   offline: "bg-danger"
 };
 function HostRow(props) {
+  var _a;
   const { host, view } = props;
-  const { IconButton, Tooltip } = host.ui;
+  const { Button, IconButton, Tooltip } = host.ui;
   const [checking, setChecking] = useState(false);
   const s = view.status;
   const connecting = reconnecting(view) !== void 0;
@@ -201,7 +215,11 @@ function HostRow(props) {
         view.abandoned.running ? `, with ${view.abandoned.running} session${view.abandoned.running === 1 ? "" : "s"} still running` : "",
         ". It is never cleaned up from here, since that id may still be a live Dispatch: delete it there once you know it isn't."
       ] }),
-      /* @__PURE__ */ jsx("div", { className: "cm-mono truncate text-2xs text-faint", title: "The machine's host key, pinned at pairing", children: view.hostKey })
+      /* @__PURE__ */ jsx("div", { className: "cm-mono truncate text-2xs text-faint", title: "The machine's host key, pinned at pairing", children: view.hostKey }),
+      /* @__PURE__ */ jsxs("div", { className: "flex flex-wrap items-center gap-x-2 text-xs text-muted", children: [
+        /* @__PURE__ */ jsx("span", { children: elevationLine(view) }),
+        /* @__PURE__ */ jsx(Button, { size: "sm", variant: "ghost", leftIcon: /* @__PURE__ */ jsx(ShieldCheck, {}), onClick: props.onElevation, children: ((_a = view.elevation) == null ? void 0 : _a.on) ? "Manage" : "Set up" })
+      ] })
     ] }),
     /* @__PURE__ */ jsxs("div", { className: "flex shrink-0 items-center gap-0.5", children: [
       /* @__PURE__ */ jsx(IconButton, { size: "sm", tip: "Check now", "aria-label": `Check ${view.label} now`, disabled: checking, onClick: () => void check(), children: /* @__PURE__ */ jsx(RefreshCw, { className: checking ? "animate-spin" : void 0 }) }),
@@ -227,6 +245,11 @@ function statusLine(v) {
   const seen = s.lastSeenAt ? `last seen ${ago(s.lastSeenAt)}` : void 0;
   if (s.state === "online") return ["Online", s.detail, seen].filter(Boolean).join(" · ");
   return [statusWords(v), seen].filter(Boolean).join(" · ");
+}
+function elevationLine(v) {
+  const e = v.elevation;
+  if (!(e == null ? void 0 : e.on)) return "Root: off";
+  return e.canAsk ? "Root: with your approval, each time" : "Root: set up, but this Dispatch can't ask for approval yet, so it's refused";
 }
 function probeLine(v) {
   const p = v.probe;
@@ -537,6 +560,7 @@ function EditDialog({ host, view, onClose }) {
   );
 }
 function RemoveDialog({ host, view, onClose }) {
+  var _a;
   const { Button, Dialog } = host.ui;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -545,7 +569,7 @@ function RemoveDialog({ host, view, onClose }) {
     setError(null);
     try {
       const r = await call(host, slugPath(view.slug), "DELETE");
-      if (r.note) host.toast(`Removed ${view.label}, but its key is still on the machine`, { kind: "warn", detail: r.note });
+      if (r.note) host.toast(`Removed ${view.label}, but something of it is left on the machine`, { kind: "warn", detail: r.note });
       else host.toast(`Removed ${view.label}`, { kind: "info" });
       onClose();
     } catch (err) {
@@ -578,7 +602,149 @@ function RemoveDialog({ host, view, onClose }) {
           /* @__PURE__ */ jsx("span", { className: "cm-mono", children: view.id }),
           " are refused until you pick another location."
         ] }),
+        ((_a = view.elevation) == null ? void 0 : _a.on) && /* @__PURE__ */ jsx("p", { children: "Root with approval is turned off first: its hidden account, helper and sudoers rule come out of the machine, and its key is deleted here." }),
         /* @__PURE__ */ jsx("p", { children: "Files under ~/.dispatch-host on the machine stay; delete them there if you want them gone." }),
+        /* @__PURE__ */ jsx(ErrorStrip, { message: error })
+      ] })
+    }
+  );
+}
+function ElevationDialog({ host, view, onClose }) {
+  var _a, _b;
+  const { Button, Dialog } = host.ui;
+  const on = ((_a = view.elevation) == null ? void 0 : _a.on) === true;
+  const canAsk = ((_b = view.elevation) == null ? void 0 : _b.canAsk) === true;
+  const [start, setStart] = useState(null);
+  const [showScript, setShowScript] = useState(false);
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+  const [manual, setManual] = useState(null);
+  const base = `${slugPath(view.slug)}/elevation`;
+  const act = async (what, fn) => {
+    setBusy(what);
+    setError(null);
+    try {
+      await fn();
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const makeCommand = () => act("setup", async () => setStart(await call(host, `${base}/setup`, "POST")));
+  const verify = () => act("verify", async () => {
+    const r = await call(host, `${base}/verify`, "POST");
+    host.toast(on ? `${view.label}: root with approval works (helper ${r.version})` : `Root with approval is on for ${view.label}`, {
+      kind: "info"
+    });
+    onClose();
+  });
+  const turnOff = () => act("off", async () => {
+    const r = await call(host, base, "DELETE");
+    if (r.manual) {
+      setManual(r);
+      return;
+    }
+    host.toast(`Root with approval is off for ${view.label}`, { kind: "info" });
+    onClose();
+  });
+  const footer = manual ? /* @__PURE__ */ jsx("div", { className: "flex w-full items-center justify-end gap-2", children: /* @__PURE__ */ jsx(Button, { size: "sm", variant: "primary", onClick: onClose, children: "Done" }) }) : on ? /* @__PURE__ */ jsxs("div", { className: "flex w-full items-center justify-end gap-2", children: [
+    /* @__PURE__ */ jsx(Button, { size: "sm", variant: "ghost", onClick: onClose, children: "Close" }),
+    /* @__PURE__ */ jsx(Button, { size: "sm", disabled: busy !== null, onClick: () => void verify(), children: busy === "verify" ? "Checking…" : "Check it" }),
+    /* @__PURE__ */ jsx(Button, { size: "sm", variant: "danger", disabled: busy !== null, onClick: () => void turnOff(), children: busy === "off" ? "Turning off…" : "Turn off" })
+  ] }) : /* @__PURE__ */ jsxs("div", { className: "flex w-full items-center justify-end gap-2", children: [
+    /* @__PURE__ */ jsx(Button, { size: "sm", variant: "ghost", onClick: onClose, children: "Cancel" }),
+    start ? /* @__PURE__ */ jsx(Button, { size: "sm", variant: "primary", disabled: busy !== null, onClick: () => void verify(), children: busy === "verify" ? "Verifying…" : "Verify" }) : /* @__PURE__ */ jsx(Button, { size: "sm", variant: "primary", disabled: busy !== null, onClick: () => void makeCommand(), children: busy === "setup" ? "Making it…" : "Make the setup command" })
+  ] });
+  return /* @__PURE__ */ jsx(
+    Dialog,
+    {
+      open: true,
+      onClose,
+      icon: /* @__PURE__ */ jsx(ShieldCheck, {}),
+      title: `Root with approval on ${view.label}`,
+      description: /* @__PURE__ */ jsx("span", { className: "cm-mono", children: view.id }),
+      width: 560,
+      footer,
+      children: /* @__PURE__ */ jsxs("div", { className: "space-y-3 text-xs leading-relaxed text-muted", children: [
+        manual ? /* @__PURE__ */ jsxs(Fragment, { children: [
+          /* @__PURE__ */ jsxs("p", { children: [
+            "It is off here: its key is deleted, so nothing can use it. But it couldn't be taken out of ",
+            view.label,
+            " itself (",
+            manual.detail ?? manual.there,
+            "). To remove the hidden account, the helper and its sudoers rule, run this there as an administrator:"
+          ] }),
+          /* @__PURE__ */ jsx(CopyBox, { host, text: manual.manual })
+        ] }) : on ? /* @__PURE__ */ jsxs(Fragment, { children: [
+          /* @__PURE__ */ jsxs("p", { children: [
+            "On. A command in a chat's terminal on ",
+            view.label,
+            " that asks for root (",
+            /* @__PURE__ */ jsx("span", { className: "cm-mono", children: "sudo …" }),
+            " or",
+            " ",
+            /* @__PURE__ */ jsx("span", { className: "cm-mono", children: "dispatch-elevate …" }),
+            ") waits for you to approve that exact command in its chat, then runs once, as root, over a login only this Dispatch holds the key to."
+          ] }),
+          !canAsk && /* @__PURE__ */ jsx(WarnStrip, { children: "This Dispatch can't ask you for approval yet (it needs a newer Dispatch), so such commands are refused until it can." }),
+          /* @__PURE__ */ jsxs("p", { children: [
+            /* @__PURE__ */ jsx("b", { children: "Check it" }),
+            " logs in and has the helper prove it runs as root. ",
+            /* @__PURE__ */ jsx("b", { children: "Turn off" }),
+            " removes the hidden account, the helper and its sudoers rule from the machine, and deletes the key here. The helper's log, ",
+            /* @__PURE__ */ jsx("span", { className: "cm-mono", children: "/var/log/dispatch-elevate.log" }),
+            ", stays."
+          ] })
+        ] }) : !start ? /* @__PURE__ */ jsxs(Fragment, { children: [
+          /* @__PURE__ */ jsxs("p", { children: [
+            "Lets a chat run a command as root on ",
+            view.label,
+            ", each time only after you approve that exact command in the chat. The agent's own account there gets no password and no sudo rights. Instead, a one-time setup adds:"
+          ] }),
+          /* @__PURE__ */ jsxs("ul", { className: "list-disc space-y-0.5 pl-5", children: [
+            /* @__PURE__ */ jsxs("li", { children: [
+              "a hidden account, ",
+              /* @__PURE__ */ jsx("span", { className: "cm-mono", children: "_dispatchelevate" }),
+              ", with no password, which can log in only with a key this Dispatch holds, only from this computer's addresses, and only to run the helper;"
+            ] }),
+            /* @__PURE__ */ jsxs("li", { children: [
+              "the helper, root-owned at ",
+              /* @__PURE__ */ jsx("span", { className: "cm-mono", children: "/usr/local/libexec/dispatch-elevate" }),
+              ", which logs every command;"
+            ] }),
+            /* @__PURE__ */ jsxs("li", { children: [
+              "a sudoers rule letting that account, and nobody else, run the helper as root (checked with",
+              " ",
+              /* @__PURE__ */ jsx("span", { className: "cm-mono", children: "visudo" }),
+              " first)."
+            ] })
+          ] }),
+          !canAsk && /* @__PURE__ */ jsx(WarnStrip, { children: "This Dispatch can't ask you for approval yet (it needs a newer Dispatch): until it can, root commands stay refused even once this is set up." })
+        ] }) : /* @__PURE__ */ jsxs(Fragment, { children: [
+          /* @__PURE__ */ jsxs("p", { children: [
+            "Run this at ",
+            view.label,
+            ", in Terminal, as an administrator (it asks for your password), then press ",
+            /* @__PURE__ */ jsx("b", { children: "Verify" }),
+            ". Running it again is safe."
+          ] }),
+          /* @__PURE__ */ jsx(CopyBox, { host, text: start.oneLiner }),
+          /* @__PURE__ */ jsxs("p", { children: [
+            "Its key is accepted only from ",
+            /* @__PURE__ */ jsx("span", { className: "cm-mono", children: start.allowFrom.join(", ") }),
+            " (this computer, as paired). The command is good for 2 hours; after that, make a new one."
+          ] }),
+          /* @__PURE__ */ jsx(Button, { size: "sm", variant: "ghost", onClick: () => setShowScript((s) => !s), children: showScript ? "Hide what it runs" : "Show what it runs" }),
+          showScript && /* @__PURE__ */ jsx(
+            "pre",
+            {
+              className: "cm-mono rounded-md border border-line bg-inset p-3 text-2xs text-secondary",
+              style: { maxHeight: 280, overflow: "auto", whiteSpace: "pre" },
+              children: start.script
+            }
+          )
+        ] }),
         /* @__PURE__ */ jsx(ErrorStrip, { message: error })
       ] })
     }
@@ -617,6 +783,9 @@ function CopyBox({ host, text }) {
 }
 function SectionTitle({ children }) {
   return /* @__PURE__ */ jsx("div", { className: "text-2xs font-semibold uppercase tracking-[0.09em] text-faint", children });
+}
+function WarnStrip({ children }) {
+  return /* @__PURE__ */ jsx("div", { className: "rounded-md border border-line bg-inset px-2.5 py-1.5 text-xs text-warn", children });
 }
 function ErrorStrip({ message }) {
   if (!message) return null;

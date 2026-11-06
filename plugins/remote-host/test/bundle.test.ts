@@ -162,8 +162,11 @@ describe("routes", () => {
     expect(t.routes.list().sort()).toEqual(
       [
         "DELETE /hosts/:slug",
+        "DELETE /hosts/:slug/elevation",
         "GET /hosts",
         "POST /hosts/:slug/check",
+        "POST /hosts/:slug/elevation/setup",
+        "POST /hosts/:slug/elevation/verify",
         "POST /pair/cancel",
         "POST /pair/finish",
         "POST /pair/scan",
@@ -201,5 +204,53 @@ describe("routes", () => {
     // Paired again under this name, it starts clean: no old base to read a new, empty checkout against.
     expect([...t.kv.keys()].filter((k) => /^(sync|served):/.test(k)).sort()).toEqual(["served:lab2:chat-2", "sync:lab2:chat-1"]);
     await until(() => !t.terminalBackends.has("remote-host/lab"));
+  });
+
+  it("sets root with approval up, and takes it off a machine it can't reach without losing the way out", { timeout: 90_000 }, async () => {
+    const port = await closedPort();
+    const t = await activate({
+      settings: { hosts: [host("lab", port)] },
+      secrets: { REMOTE_HOST_KEY_LAB: "k" },
+    });
+    const listed = await t.routes.call("GET", "/hosts");
+    // This Dispatch has no approvals API (core E31) yet.
+    expect((listed.body as { hosts: Array<{ elevation: unknown }> }).hosts[0]!.elevation).toEqual({ on: false, canAsk: false });
+
+    const verifyFirst = await t.routes.call("POST", "/hosts/:slug/elevation/verify", { params: { slug: "lab" } });
+    expect(verifyFirst.status).toBe(409);
+    expect((verifyFirst.body as { error: string }).error).toMatch(/setup command first/);
+
+    const setup = await t.routes.call("POST", "/hosts/:slug/elevation/setup", { params: { slug: "lab" } });
+    expect(setup.status).toBe(200);
+    const s = setup.body as { oneLiner: string; script: string; keyLine: string; allowFrom: string[] };
+    expect(s.oneLiner).toMatch(/^echo [A-Za-z0-9+/=]+ \| base64 --decode \| gunzip \| sudo \/bin\/bash -s$/);
+    expect(s.keyLine).toMatch(/^restrict,command="\/usr\/local\/libexec\/dispatch-elevate",from="127\.0\.0\.1" ssh-ed25519 /);
+    expect(s.script).toContain(s.keyLine);
+    // Nothing stored until it is proven.
+    expect(t.secrets.has("REMOTE_HOST_ELEVATE_KEY_LAB")).toBe(false);
+    const unreachable = await t.routes.call("POST", "/hosts/:slug/elevation/verify", { params: { slug: "lab" } });
+    expect(unreachable.status).toBe(502);
+    expect(t.secrets.has("REMOTE_HOST_ELEVATE_KEY_LAB")).toBe(false);
+
+    // On (stored by an earlier verify), then the machine went away: turned off here anyway, with the command for there.
+    t.secrets.set("REMOTE_HOST_ELEVATE_KEY_LAB", "an elevation key");
+    expect(((await t.routes.call("GET", "/hosts")).body as { hosts: Array<{ elevation: unknown }> }).hosts[0]!.elevation).toEqual({
+      on: true,
+      canAsk: false,
+    });
+    const off = await t.routes.call("DELETE", "/hosts/:slug/elevation", { params: { slug: "lab" } });
+    expect(off.status).toBe(200);
+    expect(off.body).toMatchObject({ there: "unreachable", manual: "sudo /usr/local/libexec/dispatch-elevate uninstall" });
+    expect(t.secrets.has("REMOTE_HOST_ELEVATE_KEY_LAB")).toBe(false);
+    expect(((await t.routes.call("DELETE", "/hosts/:slug/elevation", { params: { slug: "lab" } })).body as { there: string }).there).toBe(
+      "not-set-up",
+    );
+
+    // Remove machine turns it off first, and says how to finish when it couldn't.
+    t.secrets.set("REMOTE_HOST_ELEVATE_KEY_LAB", "an elevation key");
+    const removed = await t.routes.call("DELETE", "/hosts/:slug", { params: { slug: "lab" } });
+    expect(removed.body).toMatchObject({ removed: "lab", elevation: "unreachable" });
+    expect((removed.body as { note: string }).note).toMatch(/Root with approval couldn't be taken out there.*sudo \/usr\/local\/libexec\/dispatch-elevate uninstall/);
+    expect(t.secrets.has("REMOTE_HOST_ELEVATE_KEY_LAB")).toBe(false);
   });
 });

@@ -365,7 +365,8 @@ export function localIPv4(): string[] {
   return [...new Set(out)];
 }
 
-function safeName(name: string): string {
+/** This computer's name as it may go in a key's comment. */
+export function safeName(name: string): string {
   // The whole comment must stay within generateKeyPair's 128 characters.
   return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 50) || "dispatch";
 }

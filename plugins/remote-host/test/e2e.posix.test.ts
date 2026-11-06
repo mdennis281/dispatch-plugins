@@ -6,7 +6,7 @@
  *
  * Skipped on Windows; CI runs it on Linux and macOS.
  */
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { get } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +17,7 @@ import { createTestContext, type TestContext } from "@dispatch/plugin-sdk/testin
 import { NODE_RUNTIME, sq } from "@dispatch-plugins/host-agent";
 import { generateKeyPair } from "@dispatch-plugins/remote-core";
 import { runLocally, startTestSshServer, type ExecRequest, type TestSshServer } from "@dispatch-plugins/remote-core/testing";
+import { HELPER_VERSION, helperScript, removeElevation, verifyElevation, type HelperPaths } from "../src/elevation-setup.js";
 import { bundledAgent } from "../src/agent.js";
 import { ELEVATE_USER, type ApprovalRequest, type ApprovalResult } from "../src/elevation.js";
 import type { HostConfig } from "../src/hosts.js";
@@ -58,6 +59,15 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
   /** What the user was asked to approve, and how the test answers. */
   const approvalsAsked: Array<{ chatId: string; req: ApprovalRequest }> = [];
   let decide: (req: ApprovalRequest) => Promise<ApprovalResult["decision"]> = async () => "approved";
+  /** The real root helper, under a scratch directory, with a sudo that only runs it as this user (CI has no root). */
+  let helper: HelperPaths;
+  let elevateKey: string;
+  const installHelper = () => {
+    mkdirSync(join(helper.home, ".ssh"), { recursive: true });
+    writeFileSync(helper.helper, helperScript(helper), { mode: 0o755 });
+    writeFileSync(join(helper.home, ".ssh", "authorized_keys"), "the setup's key line\n");
+    writeFileSync(helper.sudoers, "the setup's sudoers rule\n");
+  };
 
   beforeAll(async () => {
     // Short on purpose: dispatch-host's sockets live under it, and a unix
@@ -74,6 +84,28 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     );
     const kp = generateKeyPair("e2e@test");
     const elevateKp = generateKeyPair("e2e-elevate@test");
+    elevateKey = elevateKp.privateKey;
+    const elev = join(home, "elevate");
+    helper = {
+      helper: join(elev, "dispatch-elevate"),
+      account: ELEVATE_USER,
+      home: join(elev, "home"),
+      sudoers: join(elev, "sudoers"),
+      log: join(elev, "log"),
+      sudo: join(elev, "sudo"),
+      dscl: join(elev, "dscl"),
+      rootUid: process.getuid!(),
+    };
+    mkdirSync(elev, { recursive: true });
+    writeFileSync(helper.sudo, '#!/bin/sh\n[ "$1" = -n ] || { echo "sudo: a password is required" >&2; exit 1; }\nshift\nexec "$@"\n', {
+      mode: 0o755,
+    });
+    writeFileSync(
+      helper.dscl,
+      `#!/bin/sh\necho "$*" >> ${sq(join(elev, "dscl.log"))}\ncase "$*" in *"-read /Users/"*|*"-read /Groups/_"*|*-delete*) exit 0 ;; esac\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    installHelper();
     const asUser = runLocally({
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: home,
@@ -83,13 +115,18 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       TMPDIR: process.env.TMPDIR ?? "/tmp",
       LANG: "C.UTF-8",
     });
+    const asHelper = (req: ExecRequest) =>
+      runLocally({ PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: helper.home, SSH_ORIGINAL_COMMAND: req.command })({
+        ...req,
+        command: `exec /bin/bash ${sq(helper.helper)}`,
+      });
     server = await startTestSshServer({
       authorizedKeys: () => [kp.publicKey, elevateKp.publicKey],
       // sshd's default: a connection past ten sessions has channels refused.
       maxSessions: 10,
-      // The elevation account's forced command is the root helper; here a
-      // stand-in that runs the request as this user (CI has no root).
-      exec: (req) => (req.username === ELEVATE_USER ? fakeHelper(req) : asUser(req)),
+      // The elevation account's forced command: the real root helper, which
+      // reads the request from SSH_ORIGINAL_COMMAND, as sshd runs it.
+      exec: (req) => (req.username === ELEVATE_USER ? asHelper(req) : asUser(req)),
     });
     t = createTestContext({
       id: "remote-host",
@@ -372,6 +409,53 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     expect(w.out).not.toContain("rc=0");
     h.kill();
   });
+
+  it("Ctrl-C while it runs as root stops it there", { timeout: 60_000 }, async () => {
+    const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "stop" });
+    const w = watch(h);
+    decide = async () => "approved";
+    h.stdin.write(`sudo sh -c 'echo started; exec sleep 29.517' ; echo "rc=$?"\n`);
+    await until(() => w.out.includes("started"), 20_000, "the command running as root");
+    expect(running("sleep 29.517")).toBe(true);
+    h.kill("SIGINT");
+    await until(() => !running("sleep 29.517"), 15_000, "the root command stopped");
+    await until(() => readFileSync(helper.log, "utf8").includes(": exit 143"), 10_000, "the helper's log line");
+    h.kill();
+  });
+
+  it("the helper logs every request, and nothing a shell would expand runs", { timeout: 60_000 }, async () => {
+    const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "literal" });
+    const w = watch(h);
+    decide = async () => "approved";
+    h.stdin.write(`dispatch-elevate echo '$(touch ${home}/pwned)' '\`id\`'; echo "rc=$?"\n`);
+    await until(() => w.out.includes("rc="), 20_000, "the command's end");
+    expect(w.out).toContain(`$(touch ${home}/pwned) \`id\``);
+    expect(existsSync(join(home, "pwned"))).toBe(false);
+    const log = readFileSync(helper.log, "utf8");
+    expect(log).toMatch(/run [A-Za-z0-9-]+ in .*: echo /);
+    expect(log).toMatch(/: exit 0\n/);
+    h.kill();
+  });
+
+  it("verify proves the helper answers as root; turning it off uninstalls it there", { timeout: 60_000 }, async () => {
+    const el = registry.get("e2e")!.backend.elevation;
+    await expect(verifyElevation(el, elevateKey, "E2E", helper.rootUid)).resolves.toEqual({ version: HELPER_VERSION });
+    if (helper.rootUid !== 0) {
+      await expect(verifyElevation(el, elevateKey, "E2E", 0)).rejects.toThrow(/ran as uid \d+, not as root/);
+    }
+    // A key the machine doesn't take.
+    await expect(verifyElevation(el, generateKeyPair("other@test").privateKey, "E2E", helper.rootUid)).rejects.toThrow(
+      /doesn't accept the elevation key yet/,
+    );
+
+    expect(await removeElevation(el)).toEqual({ there: "removed" });
+    expect(existsSync(helper.helper)).toBe(false);
+    expect(existsSync(helper.sudoers)).toBe(false);
+    expect(existsSync(helper.home)).toBe(false);
+    expect(readFileSync(helper.log, "utf8")).toMatch(/uninstalled\n$/); // the log stays
+    expect(readFileSync(join(helper.home, "..", "dscl.log"), "utf8")).toContain(`. -delete /Users/${ELEVATE_USER}`);
+    installHelper();
+  });
 });
 
 function fetchText(url: string): Promise<string> {
@@ -394,35 +478,7 @@ function alive(pid: number): boolean {
   }
 }
 
-/**
- * The root helper's stand-in, for the elevation account's connection: reads
- * `run <id> <base64>` as the forced command reads SSH_ORIGINAL_COMMAND, runs
- * the decoded argv in the decoded directory (as this user: CI has no root),
- * and stops it when the channel goes, as the real one does on stdin's EOF.
- */
-function fakeHelper({ command, channel }: ExecRequest): void {
-  const m = command.match(/^run ([A-Za-z0-9-]{1,64}) ([A-Za-z0-9+/=]+)$/);
-  if (!m) {
-    channel.stderr.write("dispatch-elevate: not a request\n");
-    channel.exit(125);
-    channel.end();
-    return;
-  }
-  const parts = Buffer.from(m[2]!, "base64").toString("utf8").split("\0").slice(0, -1);
-  const [cwd, file, ...args] = parts;
-  const child = spawn(file!, args, { cwd: cwd!, stdio: ["ignore", "pipe", "pipe"] });
-  child.stdout.pipe(channel, { end: false });
-  child.stderr.pipe(channel.stderr, { end: false });
-  channel.on("error", () => {});
-  channel.on("close", () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-  });
-  child.on("close", (code) => {
-    try {
-      channel.exit(code ?? 1);
-      channel.end();
-    } catch {
-      /* the client went away */
-    }
-  });
+/** Whether a process whose command line contains `text` is running. */
+function running(text: string): boolean {
+  return spawnSync("pgrep", ["-f", text]).status === 0;
 }

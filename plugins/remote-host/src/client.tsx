@@ -46,7 +46,22 @@ interface RemoveResult {
   removed: string;
   keyLine: "removed" | "absent" | "unreachable";
   sessionsEnded: number;
+  elevation?: string;
   note?: string;
+}
+
+interface ElevationStart {
+  oneLiner: string;
+  script: string;
+  keyLine: string;
+  allowFrom: string[];
+  expiresAt: number;
+}
+
+interface ElevationOff {
+  there: "removed" | "not-set-up" | "refused" | "unreachable" | "failed";
+  detail?: string;
+  manual?: string;
 }
 
 /** A route of this plugin; rejects with the server's own reason. */
@@ -96,6 +111,7 @@ function RemoteHostsPage({ host }: { host: ClientHost }) {
   const [pairing, setPairing] = useState<PairPrefill | null>(null);
   const [editing, setEditing] = useState<HostView | null>(null);
   const [removing, setRemoving] = useState<HostView | null>(null);
+  const [elevating, setElevating] = useState<HostView | null>(null);
 
   return (
     <div className="space-y-4">
@@ -129,6 +145,7 @@ function RemoteHostsPage({ host }: { host: ClientHost }) {
               onChanged={refresh}
               onEdit={() => setEditing(h)}
               onRemove={() => setRemoving(h)}
+              onElevation={() => setElevating(h)}
               onRepair={() =>
                 setPairing({
                   slug: h.slug,
@@ -175,6 +192,16 @@ function RemoteHostsPage({ host }: { host: ClientHost }) {
           }}
         />
       )}
+      {elevating && (
+        <ElevationDialog
+          host={host}
+          view={elevating}
+          onClose={() => {
+            setElevating(null);
+            void refresh();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -192,9 +219,10 @@ function HostRow(props: {
   onEdit: () => void;
   onRemove: () => void;
   onRepair: () => void;
+  onElevation: () => void;
 }) {
   const { host, view } = props;
-  const { IconButton, Tooltip } = host.ui;
+  const { Button, IconButton, Tooltip } = host.ui;
   const [checking, setChecking] = useState(false);
   const s = view.status;
   const connecting = reconnecting(view) !== undefined;
@@ -252,6 +280,12 @@ function HostRow(props: {
           <div className="cm-mono truncate text-2xs text-faint" title="The machine's host key, pinned at pairing">
             {view.hostKey}
           </div>
+          <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted">
+            <span>{elevationLine(view)}</span>
+            <Button size="sm" variant="ghost" leftIcon={<ShieldCheck />} onClick={props.onElevation}>
+              {view.elevation?.on ? "Manage" : "Set up"}
+            </Button>
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
           <IconButton size="sm" tip="Check now" aria-label={`Check ${view.label} now`} disabled={checking} onClick={() => void check()}>
@@ -296,6 +330,12 @@ function statusLine(v: HostView): string {
   // Online can carry a note that is no fault (Homebrew's old Command Line Tools).
   if (s.state === "online") return ["Online", s.detail, seen].filter(Boolean).join(" · ");
   return [statusWords(v), seen].filter(Boolean).join(" · ");
+}
+
+function elevationLine(v: HostView): string {
+  const e = v.elevation;
+  if (!e?.on) return "Root: off";
+  return e.canAsk ? "Root: with your approval, each time" : "Root: set up, but this Dispatch can't ask for approval yet, so it's refused";
 }
 
 function probeLine(v: HostView): string {
@@ -685,7 +725,7 @@ function RemoveDialog({ host, view, onClose }: { host: ClientHost; view: HostVie
     setError(null);
     try {
       const r = await call<RemoveResult>(host, slugPath(view.slug), "DELETE");
-      if (r.note) host.toast(`Removed ${view.label}, but its key is still on the machine`, { kind: "warn", detail: r.note });
+      if (r.note) host.toast(`Removed ${view.label}, but something of it is left on the machine`, { kind: "warn", detail: r.note });
       else host.toast(`Removed ${view.label}`, { kind: "info" });
       onClose();
     } catch (err) {
@@ -717,7 +757,181 @@ function RemoveDialog({ host, view, onClose }: { host: ClientHost; view: HostVie
           <span className="cm-mono">~{view.user}/.ssh/authorized_keys</span> there, and deletes the key here. Chats and projects
           that run terminals on <span className="cm-mono">{view.id}</span> are refused until you pick another location.
         </p>
+        {view.elevation?.on && (
+          <p>
+            Root with approval is turned off first: its hidden account, helper and sudoers rule come out of the machine, and
+            its key is deleted here.
+          </p>
+        )}
         <p>Files under ~/.dispatch-host on the machine stay; delete them there if you want them gone.</p>
+        <ErrorStrip message={error} />
+      </div>
+    </Dialog>
+  );
+}
+
+/* ------------------------------------------------- root, with approval */
+
+/**
+ * Turning root-with-approval on for a machine (make the setup command, the
+ * user runs it there with sudo, verify), or off. See elevation-setup.ts.
+ */
+function ElevationDialog({ host, view, onClose }: { host: ClientHost; view: HostView; onClose: () => void }) {
+  const { Button, Dialog } = host.ui;
+  const on = view.elevation?.on === true;
+  const canAsk = view.elevation?.canAsk === true;
+  const [start, setStart] = useState<ElevationStart | null>(null);
+  const [showScript, setShowScript] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [manual, setManual] = useState<ElevationOff | null>(null);
+  const base = `${slugPath(view.slug)}/elevation`;
+
+  const act = async (what: string, fn: () => Promise<void>) => {
+    setBusy(what);
+    setError(null);
+    try {
+      await fn();
+    } catch (err) {
+      setError(errText(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const makeCommand = () => act("setup", async () => setStart(await call<ElevationStart>(host, `${base}/setup`, "POST")));
+  const verify = () =>
+    act("verify", async () => {
+      const r = await call<{ version: string }>(host, `${base}/verify`, "POST");
+      host.toast(on ? `${view.label}: root with approval works (helper ${r.version})` : `Root with approval is on for ${view.label}`, {
+        kind: "info",
+      });
+      onClose();
+    });
+  const turnOff = () =>
+    act("off", async () => {
+      const r = await call<ElevationOff>(host, base, "DELETE");
+      if (r.manual) {
+        setManual(r);
+        return;
+      }
+      host.toast(`Root with approval is off for ${view.label}`, { kind: "info" });
+      onClose();
+    });
+
+  const footer = manual ? (
+    <div className="flex w-full items-center justify-end gap-2">
+      <Button size="sm" variant="primary" onClick={onClose}>
+        Done
+      </Button>
+    </div>
+  ) : on ? (
+    <div className="flex w-full items-center justify-end gap-2">
+      <Button size="sm" variant="ghost" onClick={onClose}>
+        Close
+      </Button>
+      <Button size="sm" disabled={busy !== null} onClick={() => void verify()}>
+        {busy === "verify" ? "Checking…" : "Check it"}
+      </Button>
+      <Button size="sm" variant="danger" disabled={busy !== null} onClick={() => void turnOff()}>
+        {busy === "off" ? "Turning off…" : "Turn off"}
+      </Button>
+    </div>
+  ) : (
+    <div className="flex w-full items-center justify-end gap-2">
+      <Button size="sm" variant="ghost" onClick={onClose}>
+        Cancel
+      </Button>
+      {start ? (
+        <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void verify()}>
+          {busy === "verify" ? "Verifying…" : "Verify"}
+        </Button>
+      ) : (
+        <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void makeCommand()}>
+          {busy === "setup" ? "Making it…" : "Make the setup command"}
+        </Button>
+      )}
+    </div>
+  );
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      icon={<ShieldCheck />}
+      title={`Root with approval on ${view.label}`}
+      description={<span className="cm-mono">{view.id}</span>}
+      width={560}
+      footer={footer}
+    >
+      <div className="space-y-3 text-xs leading-relaxed text-muted">
+        {manual ? (
+          <>
+            <p>
+              It is off here: its key is deleted, so nothing can use it. But it couldn&apos;t be taken out of {view.label} itself (
+              {manual.detail ?? manual.there}). To remove the hidden account, the helper and its sudoers rule, run this there as an
+              administrator:
+            </p>
+            <CopyBox host={host} text={manual.manual!} />
+          </>
+        ) : on ? (
+          <>
+            <p>
+              On. A command in a chat&apos;s terminal on {view.label} that asks for root (<span className="cm-mono">sudo …</span> or{" "}
+              <span className="cm-mono">dispatch-elevate …</span>) waits for you to approve that exact command in its chat, then runs once,
+              as root, over a login only this Dispatch holds the key to.
+            </p>
+            {!canAsk && <WarnStrip>This Dispatch can&apos;t ask you for approval yet (it needs a newer Dispatch), so such commands are refused until it can.</WarnStrip>}
+            <p>
+              <b>Check it</b> logs in and has the helper prove it runs as root. <b>Turn off</b> removes the hidden account, the helper and its
+              sudoers rule from the machine, and deletes the key here. The helper&apos;s log, <span className="cm-mono">/var/log/dispatch-elevate.log</span>,
+              stays.
+            </p>
+          </>
+        ) : !start ? (
+          <>
+            <p>
+              Lets a chat run a command as root on {view.label}, each time only after you approve that exact command in the chat. The
+              agent&apos;s own account there gets no password and no sudo rights. Instead, a one-time setup adds:
+            </p>
+            <ul className="list-disc space-y-0.5 pl-5">
+              <li>
+                a hidden account, <span className="cm-mono">_dispatchelevate</span>, with no password, which can log in only with a key this
+                Dispatch holds, only from this computer&apos;s addresses, and only to run the helper;
+              </li>
+              <li>
+                the helper, root-owned at <span className="cm-mono">/usr/local/libexec/dispatch-elevate</span>, which logs every command;
+              </li>
+              <li>
+                a sudoers rule letting that account, and nobody else, run the helper as root (checked with{" "}
+                <span className="cm-mono">visudo</span> first).
+              </li>
+            </ul>
+            {!canAsk && <WarnStrip>This Dispatch can&apos;t ask you for approval yet (it needs a newer Dispatch): until it can, root commands stay refused even once this is set up.</WarnStrip>}
+          </>
+        ) : (
+          <>
+            <p>
+              Run this at {view.label}, in Terminal, as an administrator (it asks for your password), then press <b>Verify</b>. Running it
+              again is safe.
+            </p>
+            <CopyBox host={host} text={start.oneLiner} />
+            <p>
+              Its key is accepted only from <span className="cm-mono">{start.allowFrom.join(", ")}</span> (this computer, as paired). The
+              command is good for 2 hours; after that, make a new one.
+            </p>
+            <Button size="sm" variant="ghost" onClick={() => setShowScript((s) => !s)}>
+              {showScript ? "Hide what it runs" : "Show what it runs"}
+            </Button>
+            {showScript && (
+              <pre
+                className="cm-mono rounded-md border border-line bg-inset p-3 text-2xs text-secondary"
+                style={{ maxHeight: 280, overflow: "auto", whiteSpace: "pre" }}
+              >
+                {start.script}
+              </pre>
+            )}
+          </>
+        )}
         <ErrorStrip message={error} />
       </div>
     </Dialog>
@@ -756,6 +970,10 @@ function CopyBox({ host, text }: { host: ClientHost; text: string }) {
 
 function SectionTitle({ children }: { children: ReactNode }) {
   return <div className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">{children}</div>;
+}
+
+function WarnStrip({ children }: { children: ReactNode }) {
+  return <div className="rounded-md border border-line bg-inset px-2.5 py-1.5 text-xs text-warn">{children}</div>;
 }
 
 function ErrorStrip({ message }: { message?: string | null }) {

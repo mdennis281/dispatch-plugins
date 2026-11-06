@@ -28,6 +28,7 @@ import { posix, join, basename, resolve, dirname, sep, isAbsolute, relative } fr
 import { createWriteStream, createReadStream } from "node:fs";
 import { Readable, PassThrough } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { gzipSync } from "node:zlib";
 function definePlugin(mod) {
   return mod;
 }
@@ -121,7 +122,7 @@ function requireSafer() {
     };
   }
   if (!Safer.alloc) {
-    Safer.alloc = function(size, fill, encoding) {
+    Safer.alloc = function(size, fill2, encoding) {
       if (typeof size !== "number") {
         throw new TypeError('The "size" argument must be of type number. Received type ' + typeof size);
       }
@@ -129,12 +130,12 @@ function requireSafer() {
         throw new RangeError('The value "' + size + '" is invalid for option "size"');
       }
       var buf = Buffer2(size);
-      if (!fill || fill.length === 0) {
+      if (!fill2 || fill2.length === 0) {
         buf.fill(0);
       } else if (typeof encoding === "string") {
-        buf.fill(fill, encoding);
+        buf.fill(fill2, encoding);
       } else {
-        buf.fill(fill);
+        buf.fill(fill2);
       }
       return buf;
     };
@@ -20914,6 +20915,328 @@ function nodejsOrgRuntime(opts = {}) {
     }
   };
 }
+const helperTemplate = `#!/bin/bash
+# dispatch-elevate: runs one command as root for Dispatch's remote-host
+# plugin, after the user approved that exact command in the chat that asked.
+#
+# Installed root-owned by the setup command from Settings → Remote hosts, and
+# run only as the forced command of the hidden elevation account's one
+# authorized_keys line. Only that Dispatch holds the key, and it logs in with
+# it only after an approval. The account may run this file as root (sudoers),
+# and nothing else.
+#
+#   run <id> <base64>  one command as root: the base64 of its directory and
+#                      each argument, each ended by a NUL. No shell parses it.
+#   check              print this helper's version and the uid it runs as
+#   uninstall          remove the account, its key, its sudoers rule and this
+#                      file; the log stays
+#
+# By hand, as an administrator:  sudo <this file> uninstall
+#
+# Bash 3.2 (macOS's /bin/bash): no \`local -n\`, no \`\${x,,}\`, no \`set -u\`
+# (an empty array is "unbound" there).
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+HELPER=@HELPER@
+VERSION=@VERSION@
+ACCOUNT=@ACCOUNT@
+ACCOUNT_HOME=@HOME@
+SUDOERS=@SUDOERS@
+LOG=@LOG@
+SUDO=@SUDO@
+DSCL=@DSCL@
+ROOT_UID=@ROOT_UID@
+# The request's base64, in characters. dispatch-host caps argv at 32 KiB.
+MAX=65536
+ID_RE='^[A-Za-z0-9-]{1,64}$'
+B64_RE='^[A-Za-z0-9+/]+=*$'
+
+say() { printf 'dispatch-elevate: %s\\n' "$*" >&2; }
+# 125: the helper refused, so nothing ran (a command's own codes stay its own).
+refuse() {
+  say "$*"
+  exit 125
+}
+
+valid() {
+  [[ $1 =~ $ID_RE ]] || refuse "not a request id"
+  [ \${#2} -le $MAX ] || refuse "the request is too long"
+  [[ $2 =~ $B64_RE ]] || refuse "not a request"
+}
+
+# The account's half: the forced command. It checks the request's shape and
+# hands it to sudo, which lets this account run only this file.
+forced() {
+  case $SSH_ORIGINAL_COMMAND in
+    check | uninstall) exec "$SUDO" -n "$HELPER" --root "$SSH_ORIGINAL_COMMAND" ;;
+    "run "*) ;;
+    *) refuse "not a request this helper takes" ;;
+  esac
+  set -f
+  # shellcheck disable=SC2086 # split on purpose: three words, globbing off
+  set -- $SSH_ORIGINAL_COMMAND
+  [ $# -eq 3 ] || refuse "not a request this helper takes"
+  valid "$2" "$3"
+  exec "$SUDO" -n "$HELPER" --root run "$2" "$3"
+}
+
+log() { printf '%s %s\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$LOG"; }
+
+# Root's half. Everything is checked again: sudoers lets the account pass any
+# arguments after --root.
+as_root() {
+  [ "$(id -u)" = "$ROOT_UID" ] || refuse "--root is for sudo, through the elevation account"
+  # Nothing runs without a line in the log first.
+  (umask 077 && : >>"$LOG") 2>/dev/null || refuse "can't write $LOG, so nothing ran"
+  case $1 in
+    check)
+      [ $# -eq 1 ] || refuse "not a request"
+      log "check"
+      echo "dispatch-elevate $VERSION uid=$(id -u)"
+      ;;
+    uninstall)
+      [ $# -eq 1 ] || refuse "not a request"
+      uninstall
+      ;;
+    run)
+      [ $# -eq 3 ] || refuse "not a request"
+      valid "$2" "$3"
+      run "$2" "$3"
+      ;;
+    *) refuse "not a request this helper takes" ;;
+  esac
+}
+
+run() {
+  local id=$1 a cwd pid watcher rc
+  local -a args
+  # NUL-separated, so any byte but NUL survives; a shell never sees it.
+  while IFS= read -r -d '' a; do args[\${#args[@]}]=$a; done < <(printf '%s' "$2" | base64 --decode 2>/dev/null)
+  [ \${#args[@]} -ge 2 ] || refuse "not a request"
+  cwd=\${args[0]}
+  case $cwd in /*) ;; *) refuse "not an absolute directory" ;; esac
+  log "run $id in $(printf '%q' "$cwd"):$(printf ' %q' "\${args[@]:1}")"
+  cd "$cwd" 2>/dev/null || {
+    log "run $id: no such directory"
+    refuse "there is no directory $cwd here, so nothing ran"
+  }
+  # Dispatch closes the channel to cancel; this script's stdin then ends.
+  # The command reads nothing (no one could type into it), runs in its own
+  # process group, and a watcher stops that group when stdin ends.
+  exec 3<&0
+  set -m
+  env -i -- PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/var/root USER=root LOGNAME=root SHELL=/bin/sh TMPDIR=/tmp \\
+    "\${args[@]:1}" </dev/null 3<&- &
+  pid=$!
+  (
+    cat <&3 >/dev/null 2>&1
+    kill -TERM -- "-$pid" 2>/dev/null
+    sleep 5
+    kill -KILL -- "-$pid" 2>/dev/null
+  ) </dev/null >/dev/null 2>&1 &
+  watcher=$!
+  exec 3<&-
+  trap 'kill -TERM -- "-$pid" 2>/dev/null' HUP INT TERM
+  wait "$pid" 2>/dev/null
+  rc=$?
+  # A trapped signal interrupts wait; the command's own end comes after.
+  while kill -0 "$pid" 2>/dev/null; do
+    wait "$pid" 2>/dev/null
+    rc=$?
+  done
+  kill -- "-$watcher" 2>/dev/null
+  log "run $id: exit $rc"
+  return $rc
+}
+
+uninstall() {
+  local ok=1
+  case $ACCOUNT_HOME in /?*/?*) ;; *) refuse "unexpected home directory $ACCOUNT_HOME" ;; esac
+  log "uninstall"
+  # The key first, so nothing logs in while the rest goes.
+  rm -f "$ACCOUNT_HOME/.ssh/authorized_keys" || ok=0
+  rm -f "$SUDOERS" || ok=0
+  if "$DSCL" . -read /Groups/com.apple.access_ssh >/dev/null 2>&1; then
+    "$DSCL" . -delete /Groups/com.apple.access_ssh GroupMembership "$ACCOUNT" >/dev/null 2>&1
+  fi
+  if "$DSCL" . -read "/Users/$ACCOUNT" >/dev/null 2>&1; then "$DSCL" . -delete "/Users/$ACCOUNT" || ok=0; fi
+  if "$DSCL" . -read "/Groups/$ACCOUNT" >/dev/null 2>&1; then "$DSCL" . -delete "/Groups/$ACCOUNT" || ok=0; fi
+  rm -rf "$ACCOUNT_HOME" || ok=0
+  rm -f "$HELPER" || ok=0
+  if [ $ok = 1 ]; then
+    log "uninstalled"
+    echo "removed: the account $ACCOUNT, its key, $SUDOERS and $HELPER (the log, $LOG, stays)"
+  else
+    log "uninstall: something was left"
+    echo "partly removed: see the errors above" >&2
+    exit 1
+  fi
+}
+
+if [ "$1" = --root ]; then
+  shift
+  as_root "$@"
+  exit $?
+fi
+if [ $# -eq 0 ] && [ -n "\${SSH_ORIGINAL_COMMAND+set}" ]; then forced; fi
+if [ $# -eq 1 ] && [ "$1" = uninstall ] && [ "$(id -u)" = "$ROOT_UID" ]; then
+  as_root uninstall
+  exit $?
+fi
+echo "usage: sudo $HELPER uninstall    (everything else is for Dispatch's elevation login)" >&2
+exit 2
+`;
+const setupTemplate = `#!/bin/bash
+# Lets Dispatch's remote-host plugin run a command as root on this Mac, each
+# time only after you approve that exact command in the chat that asked. Run
+# it once, with sudo, as an administrator. It:
+#
+#  1. checks that nobody but root can write anywhere above the helper;
+#  2. creates a hidden account with no password. It can log in over SSH only
+#     with one key, which only Dispatch holds, only from that computer's
+#     addresses, and only to run the helper;
+#  3. installs the helper, root-owned;
+#  4. lets that account, and nobody else, run the helper as root without a
+#     password: a sudoers.d rule, checked with visudo first;
+#  5. starts the helper's log, readable by root only.
+#
+# Running it again replaces the key and the helper. To undo it all:
+#   sudo <the helper> uninstall
+#
+# Everything is in main(), which runs only once bash has read all of it.
+
+main() {
+  MACHINE=@SLUG@
+  ACCOUNT=@ACCOUNT@
+  ACCOUNT_HOME=@HOME@
+  HELPER=@HELPER@
+  SUDOERS=@SUDOERS@
+  LOG=@LOG@
+  KEY_LINE=@KEY_LINE@
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  export PATH
+  umask 022
+
+  [ "$(id -u)" = 0 ] || fail "run it with sudo"
+  [ "$(uname -s)" = Darwin ] || fail "this sets up a Mac"
+  echo "Setting up root-with-your-approval for Dispatch ($MACHINE):"
+
+  # 1. Root-owned all the way down: otherwise \`dispatch\` (an admin), or
+  # anyone, could swap the helper for something else.
+  local d
+  for d in / /usr /usr/local /private /private/var; do safe_dir "$d"; done
+  [ -e /usr/local/libexec ] && safe_dir /usr/local/libexec
+  if [ ! -e /usr/local/libexec ]; then
+    mkdir -m 755 /usr/local/libexec && chown root:wheel /usr/local/libexec || fail "can't create /usr/local/libexec"
+  fi
+  step "nobody but root can write above $HELPER"
+
+  # 2. The account. Its id is free as both a user and a group id, below 500
+  # (hidden, like the system's own); it keeps its id when set up again.
+  local id gid
+  if dscl . -read "/Users/$ACCOUNT" >/dev/null 2>&1; then
+    id=$(dscl . -read "/Users/$ACCOUNT" UniqueID | awk '{print $2}')
+    gid=$(dscl . -read "/Users/$ACCOUNT" PrimaryGroupID | awk '{print $2}')
+    [ -n "$id" ] && [ -n "$gid" ] || fail "$ACCOUNT exists but has no ids; remove it first"
+  else
+    local used n
+    used=" $(dscl . -list /Users UniqueID | awk '{print $2}' | tr '\\n' ' ') $(dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | tr '\\n' ' ') "
+    n=401
+    while [ $n -le 498 ]; do
+      case $used in *" $n "*) n=$((n + 1)) ;; *) break ;; esac
+    done
+    [ $n -le 498 ] || fail "no id between 401 and 498 is free for $ACCOUNT"
+    id=$n
+    gid=$n
+    if ! dscl . -read "/Groups/$ACCOUNT" >/dev/null 2>&1; then
+      dscl . -create "/Groups/$ACCOUNT" PrimaryGroupID "$gid" &&
+        dscl . -create "/Groups/$ACCOUNT" RealName "Dispatch elevation" &&
+        dscl . -create "/Groups/$ACCOUNT" Password '*' || fail "can't create the group $ACCOUNT"
+    else
+      gid=$(dscl . -read "/Groups/$ACCOUNT" PrimaryGroupID | awk '{print $2}')
+    fi
+    dscl . -create "/Users/$ACCOUNT" &&
+      dscl . -create "/Users/$ACCOUNT" UniqueID "$id" &&
+      dscl . -create "/Users/$ACCOUNT" PrimaryGroupID "$gid" || fail "can't create the account $ACCOUNT"
+  fi
+  dscl . -create "/Users/$ACCOUNT" UserShell /bin/bash &&
+    dscl . -create "/Users/$ACCOUNT" NFSHomeDirectory "$ACCOUNT_HOME" &&
+    dscl . -create "/Users/$ACCOUNT" RealName "Dispatch elevation" &&
+    dscl . -create "/Users/$ACCOUNT" Password '*' &&
+    dscl . -create "/Users/$ACCOUNT" IsHidden 1 || fail "can't set up the account $ACCOUNT"
+  # Remote Login limited to some users: this one may log in too.
+  if dscl . -read /Groups/com.apple.access_ssh >/dev/null 2>&1; then
+    dseditgroup -o edit -a "$ACCOUNT" -t user com.apple.access_ssh || fail "can't let $ACCOUNT use Remote Login"
+  fi
+  step "the hidden account $ACCOUNT (uid $id), with no password"
+
+  # Its home and key are root's: the account can't change what it may run.
+  mkdir -p "$ACCOUNT_HOME/.ssh" &&
+    chown root:wheel "$ACCOUNT_HOME" "$ACCOUNT_HOME/.ssh" &&
+    chmod 755 "$ACCOUNT_HOME" "$ACCOUNT_HOME/.ssh" || fail "can't create $ACCOUNT_HOME"
+  local t
+  t="$ACCOUNT_HOME/.ssh/.authorized_keys.new"
+  printf '%s\\n' "$KEY_LINE" >"$t" && chown root:wheel "$t" && chmod 644 "$t" &&
+    mv -f "$t" "$ACCOUNT_HOME/.ssh/authorized_keys" || fail "can't write its key"
+  step "its one key, which may only run the helper"
+
+  # 3. The helper.
+  t=$(mktemp "$HELPER.XXXXXX") || fail "can't write next to $HELPER"
+  cat >"$t" <<'DISPATCH_ELEVATE_HELPER_EOF'
+@HELPER_SCRIPT@
+DISPATCH_ELEVATE_HELPER_EOF
+  chown root:wheel "$t" && chmod 755 "$t" && mv -f "$t" "$HELPER" || {
+    rm -f "$t"
+    fail "can't install $HELPER"
+  }
+  step "the helper, $HELPER"
+
+  # 4. sudo: this account, only the helper, no password. A name with a dot
+  # in it is one sudo skips, so the rule is checked before it counts.
+  grep -Eq '^[#@]includedir[[:space:]]+(/private)?/etc/sudoers\\.d/?[[:space:]]*$' /etc/sudoers ||
+    fail "/etc/sudoers doesn't read /etc/sudoers.d"
+  t="$(dirname "$SUDOERS")/.dispatch-elevate.new"
+  {
+    echo "# Dispatch remote-host elevation: written by its setup, removed by"
+    echo "# sudo $HELPER uninstall"
+    echo "$ACCOUNT ALL=(root) NOPASSWD: $HELPER --root *"
+  } >"$t" && chown root:wheel "$t" && chmod 440 "$t" || fail "can't write the sudoers rule"
+  if ! visudo -cf "$t" >/dev/null; then
+    rm -f "$t"
+    fail "the sudoers rule didn't pass visudo's check, so nothing changed in sudo"
+  fi
+  mv -f "$t" "$SUDOERS" || fail "can't install $SUDOERS"
+  if ! visudo -c >/dev/null; then
+    rm -f "$SUDOERS"
+    fail "sudo's configuration didn't pass visudo's check with the rule in it, so the rule was taken out again"
+  fi
+  step "the sudoers rule, $SUDOERS (checked with visudo)"
+
+  # 5. The log.
+  (umask 077 && : >>"$LOG") && chown root:wheel "$LOG" && chmod 600 "$LOG" || fail "can't create $LOG"
+  step "the log, $LOG"
+
+  echo "Done. Back in Dispatch, press Verify."
+}
+
+fail() {
+  printf 'dispatch-elevate setup: %s\\n' "$*" >&2
+  exit 1
+}
+
+step() { printf '  done: %s\\n' "$*"; }
+
+safe_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] || fail "$1 isn't a plain directory"
+  local owner mode
+  owner=$(stat -f '%u' "$1") && mode=$(stat -f '%Lp' "$1") || fail "can't read $1"
+  [ "$owner" = 0 ] || fail "$1 isn't owned by root, so a root helper under it wouldn't be safe"
+  case \${mode:1:2} in *[2367]*) fail "$1 is writable by others than root (mode $mode)" ;; esac
+}
+
+main
+`;
 const KEY_LINE = 2;
 const PLUGIN_ID = "remote-host";
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/;
@@ -21013,6 +21336,337 @@ function validUser(u) {
 }
 function connectionChanged(a, b) {
   return a.user !== b.user || a.port !== b.port || a.hostKey !== b.hostKey || a.hostKeyType !== b.hostKeyType || a.keyFingerprint !== b.keyFingerprint || a.addresses.join("\n") !== b.addresses.join("\n");
+}
+const ELEVATE_USER = "_dispatchelevate";
+const HELPER_PATH = "/usr/local/libexec/dispatch-elevate";
+function runCommand(id, cwd, argv) {
+  if (!ELEVATE_ID.test(id)) throw new Error("bad elevation id");
+  const payload = [cwd, ...argv].map((s) => `${s}\0`).join("");
+  return `run ${id} ${Buffer.from(payload, "utf8").toString("base64")}`;
+}
+function displayCommand(argv) {
+  return argv.map((a) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
+}
+function approvalsOf(ctx) {
+  const a = ctx?.approvals;
+  return a && typeof a.request === "function" ? a : void 0;
+}
+class ElevationLoginError extends Error {
+  constructor(message, kind) {
+    super(message);
+    this.kind = kind;
+    this.name = "ElevationLoginError";
+  }
+}
+const DONE_KEPT = 256;
+const APPROVAL_COMMAND_MAX = 8e3;
+const APPROVAL_CWD_MAX = 1e3;
+const HELPER_CONNECT_MS = 5e3;
+class Elevation {
+  constructor(deps) {
+    this.deps = deps;
+  }
+  active = /* @__PURE__ */ new Map();
+  /** Recently finished ids: the owner sends open requests again after a reconnect, and one may have just finished. */
+  done = /* @__PURE__ */ new Set();
+  busy = false;
+  waiting = [];
+  stateNow;
+  keyNow = false;
+  /** Whether elevation is set up here (as last seen), for the agent note. Undefined until {@link refresh} ran. */
+  get state() {
+    return this.stateNow;
+  }
+  /** Whether this machine's elevation key is stored (as last seen), whether or not this Dispatch can ask for approval. */
+  get configured() {
+    return this.keyNow;
+  }
+  /** Whether this Dispatch can ask the user to approve (core E31). */
+  get canAsk() {
+    return this.deps.approvals !== void 0;
+  }
+  /** Look again: the key may have been added or removed (the Settings pane, the other instance). */
+  async refresh() {
+    this.keyNow = !!await this.deps.key().catch(() => void 0);
+    const state = !this.deps.approvals ? "unsupported" : this.keyNow ? "on" : "off";
+    this.stateNow = state;
+    return state;
+  }
+  /**
+   * Log in with `key` (default: the stored one) and run one of the helper's
+   * fixed verbs to its end. No approval: `check` only reports who it runs as,
+   * `uninstall` only takes elevation away, and both are the user's own button
+   * in the Settings pane (or Remove machine, or uninstalling the plugin).
+   */
+  async helper(verb, key2, timeoutMs = 3e4) {
+    const k = key2 ?? await this.deps.key();
+    if (!k) throw new Error(`elevation isn't set up on ${this.deps.host().label}`);
+    const conn = await this.login(k, void 0, Math.min(this.deps.connectTimeoutMs ?? HELPER_CONNECT_MS, HELPER_CONNECT_MS));
+    try {
+      const ch = await conn.channel(verb);
+      return await new Promise((resolve2, reject) => {
+        const out = [];
+        const err = [];
+        let code;
+        const timer = setTimeout(() => {
+          try {
+            ch.close();
+          } catch {
+          }
+          reject(new Error(`the helper on ${this.deps.host().label} didn't finish ${verb} within ${Math.round(timeoutMs / 1e3)} s`));
+        }, timeoutMs);
+        ch.on("data", (d) => out.push(d));
+        ch.stderr.on("data", (d) => err.push(d));
+        ch.on("exit", (c) => code = typeof c === "number" ? c : null);
+        ch.on("error", () => {
+        });
+        ch.on("close", () => {
+          clearTimeout(timer);
+          resolve2({
+            code: code !== void 0 ? code : channelExit(ch)?.code ?? null,
+            stdout: Buffer.concat(out).toString("utf8"),
+            stderr: Buffer.concat(err).toString("utf8")
+          });
+        });
+      });
+    } finally {
+      conn.close();
+    }
+  }
+  /** A connection logged in as the helper's account with `key`, or an {@link ElevationLoginError}. */
+  async login(key2, signal, deadlineMs = this.deps.connectTimeoutMs ?? 2e4) {
+    const host = this.deps.host();
+    const address = this.deps.address() ?? host.addresses[0];
+    const family = dialFamily(address, host.allowFrom);
+    const target = {
+      host: address,
+      port: host.port,
+      username: ELEVATE_USER,
+      privateKey: key2,
+      hostVerifier: pinnedHostKey(host.hostKey),
+      algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) },
+      // A dead link is noticed in about 15 s, like the shells'.
+      keepalive: { intervalMs: 5e3, countMax: 3 },
+      ...family ? { family } : {}
+    };
+    const conn = this.deps.connect ? this.deps.connect(target) : new SshConnection(target);
+    try {
+      await conn.connect(deadlineMs, signal);
+      return conn;
+    } catch (err) {
+      conn.close();
+      if (signal?.aborted) throw err;
+      const why = errText(err);
+      if (/authentication/i.test(why)) {
+        throw new ElevationLoginError(`${host.label} refused the elevation key`, "refused");
+      }
+      if (/host denied/i.test(why)) throw new ElevationLoginError(`a different host key answered at ${address}`, "host-key");
+      throw new ElevationLoginError(`could not reach ${host.label} (${why})`, "unreachable");
+    }
+  }
+  /** A shell's `dispatch-elevate` asked. Answers it (always, unless the id is unusable), however it ends. */
+  async handle(req, origin, shell) {
+    if (typeof req.id !== "string" || !ELEVATE_ID.test(req.id)) {
+      this.deps.log.warn(`remote-host ${this.deps.host().slug}: an elevation request with an unusable id was ignored`);
+      return;
+    }
+    const id = req.id;
+    if (this.active.has(id) || this.done.has(id)) return;
+    const job = { id, origin, shell, abort: new AbortController() };
+    this.active.set(id, job);
+    let end;
+    try {
+      end = await this.process(job, req);
+    } catch (err) {
+      end = { code: null, error: `elevation failed: ${errText(err)}` };
+    } finally {
+      this.active.delete(id);
+      this.done.add(id);
+      if (this.done.size > DONE_KEPT) this.done.delete(this.done.values().next().value);
+      shell.release(id);
+    }
+    shell.elevateEnd({ id, ...end });
+  }
+  /** The asker went away (Ctrl-C): withdraw the card, or stop the command there. */
+  cancel(id) {
+    this.active.get(id)?.abort.abort();
+  }
+  /** The shell ended: everything it asked for is withdrawn. */
+  cancelShell(shell) {
+    for (const job of this.active.values()) if (job.shell === shell) job.abort.abort();
+  }
+  async process(job, req) {
+    const host = this.deps.host();
+    const label = host.label;
+    const { id, shell, abort } = job;
+    const note = (line) => shell.elevateOutput(id, 2, Buffer.from(`dispatch-elevate: ${line}
+`, "utf8"));
+    let msg;
+    try {
+      msg = checkElevate(req);
+    } catch (err) {
+      return { code: null, error: errText(err) };
+    }
+    const cmd = displayCommand(msg.argv);
+    if (cmd.length > APPROVAL_COMMAND_MAX) {
+      return {
+        code: null,
+        error: `the command is too long to show the user for approval (${cmd.length} characters, at most ${APPROVAL_COMMAND_MAX}); nothing ran. Put it in a script and run that.`
+      };
+    }
+    if (msg.cwd.length > APPROVAL_CWD_MAX) {
+      return { code: null, error: `this directory's path is too long to show the user for approval; nothing ran. Run it from a shorter one.` };
+    }
+    const approvals = this.deps.approvals;
+    if (!approvals) {
+      return {
+        code: null,
+        error: `nothing can run as root on ${label}: this Dispatch has no way to ask the user for approval (it needs a newer Dispatch). Don't try to work around it; tell the user what needs root, and why.`
+      };
+    }
+    if (!await this.deps.key()) {
+      return {
+        code: null,
+        error: `elevation isn't set up on ${label}, so nothing can run as root there. The user can turn it on in Settings → Remote hosts → ${label}. Don't try to work around it; tell the user what needs root, and why.`
+      };
+    }
+    if (this.busy) {
+      note(`another command is waiting for approval or running as root on ${label}; this one waits its turn`);
+      shell.hold(id, `waiting for another root command on ${label} to finish`);
+    }
+    if (!await this.acquire(abort.signal)) return { code: null, error: "cancelled while it waited its turn; nothing ran" };
+    try {
+      note(`asking the user to approve running this as root on ${label}: ${cmd}`);
+      shell.hold(id, `waiting for the user to approve: sudo ${cmd}`.slice(0, 180));
+      const where = `${job.origin.chatId}/${job.origin.terminal}`;
+      let answer;
+      try {
+        answer = await approvals.request(job.origin.chatId, {
+          title: `Run as root on ${label}`,
+          detail: `A command in this chat's terminal "${job.origin.terminal}" on ${label} asked for root (sudo). Approving runs it once, as root, in that directory, with no input. Nothing else is allowed by it.`,
+          command: cmd,
+          cwd: msg.cwd,
+          machine: label,
+          timeoutSeconds: this.deps.approvalTimeoutSeconds ?? 300,
+          signal: abort.signal
+        });
+      } catch (err) {
+        if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
+        return { code: null, error: `asking the user for approval failed (${errText(err)}); nothing ran` };
+      }
+      shell.release(id);
+      const by = answer.by ? ` by ${answer.by}` : "";
+      this.deps.log.info(`remote-host ${host.slug}: elevation ${id} from ${where}: ${cmd} → ${answer.decision}${by}`);
+      if (abort.signal.aborted || answer.decision === "cancelled") return { code: null, error: "cancelled; nothing ran" };
+      if (answer.decision === "denied") return { code: null, error: `the user denied running this as root${by}; nothing ran` };
+      if (answer.decision !== "approved") {
+        return { code: null, error: `no answer from the user within ${this.deps.approvalTimeoutSeconds ?? 300} s; nothing ran` };
+      }
+      note(`approved${by}; running as root on ${label}`);
+      return await this.run(job, msg.cwd, msg.argv);
+    } finally {
+      this.releaseTurn();
+    }
+  }
+  /** Log in as the helper's account with the elevation key, and run it there. */
+  async run(job, cwd, argv) {
+    const host = this.deps.host();
+    const key2 = await this.deps.key();
+    if (!key2) return { code: null, error: `elevation was turned off on ${host.label} meanwhile; nothing ran` };
+    const { abort, shell, id } = job;
+    let conn;
+    try {
+      conn = await this.login(key2, abort.signal);
+    } catch (err) {
+      if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
+      const kind = err instanceof ElevationLoginError ? err.kind : "unreachable";
+      return {
+        code: null,
+        error: kind === "refused" ? `${host.label} refused the elevation key, so nothing ran. Elevation may have been removed there, or this computer's address changed; the user can set it up again in Settings → Remote hosts.` : `${errText(err)}; nothing ran`
+      };
+    }
+    try {
+      let ch;
+      try {
+        ch = await conn.channel(runCommand(id, cwd, argv));
+      } catch (err) {
+        return { code: null, error: `the root helper on ${host.label} did not start (${errText(err)}); nothing ran` };
+      }
+      if (abort.signal.aborted) {
+        try {
+          ch.close();
+        } catch {
+        }
+        return { code: null, error: `cancelled as it started; ${host.label} was told to stop it` };
+      }
+      return await new Promise((resolve2) => {
+        let code = null;
+        let signal = null;
+        let exited = false;
+        const onAbort = () => {
+          try {
+            ch.close();
+          } catch {
+          }
+        };
+        abort.signal.addEventListener("abort", onAbort, { once: true });
+        ch.on("data", (d) => shell.elevateOutput(id, 1, d));
+        ch.stderr.on("data", (d) => shell.elevateOutput(id, 2, d));
+        ch.on("exit", (c, s) => {
+          exited = true;
+          code = typeof c === "number" ? c : null;
+          signal = s ?? null;
+        });
+        ch.on("error", () => {
+        });
+        ch.on("close", () => {
+          abort.signal.removeEventListener("abort", onAbort);
+          if (abort.signal.aborted) return resolve2({ code: null, error: `cancelled while it ran; ${host.label} was told to stop it` });
+          const early = exited ? void 0 : channelExit(ch);
+          if (early) {
+            exited = true;
+            code = early.code;
+            signal = early.signal ?? null;
+          }
+          if (!exited) {
+            return resolve2({
+              code: null,
+              error: `the connection to ${host.label} ended while it ran; it was stopped there, or it may have finished`
+            });
+          }
+          resolve2({ code, ...signal ? { signal } : {} });
+        });
+      });
+    } finally {
+      conn.close();
+    }
+  }
+  /** Wait for this machine's turn. False if cancelled meanwhile. */
+  acquire(signal) {
+    if (signal.aborted) return Promise.resolve(false);
+    if (!this.busy) {
+      this.busy = true;
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve2) => {
+      const go = () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve2(true);
+      };
+      const onAbort = () => {
+        const at = this.waiting.indexOf(go);
+        if (at >= 0) this.waiting.splice(at, 1);
+        resolve2(false);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.waiting.push(go);
+    });
+  }
+  releaseTurn() {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.busy = false;
+  }
 }
 function authorizedKeysLine(publicKey, allowFrom) {
   const parts = publicKey.trim().split(/\s+/);
@@ -21680,7 +22334,7 @@ class UserError extends Error {
     this.name = "UserError";
   }
 }
-const PENDING_MS = 30 * 6e4;
+const PENDING_MS$1 = 30 * 6e4;
 const CONNECT_MS = 15e3;
 class Pairing {
   constructor(deps) {
@@ -21739,7 +22393,7 @@ class Pairing {
       privateKey: kp.privateKey,
       publicKey: kp.publicKey,
       line,
-      expiresAt: this.now() + PENDING_MS
+      expiresAt: this.now() + PENDING_MS$1
     };
     this.pending.set(id, p);
     return { pairingId: id, slug, id: backendId(slug), authorizedKeysLine: line, oneLiner: addKeyOneLiner(line), expiresAt: p.expiresAt };
@@ -21899,6 +22553,153 @@ function localIPv4() {
 }
 function safeName(name) {
   return name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 50) || "dispatch";
+}
+const HELPER_VERSION = "1";
+const MAC_PATHS = {
+  helper: HELPER_PATH,
+  account: ELEVATE_USER,
+  home: "/private/var/dispatch-elevate",
+  sudoers: "/etc/sudoers.d/dispatch-elevate",
+  log: "/var/log/dispatch-elevate.log",
+  sudo: "/usr/bin/sudo",
+  dscl: "/usr/bin/dscl",
+  rootUid: 0
+};
+const MANUAL_UNINSTALL = `sudo ${MAC_PATHS.helper} uninstall`;
+const SAFE_PATH = /^\/[A-Za-z0-9._/-]+$/;
+const HELPER_END = "DISPATCH_ELEVATE_HELPER_EOF";
+function checkPaths(p) {
+  for (const k of ["helper", "home", "sudoers", "log", "sudo", "dscl"]) {
+    if (!SAFE_PATH.test(p[k]) || p[k].includes("..")) throw new Error(`not a usable path for ${k}: ${p[k]}`);
+  }
+  if (!/^\/[^/]+\/[^/]+/.test(p.home)) throw new Error(`the elevation account's home must be deeper than ${p.home}`);
+  if (!/^_?[a-z][a-z0-9_]{0,30}$/.test(p.account)) throw new Error(`not a usable account name: ${p.account}`);
+  if (!Number.isInteger(p.rootUid) || p.rootUid < 0) throw new Error("rootUid must be a uid");
+}
+function fill(template, values) {
+  return template.replace(/@([A-Z_]+)@/g, (m, k) => {
+    const v = values[k];
+    if (v === void 0) throw new Error(`no value for ${m}`);
+    return v;
+  });
+}
+function helperScript(p = MAC_PATHS) {
+  checkPaths(p);
+  return fill(helperTemplate, {
+    HELPER: sq(p.helper),
+    VERSION: sq(HELPER_VERSION),
+    ACCOUNT: sq(p.account),
+    HOME: sq(p.home),
+    SUDOERS: sq(p.sudoers),
+    LOG: sq(p.log),
+    SUDO: sq(p.sudo),
+    DSCL: sq(p.dscl),
+    ROOT_UID: String(p.rootUid)
+  });
+}
+function elevationKeyLine(publicKey, allowFrom, helper = HELPER_PATH) {
+  const parts = publicKey.trim().split(/\s+/);
+  if (parts.length < 2 || !/^ssh-[a-z0-9-]+$/.test(parts[0]) || !/^[A-Za-z0-9+/=]+$/.test(parts[1])) {
+    throw new Error("not an OpenSSH public key");
+  }
+  if (!allowFrom.length) throw new Error("the key needs at least one address it may be used from");
+  for (const a of allowFrom) if (!validFrom(a)) throw new Error(`not an address pattern: ${JSON.stringify(a)}`);
+  if (!SAFE_PATH.test(helper)) throw new Error(`not a usable helper path: ${helper}`);
+  return `restrict,command="${helper}",from="${allowFrom.join(",")}" ${parts.join(" ")}`;
+}
+function setupScript(slug, keyLine, p = MAC_PATHS) {
+  checkPaths(p);
+  if (/[\r\n]/.test(keyLine)) throw new Error("an authorized_keys line is one line");
+  const helper = helperScript(p).replace(/\n+$/, "");
+  if (helper.split("\n").includes(HELPER_END)) throw new Error("the helper contains its own here-document marker");
+  return fill(setupTemplate, {
+    SLUG: sq(slug),
+    ACCOUNT: sq(p.account),
+    HOME: sq(p.home),
+    HELPER: sq(p.helper),
+    SUDOERS: sq(p.sudoers),
+    LOG: sq(p.log),
+    KEY_LINE: sq(keyLine),
+    HELPER_SCRIPT: helper
+  });
+}
+function setupOneLiner(script) {
+  const b64 = gzipSync(Buffer.from(script, "utf8"), { level: 9 }).toString("base64");
+  return `echo ${b64} | base64 --decode | gunzip | sudo /bin/bash -s`;
+}
+const PENDING_MS = 2 * 60 * 6e4;
+class ElevationSetups {
+  constructor(d = {}) {
+    this.d = d;
+    this.now = d.now ?? Date.now;
+  }
+  pending = /* @__PURE__ */ new Map();
+  now;
+  /** Mint a key for `host` (replacing one minted before) and make its setup command. */
+  start(host) {
+    this.expire();
+    const kp = generateKeyPair(`dispatch-elevate:${host.slug}@${safeName(this.d.dispatchName ?? hostname())}`);
+    const paths = this.d.paths ?? MAC_PATHS;
+    const keyLine = elevationKeyLine(kp.publicKey, host.allowFrom, paths.helper);
+    const script = setupScript(host.slug, keyLine, paths);
+    const expiresAt = this.now() + PENDING_MS;
+    this.pending.set(host.slug, { privateKey: kp.privateKey, expiresAt });
+    return { oneLiner: setupOneLiner(script), script, keyLine, allowFrom: [...host.allowFrom], expiresAt };
+  }
+  /** The key a setup for `slug` is waiting with, if any. */
+  key(slug) {
+    this.expire();
+    return this.pending.get(slug)?.privateKey;
+  }
+  drop(slug) {
+    this.pending.delete(slug);
+  }
+  clear() {
+    this.pending.clear();
+  }
+  expire() {
+    const now = this.now();
+    for (const [slug, p] of this.pending) if (p.expiresAt <= now) this.pending.delete(slug);
+  }
+}
+async function verifyElevation(el, key2, label, rootUid = 0) {
+  let r;
+  try {
+    r = await el.helper("check", key2);
+  } catch (err) {
+    if (err instanceof ElevationLoginError && err.kind === "refused") {
+      throw new UserError(
+        `${label} doesn't accept the elevation key yet. Run the setup command there (it asks for an administrator's password), wait for "Done", then verify again.`
+      );
+    }
+    if (err instanceof ElevationLoginError && err.kind === "host-key") throw new UserError(`${errText(err)}; nothing was checked`);
+    throw new UserError(`could not check ${label}: ${errText(err)}`, 502);
+  }
+  const m = r.stdout.match(/^dispatch-elevate (\S+) uid=(\d+)\s*$/m);
+  if (r.code !== 0 || !m) {
+    const said = (r.stderr || r.stdout).trim().slice(0, 300);
+    if (/password is required|not allowed to execute|may not run sudo/i.test(said)) {
+      throw new UserError(
+        `the elevation account logged in, but sudo on ${label} won't let it run the helper (${said}). Run the setup command again; it reinstalls the sudoers rule.`
+      );
+    }
+    throw new UserError(`the helper on ${label} didn't answer as expected (exit ${r.code ?? "unknown"})${said ? `: ${said}` : ""}`);
+  }
+  if (Number(m[2]) !== rootUid) {
+    throw new UserError(`the helper on ${label} ran as uid ${m[2]}, not as root, so elevation can't work. Run the setup command again.`);
+  }
+  return { version: m[1] };
+}
+async function removeElevation(el) {
+  try {
+    const r = await el.helper("uninstall");
+    if (r.code === 0 && /^removed/m.test(r.stdout)) return { there: "removed" };
+    return { there: "failed", detail: (r.stderr || r.stdout).trim().slice(0, 300) || `exit ${r.code ?? "unknown"}` };
+  } catch (err) {
+    if (/isn't set up/.test(errText(err)) && !(err instanceof ElevationLoginError)) return { there: "not-set-up" };
+    if (err instanceof ElevationLoginError) return { there: err.kind === "refused" ? "refused" : "unreachable", detail: errText(err) };
+    return { there: "failed", detail: errText(err) };
+  }
 }
 const PORT_POLL_MS = 4e3;
 class PortForwards {
@@ -22082,248 +22883,6 @@ function isLoopback(host) {
 function command(c) {
   const name = (c ?? "").match(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}/)?.[0];
   return name === "MainThread" ? "node" : name;
-}
-const ELEVATE_USER = "_dispatchelevate";
-function runCommand(id, cwd, argv) {
-  if (!ELEVATE_ID.test(id)) throw new Error("bad elevation id");
-  const payload = [cwd, ...argv].map((s) => `${s}\0`).join("");
-  return `run ${id} ${Buffer.from(payload, "utf8").toString("base64")}`;
-}
-function displayCommand(argv) {
-  return argv.map((a) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
-}
-function approvalsOf(ctx) {
-  const a = ctx?.approvals;
-  return a && typeof a.request === "function" ? a : void 0;
-}
-const DONE_KEPT = 256;
-class Elevation {
-  constructor(deps) {
-    this.deps = deps;
-  }
-  active = /* @__PURE__ */ new Map();
-  /** Recently finished ids: the owner sends open requests again after a reconnect, and one may have just finished. */
-  done = /* @__PURE__ */ new Set();
-  busy = false;
-  waiting = [];
-  stateNow;
-  /** Whether elevation is set up here (as last seen), for the agent note. Undefined until {@link refresh} ran. */
-  get state() {
-    return this.stateNow;
-  }
-  /** Look again: the key may have been added or removed (the Settings pane, the other instance). */
-  async refresh() {
-    const state = !this.deps.approvals ? "unsupported" : await this.deps.key().catch(() => void 0) ? "on" : "off";
-    this.stateNow = state;
-    return state;
-  }
-  /** A shell's `dispatch-elevate` asked. Answers it (always, unless the id is unusable), however it ends. */
-  async handle(req, origin, shell) {
-    if (typeof req.id !== "string" || !ELEVATE_ID.test(req.id)) {
-      this.deps.log.warn(`remote-host ${this.deps.host().slug}: an elevation request with an unusable id was ignored`);
-      return;
-    }
-    const id = req.id;
-    if (this.active.has(id) || this.done.has(id)) return;
-    const job = { id, origin, shell, abort: new AbortController() };
-    this.active.set(id, job);
-    let end;
-    try {
-      end = await this.process(job, req);
-    } catch (err) {
-      end = { code: null, error: `elevation failed: ${errText(err)}` };
-    } finally {
-      this.active.delete(id);
-      this.done.add(id);
-      if (this.done.size > DONE_KEPT) this.done.delete(this.done.values().next().value);
-      shell.release(id);
-    }
-    shell.elevateEnd({ id, ...end });
-  }
-  /** The asker went away (Ctrl-C): withdraw the card, or stop the command there. */
-  cancel(id) {
-    this.active.get(id)?.abort.abort();
-  }
-  /** The shell ended: everything it asked for is withdrawn. */
-  cancelShell(shell) {
-    for (const job of this.active.values()) if (job.shell === shell) job.abort.abort();
-  }
-  async process(job, req) {
-    const host = this.deps.host();
-    const label = host.label;
-    const { id, shell, abort } = job;
-    const note = (line) => shell.elevateOutput(id, 2, Buffer.from(`dispatch-elevate: ${line}
-`, "utf8"));
-    let msg;
-    try {
-      msg = checkElevate(req);
-    } catch (err) {
-      return { code: null, error: errText(err) };
-    }
-    const cmd = displayCommand(msg.argv);
-    const approvals = this.deps.approvals;
-    if (!approvals) {
-      return {
-        code: null,
-        error: `nothing can run as root on ${label}: this Dispatch has no way to ask the user for approval (it needs a newer Dispatch). Don't try to work around it; tell the user what needs root, and why.`
-      };
-    }
-    if (!await this.deps.key()) {
-      return {
-        code: null,
-        error: `elevation isn't set up on ${label}, so nothing can run as root there. The user can turn it on in Settings → Remote hosts → ${label}. Don't try to work around it; tell the user what needs root, and why.`
-      };
-    }
-    if (this.busy) {
-      note(`another command is waiting for approval or running as root on ${label}; this one waits its turn`);
-      shell.hold(id, `waiting for another root command on ${label} to finish`);
-    }
-    if (!await this.acquire(abort.signal)) return { code: null, error: "cancelled while it waited its turn; nothing ran" };
-    try {
-      note(`asking the user to approve running this as root on ${label}: ${cmd}`);
-      shell.hold(id, `waiting for the user to approve: sudo ${cmd}`.slice(0, 180));
-      const where = `${job.origin.chatId}/${job.origin.terminal}`;
-      let answer;
-      try {
-        answer = await approvals.request(job.origin.chatId, {
-          title: `Run as root on ${label}`,
-          detail: `A command in this chat's terminal "${job.origin.terminal}" on ${label} asked for root (sudo). Approving runs it once, as root, in that directory, with no input. Nothing else is allowed by it.`,
-          command: cmd,
-          cwd: msg.cwd,
-          machine: label,
-          timeoutSeconds: this.deps.approvalTimeoutSeconds ?? 300,
-          signal: abort.signal
-        });
-      } catch (err) {
-        if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
-        return { code: null, error: `asking the user for approval failed (${errText(err)}); nothing ran` };
-      }
-      shell.release(id);
-      const by = answer.by ? ` by ${answer.by}` : "";
-      this.deps.log.info(`remote-host ${host.slug}: elevation ${id} from ${where}: ${cmd} → ${answer.decision}${by}`);
-      if (abort.signal.aborted || answer.decision === "cancelled") return { code: null, error: "cancelled; nothing ran" };
-      if (answer.decision === "denied") return { code: null, error: `the user denied running this as root${by}; nothing ran` };
-      if (answer.decision !== "approved") {
-        return { code: null, error: `no answer from the user within ${this.deps.approvalTimeoutSeconds ?? 300} s; nothing ran` };
-      }
-      note(`approved${by}; running as root on ${label}`);
-      return await this.run(job, msg.cwd, msg.argv);
-    } finally {
-      this.releaseTurn();
-    }
-  }
-  /** Log in as the helper's account with the elevation key, and run it there. */
-  async run(job, cwd, argv) {
-    const host = this.deps.host();
-    const key2 = await this.deps.key();
-    if (!key2) return { code: null, error: `elevation was turned off on ${host.label} meanwhile; nothing ran` };
-    const address = this.deps.address() ?? host.addresses[0];
-    const family = dialFamily(address, host.allowFrom);
-    const target = {
-      host: address,
-      port: host.port,
-      username: ELEVATE_USER,
-      privateKey: key2,
-      hostVerifier: pinnedHostKey(host.hostKey),
-      algorithms: { serverHostKey: hostKeyAlgorithms(host.hostKeyType) },
-      // A dead link is noticed in about 15 s, like the shells'.
-      keepalive: { intervalMs: 5e3, countMax: 3 },
-      ...family ? { family } : {}
-    };
-    const conn = this.deps.connect ? this.deps.connect(target) : new SshConnection(target);
-    const { abort, shell, id } = job;
-    try {
-      try {
-        await conn.connect(this.deps.connectTimeoutMs ?? 2e4, abort.signal);
-      } catch (err) {
-        if (abort.signal.aborted) return { code: null, error: "cancelled; nothing ran" };
-        const why = errText(err);
-        return {
-          code: null,
-          error: /authentication/i.test(why) ? `${host.label} refused the elevation key, so nothing ran. Elevation may have been removed there; the user can turn it off and set it up again in Settings → Remote hosts.` : /host denied/i.test(why) ? `a different host key answered at ${address}; nothing ran` : `could not reach ${host.label} to run it (${why}); nothing ran`
-        };
-      }
-      let ch;
-      try {
-        ch = await conn.channel(runCommand(id, cwd, argv));
-      } catch (err) {
-        return { code: null, error: `the root helper on ${host.label} did not start (${errText(err)}); nothing ran` };
-      }
-      if (abort.signal.aborted) {
-        try {
-          ch.close();
-        } catch {
-        }
-        return { code: null, error: `cancelled as it started; ${host.label} was told to stop it` };
-      }
-      return await new Promise((resolve2) => {
-        let code = null;
-        let signal = null;
-        let exited = false;
-        const onAbort = () => {
-          try {
-            ch.close();
-          } catch {
-          }
-        };
-        abort.signal.addEventListener("abort", onAbort, { once: true });
-        ch.on("data", (d) => shell.elevateOutput(id, 1, d));
-        ch.stderr.on("data", (d) => shell.elevateOutput(id, 2, d));
-        ch.on("exit", (c, s) => {
-          exited = true;
-          code = typeof c === "number" ? c : null;
-          signal = s ?? null;
-        });
-        ch.on("error", () => {
-        });
-        ch.on("close", () => {
-          abort.signal.removeEventListener("abort", onAbort);
-          if (abort.signal.aborted) return resolve2({ code: null, error: `cancelled while it ran; ${host.label} was told to stop it` });
-          const early = exited ? void 0 : channelExit(ch);
-          if (early) {
-            exited = true;
-            code = early.code;
-            signal = early.signal ?? null;
-          }
-          if (!exited) {
-            return resolve2({
-              code: null,
-              error: `the connection to ${host.label} ended while it ran; it was stopped there, or it may have finished`
-            });
-          }
-          resolve2({ code, ...signal ? { signal } : {} });
-        });
-      });
-    } finally {
-      conn.close();
-    }
-  }
-  /** Wait for this machine's turn. False if cancelled meanwhile. */
-  acquire(signal) {
-    if (signal.aborted) return Promise.resolve(false);
-    if (!this.busy) {
-      this.busy = true;
-      return Promise.resolve(true);
-    }
-    return new Promise((resolve2) => {
-      const go = () => {
-        signal.removeEventListener("abort", onAbort);
-        resolve2(true);
-      };
-      const onAbort = () => {
-        const at = this.waiting.indexOf(go);
-        if (at >= 0) this.waiting.splice(at, 1);
-        resolve2(false);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      this.waiting.push(go);
-    });
-  }
-  releaseTurn() {
-    const next = this.waiting.shift();
-    if (next) next();
-    else this.busy = false;
-  }
 }
 const MAX_UNREADABLE = 3;
 class HostShell extends EventEmitter {
@@ -23295,9 +23854,9 @@ async function missingObjects(remote, p, shas) {
   if (r.code !== 0) throw new Error(`asking the machine what it has failed: ${r.stderr.trim() || `exit ${r.code}`}`);
   return r.stdout.split("\n").filter((l) => /^[0-9a-f]{40}$/.test(l));
 }
-async function receiveObjects(remote, p, fill, signal) {
+async function receiveObjects(remote, p, fill2, signal) {
   const r = await remote.stream(`${PRELUDE}
-git --git-dir=${sq(p.repo)} index-pack --stdin >/dev/null`, { input: fill }, signal);
+git --git-dir=${sq(p.repo)} index-pack --stdin >/dev/null`, { input: fill2 }, signal);
   if (r.code !== 0) throw new Error(`the machine could not take the files: ${r.stderr.trim() || `exit ${r.code}`}`);
 }
 async function sendCommit(remote, p, commit, sink, signal) {
@@ -24604,7 +25163,7 @@ class HostRegistry {
   }
   list() {
     const prev = this.deps.previousInstanceId;
-    return [...this.entries.values()].map(({ host, link }) => {
+    return [...this.entries.values()].map(({ host, link, backend }) => {
       const abandoned = prev && prev !== this.deps.instanceId ? link.probe?.instances?.find((i) => i.id === prev) : void 0;
       return {
         ...host,
@@ -24612,24 +25171,53 @@ class HostRegistry {
         status: link.status,
         ...link.address ? { address: link.address } : {},
         ...link.probe ? { probe: link.probe } : {},
-        ...abandoned ? { abandoned } : {}
+        ...abandoned ? { abandoned } : {},
+        elevation: { on: backend.elevation.configured, canAsk: backend.elevation.canAsk }
       };
     });
+  }
+  /** Look again at which machines have elevation on (the pane, the other instance, may have changed it). */
+  async refreshElevation() {
+    await Promise.all([...this.entries.values()].map((e) => e.backend.elevation.refresh().catch(() => void 0)));
   }
   /** Dispatch listed the chats that exist: each machine drops what it holds for any other. */
   reconcile(live2, at = Date.now()) {
     for (const e of this.entries.values()) e.backend.reconcile(live2, at);
   }
-  /** The plugin is being uninstalled: every reachable machine forgets this instance. Bounded by `timeoutMs`. */
+  /**
+   * The plugin is being uninstalled: every reachable machine forgets this
+   * instance, and root with approval is taken out wherever it is on (nothing
+   * would be left to ask the user). Bounded by `timeoutMs`.
+   */
   async forgetAll(timeoutMs) {
     const { ctx } = this.deps;
     await Promise.all(
-      [...this.entries.values()].map(
-        (e) => e.backend.forgetAll(timeoutMs).catch((err) => {
+      [...this.entries.values()].flatMap((e) => [
+        e.backend.forgetAll(timeoutMs).catch((err) => {
           ctx.log.warn(`remote-host ${e.host.slug}: could not remove this Dispatch's files there: ${errText(err)}`);
-        })
-      )
+        }),
+        this.elevationOff(e, timeoutMs)
+      ])
     );
+  }
+  async elevationOff(e, timeoutMs) {
+    const { ctx } = this.deps;
+    const name = elevateSecretName(e.host.slug);
+    if (!(await ctx.secrets?.get(name).catch(() => void 0))?.trim()) return;
+    let timer;
+    const late = new Promise((resolve2) => {
+      timer = setTimeout(() => resolve2({ there: "unreachable", detail: "no answer in time" }), timeoutMs);
+    });
+    const res = await Promise.race([removeElevation(e.backend.elevation), late]);
+    clearTimeout(timer);
+    if (res.there === "removed") {
+      await ctx.secrets?.delete?.(name);
+      ctx.log.info(`remote-host ${e.host.slug}: elevation removed there`);
+    } else {
+      ctx.log.warn(
+        `remote-host ${e.host.slug}: root with approval is still set up there (${res.detail ?? res.there}); run "sudo ${HELPER_PATH} uninstall" there to remove it`
+      );
+    }
   }
   /** The plugin is going down: end the shells (KILL down their channels), then close every connection. */
   async dispose() {
@@ -24667,8 +25255,46 @@ function defineRoutes(deps) {
     if (!host) throw new UserError(`no paired machine called ${slug}`, 404);
     return host;
   };
+  const elevationOff = async (host) => {
+    deps.setups.drop(host.slug);
+    const name = elevateSecretName(host.slug);
+    if (!(await ctx.secrets?.get(name))?.trim()) return { there: "not-set-up" };
+    const e = registry.get(host.slug);
+    const res = e ? await removeElevation(e.backend.elevation) : { there: "unreachable" };
+    await ctx.secrets?.delete?.(name);
+    await e?.backend.elevation.refresh();
+    ctx.log.info(`remote-host ${host.slug}: elevation turned off (${res.there}${res.detail ? `: ${res.detail}` : ""})`);
+    return { ...res, ...res.there !== "removed" && res.there !== "not-set-up" ? { manual: MANUAL_UNINSTALL } : {} };
+  };
   return (r) => {
-    r.get("/hosts", h(() => ({ hosts: registry.list() })));
+    r.get("/hosts", h(async () => {
+      await registry.refreshElevation();
+      return { hosts: registry.list() };
+    }));
+    r.post("/hosts/:slug/elevation/setup", h((req) => {
+      const host = find(req);
+      if (!registry.get(host.slug)) throw new UserError(`${host.slug} is not registered in this instance`, 409);
+      return deps.setups.start(host);
+    }));
+    r.post("/hosts/:slug/elevation/verify", h(async (req) => {
+      const host = find(req);
+      const e = registry.get(host.slug);
+      if (!e) throw new UserError(`${host.slug} is not registered in this instance`, 409);
+      const pending = deps.setups.key(host.slug);
+      const name = elevateSecretName(host.slug);
+      const key2 = pending ?? ((await ctx.secrets?.get(name))?.trim() || void 0);
+      if (!key2) throw new UserError(`make ${host.label}'s setup command first`, 409);
+      const { version: version2 } = await verifyElevation(e.backend.elevation, key2, host.label, deps.rootUid ?? 0);
+      if (pending) {
+        if (!ctx.secrets?.set) throw new Error("this Dispatch cannot store secrets for plugins (secrets:write); update Dispatch");
+        await ctx.secrets.set(name, pending);
+        deps.setups.drop(host.slug);
+        ctx.log.info(`remote-host ${host.slug}: elevation is on (helper ${version2})`);
+      }
+      await e.backend.elevation.refresh();
+      return { on: true, version: version2, canAsk: e.backend.elevation.canAsk };
+    }));
+    r.delete("/hosts/:slug/elevation", h(async (req) => elevationOff(find(req))));
     r.post("/pair/scan", h((req) => pairing.scan(body(req))));
     r.post("/pair/start", h((req) => pairing.start(body(req))));
     r.post("/pair/finish", h(async (req) => {
@@ -24707,6 +25333,7 @@ function defineRoutes(deps) {
       const host = find(req);
       const e = registry.get(host.slug);
       const name = keySecretName(host.slug);
+      const elevation = await elevationOff(host);
       let keyLine = "unreachable";
       let sessions = 0;
       const key2 = await ctx.secrets?.get(name);
@@ -24728,13 +25355,20 @@ function defineRoutes(deps) {
       for (const prefix of [`sync:${host.slug}:`, `served:${host.slug}:`]) {
         for (const k of await ctx.kv?.list(prefix).catch(() => []) ?? []) await ctx.kv?.delete(k);
       }
+      const notes = [
+        ...keyLine === "unreachable" ? [
+          `The machine could not be reached, so its authorized_keys still lets this key in (it is deleted here, so nobody holds it). To tidy up, delete the line ending in "dispatch-remote-host:${host.slug}@…" from ~${host.user}/.ssh/authorized_keys on it.`
+        ] : [],
+        ...elevation.manual ? [
+          `Root with approval couldn't be taken out there (${elevation.detail ?? elevation.there}); its key is deleted here, so nothing can use it. To remove the hidden account and helper, run this there as an administrator: ` + elevation.manual
+        ] : []
+      ];
       return {
         removed: host.slug,
         keyLine,
         sessionsEnded: sessions,
-        ...keyLine === "unreachable" ? {
-          note: `The machine could not be reached, so its authorized_keys still lets this key in (it is deleted here, so nobody holds it). To tidy up, delete the line ending in "dispatch-remote-host:${host.slug}@…" from ~${host.user}/.ssh/authorized_keys on it.`
-        } : {}
+        elevation: elevation.there,
+        ...notes.length ? { note: notes.join("\n\n") } : {}
       };
     }));
   };
@@ -24784,8 +25418,9 @@ const server = definePlugin({
         ctx.log.error(`remote-host: applying new settings failed: ${errText(err)}`, err);
       }
     });
-    ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, hosts, saveHosts }));
-    live = { registry, pairing, off };
+    const setups = new ElevationSetups();
+    ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, setups, hosts, saveHosts }));
+    live = { registry, pairing, setups, off };
   },
   /**
    * After every activation Dispatch lists the chats that exist; whatever a
@@ -24798,9 +25433,10 @@ const server = definePlugin({
   },
   /**
    * Uninstall: nothing will reconcile this instance's work again, so every
-   * reachable machine ends its sessions and deletes its files now. Disable,
-   * stop and restart keep everything: a session left without Dispatch ends
-   * itself when its heartbeat stops.
+   * reachable machine ends its sessions and deletes its files now, and root
+   * with approval is taken out wherever it is on. Disable, stop and restart
+   * keep everything: a session left without Dispatch ends itself when its
+   * heartbeat stops.
    */
   async onShutdown(e) {
     if (e.reason !== "uninstall" || !live) return;
@@ -24811,6 +25447,7 @@ const server = definePlugin({
     live = void 0;
     l?.off();
     l?.pairing.clear();
+    l?.setups.clear();
     await l?.registry.dispose();
   }
 });
