@@ -408,11 +408,9 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
 
     // A file it writes there comes back here, and the result names the copy.
     const local = join(tmpdir(), "dispatch-remote-host", INSTANCE, "e2e", chat, "playwright");
-    const saved = await call("save");
-    // The plugin's log says why, if the bridge couldn't copy it.
-    expect(saved, JSON.stringify(t.log.filter((l) => /bridge|copied/i.test(JSON.stringify(l))))).toBe(
-      `- [Screenshot of viewport](${join(local, "out", "shot-1.png")})`,
-    );
+    // The whole content: a copy that failed adds a note after the text, and that must not hide behind it.
+    const saved = ((await p.request("tools/call", { name: "save", arguments: {} }, { timeoutMs: 20_000 })).result as Content).content;
+    expect(saved).toEqual([{ type: "text", text: `- [Screenshot of viewport](${join(local, "out", "shot-1.png")})` }]);
     expect(readFileSync(join(local, "out", "shot-1.png"), "utf8")).toBe("PNG-BYTES");
 
     // A local file it is handed goes there first.

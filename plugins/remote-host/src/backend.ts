@@ -254,7 +254,7 @@ export class HostBackend implements TerminalBackend {
     const out = posix.join(dir, "out");
     // Not under `dir`: browsers put unix sockets in TMPDIR, and macOS caps their paths at 104 bytes.
     const tmp = mcpTmpPath(paths.root, this.deps.instanceId, chatId, mcpDirName(info.name));
-    const mk = await this.deps.link.exec(`mkdir -p ${sq(out)} ${sq(tmp)}`, { timeoutMs: 30_000 });
+    const mk = await this.deps.link.exec(`umask 077 && mkdir -p ${sq(out)} ${sq(tmp)}`, { timeoutMs: 30_000 });
     if (mk.code !== 0) throw new Error(`could not make ${dir} on ${this.label}: ${mk.stderr.trim() || `exit ${mk.code}`}`);
     // A configured server starts where a shell would, so it is made; a bundled one starts in its own directory.
     const where = await this.place(chatId, info.worktreePath ?? info.cwd, info.cwd, paths, !plan.ownRoots);
@@ -274,10 +274,25 @@ export class HostBackend implements TerminalBackend {
 
     const sid = newSid();
     const instance = this.deps.instanceId;
+    // The environment goes in a file only dispatch can read, which the session
+    // removes as it starts: a configured server's env may hold a token, and an
+    // argv there is anyone's to read in `ps`.
+    let envFile: string | undefined;
+    if (Object.keys(env).length) {
+      envFile = posix.join(dir, `.env-${sid}`);
+      const payload = encodeEnvArg(env);
+      const w = await this.deps.link.exec(`umask 077 && cat > ${sq(envFile)}`, {
+        timeoutMs: 30_000,
+        stdin: (ch) => new Promise<void>((res, rej) => ch.end(payload, (err?: Error | null) => (err ? rej(err) : res()))),
+      });
+      if (w.code !== 0) throw new Error(`could not pass ${info.name} its environment on ${this.label}: ${w.stderr.trim() || `exit ${w.code}`}`);
+    }
     const opener: SessionOpener = {
       open: async (resume) => {
         const l = await this.deps.link.ready();
-        return this.deps.link.openSession(`exec ${sessionCommand(l.paths, { instance, chatId, sid, cwd, resume, exec, env })}`);
+        // Only a fresh start reads the file (and removes it); a resume finds the process running.
+        const file = resume ? undefined : envFile;
+        return this.deps.link.openSession(`exec ${sessionCommand(l.paths, { instance, chatId, sid, cwd, resume, exec, envFile: file })}`);
       },
       killDetached: () => {
         void this.deps.link.agent(["kill", "--instance", instance, "--sid", sid], 15_000).catch((err: unknown) => {
@@ -285,7 +300,14 @@ export class HostBackend implements TerminalBackend {
         });
       },
     };
-    const sh = await HostShell.start(opener, { label: this.label, log: this.deps.log, ...this.deps.shell, lossIsFatal: true }, info.signal);
+    let sh: HostShell;
+    try {
+      sh = await HostShell.start(opener, { label: this.label, log: this.deps.log, ...this.deps.shell, lossIsFatal: true }, info.signal);
+    } catch (err) {
+      // The session may never have run to remove it.
+      if (envFile) void this.deps.link.exec(`rm -f ${sq(envFile)}`, { timeoutMs: 15_000 }).catch(() => undefined);
+      throw err;
+    }
     this.remote ??= linkRemote(this.deps.link);
     const bridge = new McpBridge(sh, {
       label: this.label,
@@ -683,9 +705,9 @@ export function sessionCommand(
     sid: string;
     cwd: string;
     resume?: { out: number; err: number };
-    /** A hosted process: run this instead of bash, with this extra environment. */
+    /** A hosted process: run this instead of bash, with the extra environment in this file there. */
     exec?: readonly string[];
-    env?: Record<string, string>;
+    envFile?: string;
   },
 ): string {
   return agentCommand(paths, [
@@ -701,7 +723,7 @@ export function sessionCommand(
     "--heartbeat-ms",
     String(HEARTBEAT_TIMEOUT_MS),
     ...(s.exec ? ["--exec", encodeExecArg(s.exec)] : []),
-    ...(s.env && Object.keys(s.env).length ? ["--env", encodeEnvArg(s.env)] : []),
+    ...(s.envFile ? ["--env-file", s.envFile] : []),
     ...(s.resume ? ["--resume-out", String(s.resume.out), "--resume-err", String(s.resume.err)] : []),
   ]);
 }

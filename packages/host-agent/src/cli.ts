@@ -2,7 +2,7 @@
  * `dispatch-host <command>`. The bundle's entry point, run on the host as
  * `~/.dispatch-host/runtime/node/bin/node ~/.dispatch-host/agent/<build>/dispatch-host.mjs <command> …`.
  *
- *   session  --instance I --chat C --sid S --cwd D [--env B64] [--exec B64] [--resume-out N --resume-err M]
+ *   session  --instance I --chat C --sid S --cwd D [--env B64 | --env-file F] [--exec B64] [--resume-out N --resume-err M]
  *            what sshd runs for a chat shell: framed stdio (protocol.ts). With
  *            --exec, the session runs that program (an MCP server) instead of bash
  *   mcp-provision --spec B64           install an MCP server's packages and browser (provision.ts)
@@ -30,7 +30,7 @@ import { assertId, rootDir } from "./layout.js";
 import { runOwner } from "./owner.js";
 import { collectGarbage, forgetChat, forgetInstance, listChats } from "./lifecycle.js";
 import { probe } from "./probe.js";
-import { decodeEnvArg, decodeExecArg } from "./env.js";
+import { decodeEnvArg, decodeExecArg, takeSessionEnv } from "./env.js";
 import { provision, runProgram } from "./provision.js";
 import { processSignals, runElevate } from "./elevate.js";
 import { attribute, hostKillIo, killTree, listListeners, listProcs, type KillTarget } from "./procs.js";
@@ -126,6 +126,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         sid: assertId("sid", need(opts, "sid")),
         cwd: need(opts, "cwd"),
         ...(opts.env ? { envB64: opts.env } : {}),
+        ...(opts["env-file"] ? { envFile: opts["env-file"] } : {}),
         ...(opts.exec ? { execB64: opts.exec } : {}),
         ...(resumeOut !== undefined || resumeErr !== undefined
           ? { resume: { out: offset(opts, "resume-out"), err: offset(opts, "resume-err") } }
@@ -145,7 +146,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         chat: assertId("chat", need(opts, "chat")),
         sid: assertId("sid", need(opts, "sid")),
         cwd: need(opts, "cwd"),
-        extraEnv: decodeEnvArg(opts.env),
+        extraEnv: decodeEnvArg(takeSessionEnv() ?? opts.env),
         ...(opts.exec ? { exec: decodeExecArg(opts.exec) } : {}),
         heartbeatMs: num(opts, "heartbeat-ms", DEFAULT_HEARTBEAT_MS),
         deadManMs: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS) * 3_600_000,

@@ -108,7 +108,7 @@ A chat whose terminal runs on a machine drives a browser **there** by default: D
 - **Headless only, for now.** `browser.headless: false` and `engine: webkit` need the machine's desktop session (the GUI agent, not built yet), so they fail with that reason instead of hanging. `engine: chrome`, `chromium` and `msedge` all mean that Chromium there; `firefox` installs Playwright's Firefox.
 - **Per chat.** Each server keeps its output and uploads under `~/.dispatch-host/<instance>/mcp/<chat>/<server>/`, and its temporary files (the browser profile) under a short `~/.dispatch-host/t/<hash>/` (browsers put sockets there, and macOS caps a socket path at 104 bytes). Both are deleted with the chat. The installed packages and browsers are shared by every chat and instance, and stay until you delete them.
 - **Files cross over.** Dispatch answers the server's `roots/list` with those paths there. A file a result names there (a screenshot, a snapshot, a trace) is copied to this computer, under the system temp folder's `dispatch-remote-host/`, and the result names the copy. A local file a call names (an upload, a `file://` page) is copied there first; a local path to save to gets the file copied back to it. Copies are capped at 200 MB.
-- **A configured MCP server** placed on the machine (`mcpServers.<name>.location`) runs as written, in the chat's directory there, with the same lifetime.
+- **A configured MCP server** placed on the machine (`mcpServers.<name>.location`) runs as written, in the chat's directory there, with the same lifetime. Its `env` goes over in a file only `dispatch` can read, which is deleted as the server starts, so a token there never shows in `ps`. Its arguments do show, as they would here.
 
 ## Root, with your approval
 

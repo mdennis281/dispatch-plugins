@@ -6,7 +6,7 @@
  * them: `eval '<cmd>\n' </dev/null`, then the sentinel probe.
  */
 import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -303,6 +303,34 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     const r = new Relay(sid(), ["--env", env]);
     expect(await r.exited).toBe(1);
     expect(r.of<ErrorMsg>(F.error)[0]).toMatchObject({ code: "bad-args" });
+  });
+
+  it("takes an --env-file's environment, removes the file, and keeps the values out of the owner's argv", async () => {
+    const dir = join(root, INSTANCE, "mcp", "c1", "srv");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, ".env-x");
+    writeFileSync(file, Buffer.from(JSON.stringify({ SECRET_TOKEN: "tok-123" })).toString("base64"), { mode: 0o600 });
+    const id = sid();
+    const r = new Relay(id, ["--env-file", file]);
+    await r.ready();
+    expect(existsSync(file)).toBe(false);
+    await r.run("echo got=$SECRET_TOKEN left=${DISPATCH_HOST_SESSION_ENV:-none}");
+    expect((await r.waitText(/got=(\S+) left=(\S+)/)).slice(1)).toEqual(["tok-123", "none"]);
+    const rec = JSON.parse(readFileSync(sessionPaths(root, INSTANCE, id).record, "utf8")) as { ownerPid: number };
+    const args = execFileSync("ps", ["-o", "args=", "-p", String(rec.ownerPid)]).toString();
+    expect(args).toContain("serve");
+    expect(args).not.toContain(Buffer.from(JSON.stringify({ SECRET_TOKEN: "tok-123" })).toString("base64"));
+    expect(cli("kill", "--sid", id)).toEqual({ killed: [id] });
+    await r.exited;
+  });
+
+  it("reads an --env-file only from the chat's mcp directory", async () => {
+    const file = join(work, "elsewhere.env");
+    writeFileSync(file, Buffer.from("{}").toString("base64"));
+    const r = new Relay(sid(), ["--env-file", file]);
+    expect(await r.exited).toBe(1);
+    expect(r.of<ErrorMsg>(F.error)[0]).toMatchObject({ code: "bad-args" });
+    expect(existsSync(file)).toBe(true); // not its to remove
   });
 
   it("answers a resume of a session it never had with `gone`, instead of a fresh shell", async () => {

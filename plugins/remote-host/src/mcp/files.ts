@@ -37,7 +37,16 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
         `if [ "$s" -gt ${max} ]; then echo "$s bytes" >&2; exit ${TOO_BIG}; fi`,
         `exec cat -- "$f"`,
       ].join("\n");
-      const r = await remote.stream(script, { output: out }, AbortSignal.timeout(ms));
+      let r: { code: number | null; stderr: string };
+      try {
+        r = await remote.stream(script, { output: out }, AbortSignal.timeout(ms));
+      } catch (err) {
+        // No channel (the machine is offline): nothing was piped, so close and drop the temporary here.
+        out.destroy();
+        await closed;
+        await rm(part, { force: true });
+        throw err;
+      }
       await closed;
       if (r.code !== 0) {
         await rm(part, { force: true });
@@ -53,7 +62,14 @@ export function remoteFiles(remote: RemoteSide, opts: { maxBytes?: number; timeo
       const st = await stat(from);
       if (st.size > max) throw new Error(`it is ${st.size} bytes, over the ${Math.round(max / 1048576)} MB a copy may be`);
       // `'<to>'.part-$$`: the shell's pid, so two copies of one file never share a temporary.
-      const script = [`d=${sq(posix.dirname(to))}`, 'mkdir -p "$d"', `cat > ${sq(to)}.part-$$`, `mv -f ${sq(to)}.part-$$ ${sq(to)}`].join(" && ");
+      // A copy cut short leaves no `.part` behind there.
+      const script = [
+        `d=${sq(posix.dirname(to))}`,
+        `t=${sq(to)}.part-$$`,
+        `mkdir -p "$d" || exit 1`,
+        `if cat > "$t" && mv -f "$t" ${sq(to)}; then exit 0; fi`,
+        `rm -f "$t"; exit 1`,
+      ].join("\n");
       const r = await remote.stream(script, { input: (ch) => pipeline(createReadStream(from), ch) }, AbortSignal.timeout(ms));
       if (r.code !== 0) throw new Error(r.stderr.trim() || `exit ${r.code}`);
     },

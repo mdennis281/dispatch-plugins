@@ -353,6 +353,7 @@ export class McpBridge extends EventEmitter implements TerminalProcessHandle {
       mapStrings(result, (s) => replaceTokens(s, pairs));
     }
     if (notes.length) {
+      this.o.log?.warn(`remote-host ${this.o.label}: MCP bridge: ${notes.join(" ")}`);
       const content = (result as Json | undefined)?.content;
       if (Array.isArray(content)) content.push({ type: "text", text: notes.join("\n") });
     }

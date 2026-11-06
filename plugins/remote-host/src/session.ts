@@ -70,9 +70,10 @@ export interface HostShellOptions {
   /** Most input held while detached; more ends the shell rather than lose some of it. */
   maxQueuedBytes?: number;
   /**
-   * Output the journal no longer held when re-attaching ends it (as
-   * `transport-lost`) instead of being noted. For a hosted process speaking
-   * JSON-RPC: a hole in its stdout would splice two messages together.
+   * Stdout the journal no longer held when re-attaching ends it (as
+   * `transport-lost`, and the process there with it) instead of being noted.
+   * For a hosted process speaking JSON-RPC: a hole in its stdout would splice
+   * two messages together. A hole in stderr is still only noted.
    */
   lossIsFatal?: boolean;
   now?: () => number;
@@ -429,7 +430,10 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     const from = Math.max(offset, have);
     // The journal no longer held them (it rotated while Dispatch was away).
     if (offset > have) {
-      if (this.o.lossIsFatal) {
+      // Only stdout carries the protocol; a hole in its stderr (a server's logging) costs nothing.
+      if (this.o.lossIsFatal && stream === "out") {
+        // Ended here, so ended there too: core starts a new one, and the old one must not run on beside it.
+        this.opener.killDetached?.();
         this.exit(null, { kind: "transport-lost", detail: `${offset - have} bytes of its output were lost while ${this.o.label} was unreachable` });
         return;
       }

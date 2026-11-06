@@ -105,6 +105,16 @@ export function decodeEnvArg(b64: string | undefined): Record<string, string> {
   return out;
 }
 
+/** How `session` hands `serve` its extra environment: in serve's environment, never its argv. */
+export const SESSION_ENV_VAR = "DISPATCH_HOST_SESSION_ENV";
+
+/** Take (and drop from this process) the extra environment `session` handed over. */
+export function takeSessionEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const v = env[SESSION_ENV_VAR];
+  delete env[SESSION_ENV_VAR];
+  return v;
+}
+
 /** The most a hosted process's argv may carry (bytes, all arguments together). */
 export const MAX_EXEC_ARGV = 32 * 1024;
 

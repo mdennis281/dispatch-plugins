@@ -13,11 +13,12 @@
  * the cwd and env the agent set up, and the plugin has to say so.
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, openSync, statSync } from "node:fs";
+import { mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { connect, type Socket } from "node:net";
 import { StreamLog, readRuns } from "./journal.js";
 import { sessionPaths, type SessionRecord } from "./layout.js";
-import { decodeEnvArg, decodeExecArg } from "./env.js";
+import { SESSION_ENV_VAR, decodeEnvArg, decodeExecArg } from "./env.js";
 import { NO_CWD_EXIT } from "./owner.js";
 import { F, PROTOCOL_VERSION, encodeFrame, type ErrorCode, type ExitMsg, type ReadyMsg } from "./protocol.js";
 import { listProcs } from "./procs.js";
@@ -36,6 +37,12 @@ export interface RelayArgs {
   cwd: string;
   /** Base64 JSON of extra environment variables. Passed through to `serve`. */
   envB64?: string;
+  /**
+   * A file there holding what `envB64` would (`--env-file`), under the chat's
+   * `mcp/` directory. Read and removed at once: a hosted process's environment
+   * may hold secrets, and an argv is anyone's to read in `ps`.
+   */
+  envFile?: string;
   /** Base64 JSON argv: the session runs this program instead of bash. Passed through to `serve`. */
   execB64?: string;
   resume?: { out: number; err: number };
@@ -58,6 +65,15 @@ export async function runRelay(a: RelayArgs): Promise<number> {
     send(F.error, { code, message });
     return code === "no-cwd" ? NO_CWD_EXIT : 1;
   };
+  // First, so the file is gone whatever happens next.
+  let envB64 = a.envB64;
+  if (a.envFile !== undefined) {
+    try {
+      envB64 = takeEnvFile(a.root, a.instance, a.chat, a.envFile);
+    } catch (e) {
+      return error("bad-args", e instanceof Error ? e.message : String(e));
+    }
+  }
 
   let rec = readRecord(paths.record);
   if (rec?.state === "exited") return replayExited(a, rec);
@@ -82,7 +98,7 @@ export async function runRelay(a: RelayArgs): Promise<number> {
         return error("no-cwd", `${a.cwd} does not exist on this host`);
       }
       try {
-        decodeEnvArg(a.envB64);
+        decodeEnvArg(envB64);
         if (a.execB64 !== undefined) decodeExecArg(a.execB64);
       } catch (e) {
         return error("bad-args", e instanceof Error ? e.message : String(e));
@@ -100,7 +116,7 @@ export async function runRelay(a: RelayArgs): Promise<number> {
         ...(a.execB64 !== undefined ? { kind: "process" as const } : {}),
         startedAt: new Date().toISOString(),
       });
-      if (won) startOwner(a, paths.ownerLog, paths.dir);
+      if (won) startOwner(a, envB64, paths.ownerLog, paths.dir);
       sock = await waitForSocket(paths.socket, paths.record, 20_000);
     }
   }
@@ -116,7 +132,21 @@ export async function runRelay(a: RelayArgs): Promise<number> {
   return pipe(a, sock);
 }
 
-function startOwner(a: RelayArgs, ownerLog: string, dir: string): void {
+/** The environment file's contents, after removing it. Only a file under the chat's `mcp/` directory is read. */
+export function takeEnvFile(root: string, instance: string, chat: string, file: string): string {
+  const base = resolve(root, instance, "mcp", chat);
+  const p = resolve(file);
+  if (!p.startsWith(base + sep)) throw new Error(`--env-file must be under ${base}`);
+  try {
+    return readFileSync(p, "utf8").trim();
+  } catch {
+    throw new Error(`the environment file ${p} is not there`);
+  } finally {
+    rmSync(p, { force: true });
+  }
+}
+
+function startOwner(a: RelayArgs, envB64: string | undefined, ownerLog: string, dir: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const fd = openSync(ownerLog, "a", 0o600);
   const args = [
@@ -129,12 +159,13 @@ function startOwner(a: RelayArgs, ownerLog: string, dir: string): void {
     "--cwd", a.cwd,
     "--heartbeat-ms", String(a.heartbeatMs),
     "--dead-man-hours", String(a.deadManHours),
-    ...(a.envB64 ? ["--env", a.envB64] : []),
     ...(a.execB64 !== undefined ? ["--exec", a.execB64] : []),
   ];
   // Detached: its own session, so nothing that happens to this relay (or to
   // sshd's job for this connection) reaches it.
-  spawn(process.execPath, args, { detached: true, stdio: ["ignore", fd, fd], cwd: dir }).unref();
+  // The environment rides in serve's own environment, which only this user can read, not in its argv.
+  const env = envB64 ? { ...process.env, [SESSION_ENV_VAR]: envB64 } : process.env;
+  spawn(process.execPath, args, { detached: true, stdio: ["ignore", fd, fd], cwd: dir, env }).unref();
 }
 
 function tryConnect(path: string): Promise<Socket | undefined> {

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { McpBridge, type BridgeFiles, type BridgeInner } from "../src/mcp/bridge.js";
 import { CHROME_PLAYWRIGHT_CORE, PlacementRefused, planProcess, takeOption } from "../src/mcp/plan.js";
 
@@ -259,14 +259,14 @@ describe("McpBridge", () => {
     for (const id of [4, 5]) {
       s.b.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "browser_file_upload", arguments: { paths: [f] } } })}\n`);
     }
-    await tick();
+    await vi.waitFor(() => expect(s.inner.sent()).toHaveLength(2));
     expect(s.uploads).toHaveLength(1);
     const remote = s.uploads[0]![1];
     expect(remote).toMatch(new RegExp(`^${DIR}/uploads/[0-9a-f]{10}/upload me\\.txt$`));
     expect(s.inner.sent().map((m) => m.params.arguments.paths)).toEqual([[remote], [remote]]);
     // A result naming the upload names the local original; nothing is copied back.
     s.inner.send({ jsonrpc: "2.0", id: 4, result: { content: [{ type: "text", text: `await fileChooser.setFiles(["${remote}"])` }] } });
-    await tick();
+    await vi.waitFor(() => expect(s.lines).toHaveLength(1));
     expect(s.lines[0]!.result.content[0].text).toBe(`await fileChooser.setFiles(["${f}"])`);
     expect(s.fetches).toEqual([]);
   });

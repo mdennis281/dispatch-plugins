@@ -152,6 +152,27 @@ describe("a dropped connection", () => {
     expect(t.err.join("")).toMatch(/88 bytes of output were lost/);
   });
 
+  it("a hosted process (lossIsFatal) ends, there too, when stdout was lost, but only notes lost stderr", async () => {
+    const t = await started(fakeOpener(), { lossIsFatal: true } as Partial<typeof fast>);
+    t.ch.out(0, '{"id":1}\n');
+    t.ch.out(0, "log\n", F.stderr);
+    t.ch.drop();
+    const again = await t.o.nth(2);
+    again.ready({ resumed: true, out: 9, err: 500, gap: { err: 400 } });
+    again.out(400, "later log\n", F.stderr);
+    expect(t.err.join("")).toMatch(/bytes of output were lost/);
+    expect(t.exit()).toBeUndefined();
+    t.ch.drop?.();
+    again.drop();
+    const third = await t.o.nth(3);
+    third.ready({ resumed: true, out: 200, err: 510, gap: { out: 150 } });
+    third.out(150, '{"id":2}\n');
+    await until(() => t.exit() !== undefined);
+    expect(t.exit()?.reason).toEqual({ kind: "transport-lost", detail: expect.stringMatching(/141 bytes of its output were lost/) });
+    expect(t.o.killedDetached).toBe(1);
+    expect(t.out.join("")).toBe('{"id":1}\n');
+  });
+
   it("ends as transport-lost when the machine no longer has the session", async () => {
     const t = await started();
     t.ch.drop();
