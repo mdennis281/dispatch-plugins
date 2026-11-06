@@ -69,6 +69,12 @@ export interface HostShellOptions {
   retryMs?: readonly number[];
   /** Most input held while detached; more ends the shell rather than lose some of it. */
   maxQueuedBytes?: number;
+  /**
+   * Output the journal no longer held when re-attaching ends it (as
+   * `transport-lost`) instead of being noted. For a hosted process speaking
+   * JSON-RPC: a hole in its stdout would splice two messages together.
+   */
+  lossIsFatal?: boolean;
   now?: () => number;
 }
 
@@ -130,6 +136,7 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
       giveUpMs: 10 * 60_000,
       retryMs: [1_000, 2_000, 5_000, 10_000],
       maxQueuedBytes: 4 * 1024 * 1024,
+      lossIsFatal: false,
       now: () => performance.now(),
       ...opts,
     };
@@ -421,7 +428,13 @@ export class HostShell extends EventEmitter implements TerminalBackendHandle {
     if (offset + data.length <= have) return; // replayed bytes we already passed on
     const from = Math.max(offset, have);
     // The journal no longer held them (it rotated while Dispatch was away).
-    if (offset > have) this.notice(`${offset - have} bytes of output were lost while Dispatch was disconnected.`);
+    if (offset > have) {
+      if (this.o.lossIsFatal) {
+        this.exit(null, { kind: "transport-lost", detail: `${offset - have} bytes of its output were lost while ${this.o.label} was unreachable` });
+        return;
+      }
+      this.notice(`${offset - have} bytes of output were lost while Dispatch was disconnected.`);
+    }
     this.got[stream] = offset + data.length;
     const text = this.text[stream].write(data.subarray(from - offset));
     if (text) this.deliver(() => (stream === "out" ? this.stdout : this.stderr).emit("data", text));

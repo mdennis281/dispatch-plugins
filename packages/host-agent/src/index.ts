@@ -11,7 +11,12 @@
 export * from "./protocol.js";
 export {
   assertId,
+  browsersDir,
+  chatMcpPath,
   chatWorktreePath,
+  mcpDirName,
+  mcpPackagesDir,
+  mcpTmpPath,
   hostLayout,
   instanceLayout,
   repoPath,
@@ -23,7 +28,8 @@ export {
   type SessionPaths,
   type SessionRecord,
 } from "./layout.js";
-export { BASE_ENV, ELEVATE_SOCKET_ENV, FALLBACK_PATH, LOGIN_ENV_ALLOW, filterLoginEnv } from "./env.js";
+export { BASE_ENV, ELEVATE_SOCKET_ENV, FALLBACK_PATH, LOGIN_ENV_ALLOW, decodeExecArg, encodeEnvArg, encodeExecArg, filterLoginEnv } from "./env.js";
+export { checkProvisionSpec, prefixFor, type ProvisionResult, type ProvisionSpec } from "./provision-spec.js";
 export { NODE_RUNTIME, compareVersions, nodeTarball, runtimeAction, type NodeDist, type NodeTarball } from "./runtime.js";
 export { INSTALL_EXIT, agentBuildId, agentPath, installAgentScript, installRuntimeScript, nodePath, shCommand, sq } from "./install.js";
 export { attribute, parseLsof, parsePs, type Attribution, type Listener, type ProcRow } from "./procs.js";

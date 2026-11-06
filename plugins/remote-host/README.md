@@ -2,7 +2,7 @@
 
 A [Dispatch](https://github.com/mdennis281/dispatch) plugin, part of [dispatch-plugins](https://github.com/mdennis281/dispatch-plugins), that runs a chat's **managed terminals** (the agent's `terminal` tool and the Terminals panel) on **your own machines** over SSH. Macs come first. Each machine you pair becomes a terminal location, `remote-host/<name>`, that a project or chat can pick.
 
-> **Status:** terminals only (Tier A of the design), macOS first. It pairs machines (Settings → Remote hosts), runs shells on them, keeps each chat's worktree in sync with a checkout there, forwards the chat's dev servers here, and cleans up after a chat when it goes idle or is deleted. The GUI side (Simulator, UI tests, Safari) and browser MCPs on the machine come later. The design is [docs/design/remote-host.md](../../docs/design/remote-host.md).
+> **Status:** terminals only (Tier A of the design), macOS first. It pairs machines (Settings → Remote hosts), runs shells on them, keeps each chat's worktree in sync with a checkout there, forwards the chat's dev servers here, runs the chat's browser MCP servers there (headless Chromium), and cleans up after a chat when it goes idle or is deleted. The GUI side (Simulator, UI tests, Safari, headed browsers, WebKit) comes later. The design is [docs/design/remote-host.md](../../docs/design/remote-host.md).
 
 ## What it does
 
@@ -98,6 +98,17 @@ A server a chat starts in its terminal there (`pnpm dev`, say) is reachable on t
 - It goes when the chat's last terminal there does, or when the server stops (the machine is asked every 4 s while a terminal is open).
 
 Dispatch never asks the machine to reach back to this computer (no reverse forwards).
+
+## Browsers on the machine
+
+A chat whose terminal runs on a machine drives a browser **there** by default: Dispatch's bundled `playwright` and `chrome-devtools` MCP servers follow the terminal (core's `browser.location`, default `terminal`; a project or chat can set `local` instead). Then `localhost` in the browser is the machine, where the chat's dev server answers. This needs a Dispatch with MCP placement (core E7).
+
+- **Each server is a dispatch-host session** like a shell: it survives a dropped connection (the agent's calls fail fast while it is away, then carry on with the same browser, pages and all), and ends with the chat's sessions or 60 s after Dispatch stops using it.
+- **Installed without sudo, on first use.** The exact versions Dispatch bundles are installed under `~/.dispatch-host/mcp-packages/` with dispatch-host's own Node and npm (scripts off), and Playwright's Chromium (Chrome for Testing) under `~/.dispatch-host/browsers/`. Both servers drive that Chromium: chrome-devtools-mcp is pointed at it, because a system Chrome, and Chrome's updater, need an admin. The first call takes a minute or two; later ones start in seconds.
+- **Headless only, for now.** `browser.headless: false` and `engine: webkit` need the machine's desktop session (the GUI agent, not built yet), so they fail with that reason instead of hanging. `engine: chrome`, `chromium` and `msedge` all mean that Chromium there; `firefox` installs Playwright's Firefox.
+- **Per chat.** Each server keeps its output and uploads under `~/.dispatch-host/<instance>/mcp/<chat>/<server>/`, and its temporary files (the browser profile) under a short `~/.dispatch-host/t/<hash>/` (browsers put sockets there, and macOS caps a socket path at 104 bytes). Both are deleted with the chat. The installed packages and browsers are shared by every chat and instance, and stay until you delete them.
+- **Files cross over.** Dispatch answers the server's `roots/list` with those paths there. A file a result names there (a screenshot, a snapshot, a trace) is copied to this computer, under the system temp folder's `dispatch-remote-host/`, and the result names the copy. A local file a call names (an upload, a `file://` page) is copied there first; a local path to save to gets the file copied back to it. Copies are capped at 200 MB.
+- **A configured MCP server** placed on the machine (`mcpServers.<name>.location`) runs as written, in the chat's directory there, with the same lifetime.
 
 ## Root, with your approval
 

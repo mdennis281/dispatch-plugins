@@ -32,6 +32,8 @@ export interface OwnerArgs {
   sid: string;
   cwd: string;
   extraEnv: Record<string, string>;
+  /** Run this program (an MCP server) instead of bash. Same journal, heartbeat and kill. */
+  exec?: string[];
   heartbeatMs: number;
   deadManMs: number;
 }
@@ -84,6 +86,7 @@ export async function runOwner(a: OwnerArgs): Promise<void> {
     cwd: a.cwd,
     ownerPid: process.pid,
     state: "starting",
+    ...(a.exec ? { kind: "process" as const } : {}),
     startedAt: new Date().toISOString(),
   };
   const save = () => writeRecord(paths.record, rec);
@@ -127,10 +130,11 @@ async function serve(
       return undefined;
     },
   );
-  // `sudo` and `dispatch-elevate` for the shell, next to this agent build.
+  // `sudo` and `dispatch-elevate` for the shell, next to this agent build. A
+  // hosted process is no shell: nothing in it asks for root.
   let elevate: { binDir: string; socket: string } | undefined;
   const script = process.argv[1];
-  if (script) {
+  if (script && !a.exec) {
     const binDir = posix.join(posix.dirname(script), "bin");
     try {
       ensureShims(binDir, process.execPath, script);
@@ -141,10 +145,12 @@ async function serve(
   }
   const env = shellEnv({ agentEnv: process.env, ...(login ? { login } : {}), extra: a.extraEnv, clt: hasCommandLineTools(), ...(elevate ? { elevate } : {}) });
 
-  const shell = spawn(bashPath(), ["--noprofile", "--norc"], { cwd: a.cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  // Its own session (detached), so its pid is the group every kill takes down.
+  const [program, args] = a.exec ? [a.exec[0]!, a.exec.slice(1)] : [bashPath(), ["--noprofile", "--norc"]];
+  const shell = spawn(program, args, { cwd: a.cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
   if (!shell.pid) {
     const err = await new Promise<Error>((r) => shell.once("error", r));
-    throw new Error(`bash did not start: ${err.message}`);
+    throw new Error(`${a.exec ? program : "bash"} did not start: ${err.message}`);
   }
   // A write racing the shell's exit must not crash the owner.
   shell.stdin.on("error", () => {});
@@ -154,7 +160,7 @@ async function serve(
   rec.ownerStart = rows.find((r) => r.pid === process.pid)?.start;
   rec.shellStart = rows.find((r) => r.pid === shell.pid)?.start;
   save();
-  log(`session ${a.sid} for chat ${a.chat}: bash ${shell.pid} in ${a.cwd}`);
+  log(`session ${a.sid} for chat ${a.chat}: ${a.exec ? `process ${JSON.stringify(a.exec).slice(0, 300)}` : "bash"} ${shell.pid} in ${a.cwd}`);
 
   const out = StreamLog.open(paths.dir, "out");
   const err = StreamLog.open(paths.dir, "err");

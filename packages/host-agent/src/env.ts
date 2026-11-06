@@ -105,6 +105,41 @@ export function decodeEnvArg(b64: string | undefined): Record<string, string> {
   return out;
 }
 
+/** The most a hosted process's argv may carry (bytes, all arguments together). */
+export const MAX_EXEC_ARGV = 32 * 1024;
+
+/**
+ * A hosted process's command line, as `--exec` carries it: base64 of a JSON
+ * array of strings, the program first. The program is run as given (an
+ * absolute path, or a name looked up on the session's PATH), never through a
+ * shell. Throws on anything else, so the relay refuses it before an owner
+ * ever starts.
+ */
+export function decodeExecArg(b64: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+  } catch {
+    throw new Error("--exec must be base64 JSON of a list of strings");
+  }
+  if (!Array.isArray(parsed) || !parsed.length || !parsed.every((a) => typeof a === "string")) {
+    throw new Error("--exec must be base64 JSON of a non-empty list of strings");
+  }
+  const argv = parsed as string[];
+  if (!argv[0]) throw new Error("--exec names no program");
+  if (argv.some((a) => a.includes("\0"))) throw new Error("an --exec argument holds a NUL byte");
+  if (Buffer.byteLength(argv.join("\0"), "utf8") > MAX_EXEC_ARGV) throw new Error(`--exec is longer than ${MAX_EXEC_ARGV} bytes`);
+  return argv;
+}
+
+export function encodeExecArg(argv: readonly string[]): string {
+  return Buffer.from(JSON.stringify(argv), "utf8").toString("base64");
+}
+
+export function encodeEnvArg(env: Record<string, string>): string {
+  return Buffer.from(JSON.stringify(env), "utf8").toString("base64");
+}
+
 /** Printed by the capture command before the JSON, so a chatty `.zprofile` can't corrupt it. */
 const MARK = "__DISPATCH_HOST_ENV__";
 

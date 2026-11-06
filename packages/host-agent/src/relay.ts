@@ -17,7 +17,7 @@ import { mkdirSync, openSync, statSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { StreamLog, readRuns } from "./journal.js";
 import { sessionPaths, type SessionRecord } from "./layout.js";
-import { decodeEnvArg } from "./env.js";
+import { decodeEnvArg, decodeExecArg } from "./env.js";
 import { NO_CWD_EXIT } from "./owner.js";
 import { F, PROTOCOL_VERSION, encodeFrame, type ErrorCode, type ExitMsg, type ReadyMsg } from "./protocol.js";
 import { listProcs } from "./procs.js";
@@ -36,6 +36,8 @@ export interface RelayArgs {
   cwd: string;
   /** Base64 JSON of extra environment variables. Passed through to `serve`. */
   envB64?: string;
+  /** Base64 JSON argv: the session runs this program instead of bash. Passed through to `serve`. */
+  execB64?: string;
   resume?: { out: number; err: number };
   heartbeatMs: number;
   deadManHours: number;
@@ -81,6 +83,7 @@ export async function runRelay(a: RelayArgs): Promise<number> {
       }
       try {
         decodeEnvArg(a.envB64);
+        if (a.execB64 !== undefined) decodeExecArg(a.execB64);
       } catch (e) {
         return error("bad-args", e instanceof Error ? e.message : String(e));
       }
@@ -94,6 +97,7 @@ export async function runRelay(a: RelayArgs): Promise<number> {
         cwd: a.cwd,
         ownerPid: 0,
         state: "starting",
+        ...(a.execB64 !== undefined ? { kind: "process" as const } : {}),
         startedAt: new Date().toISOString(),
       });
       if (won) startOwner(a, paths.ownerLog, paths.dir);
@@ -126,6 +130,7 @@ function startOwner(a: RelayArgs, ownerLog: string, dir: string): void {
     "--heartbeat-ms", String(a.heartbeatMs),
     "--dead-man-hours", String(a.deadManHours),
     ...(a.envB64 ? ["--env", a.envB64] : []),
+    ...(a.execB64 !== undefined ? ["--exec", a.execB64] : []),
   ];
   // Detached: its own session, so nothing that happens to this relay (or to
   // sshd's job for this connection) reaches it.
