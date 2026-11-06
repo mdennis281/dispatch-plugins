@@ -25209,7 +25209,7 @@ function linkRemote(link) {
       const ch = await link.openSession(shCommand(script), signal);
       return new Promise((resolve2) => {
         let stderr = "";
-        let code = null;
+        let code;
         const onAbort = () => ch.close();
         signal?.addEventListener("abort", onAbort, { once: true });
         ch.stderr.on("data", (d) => stderr = (stderr + d.toString("utf8")).slice(-4e3));
@@ -25218,7 +25218,7 @@ function linkRemote(link) {
         });
         ch.on("close", () => {
           signal?.removeEventListener("abort", onAbort);
-          resolve2({ code, stderr });
+          resolve2({ code: code !== void 0 ? code : channelExit(ch)?.code ?? null, stderr });
         });
         if (io.output) ch.pipe(io.output, { end: true });
         else ch.resume();

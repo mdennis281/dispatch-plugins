@@ -5,6 +5,7 @@
  * connection.
  */
 import { shCommand } from "@dispatch-plugins/host-agent";
+import { channelExit } from "@dispatch-plugins/remote-core";
 import type { HostLink } from "../link.js";
 import type { RemoteSide } from "./remote.js";
 
@@ -28,7 +29,7 @@ export function linkRemote(link: HostLink): RemoteSide {
       const ch = await link.openSession(shCommand(script), signal);
       return new Promise((resolve) => {
         let stderr = "";
-        let code: number | null = null;
+        let code: number | null | undefined;
         const onAbort = () => ch.close();
         signal?.addEventListener("abort", onAbort, { once: true });
         ch.stderr.on("data", (d: Buffer) => (stderr = (stderr + d.toString("utf8")).slice(-4_000)));
@@ -36,7 +37,9 @@ export function linkRemote(link: HostLink): RemoteSide {
         ch.on("error", () => {});
         ch.on("close", () => {
           signal?.removeEventListener("abort", onAbort);
-          resolve({ code, stderr });
+          // A quick command's exit can come before this listener did (remote-core's channelExit):
+          // a small file's copy, all in one read on a fast link.
+          resolve({ code: code !== undefined ? code : (channelExit(ch)?.code ?? null), stderr });
         });
         if (io.output) ch.pipe(io.output, { end: true });
         else ch.resume();
