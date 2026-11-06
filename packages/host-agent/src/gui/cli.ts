@@ -6,6 +6,8 @@
  *   gui status                        the agent's status, or why there is none (client.ts `GuiState`)
  *   gui release --instance I [--chat C] [--forget]
  *                                     a chat went idle (or was deleted, --forget); without --chat, every chat of I
+ *   gui renew --instance I --chats C1,C2
+ *                                    keep the Safari lease of whichever of those chats holds it (they have runs in flight)
  *   gui uninstall                     boot it out, remove the plist
  *   gui serve                         (launchd) the agent itself
  *
@@ -72,6 +74,13 @@ export async function guiMain(sub: string, opts: Record<string, string>, flags: 
     case "uninstall":
       ctx.print(await uninstallGui(ctx));
       return 0;
+    case "renew": {
+      const instance = assertId("instance", opts.instance);
+      const chats = (opts.chats ?? "").split(",").filter(Boolean).map((c) => assertId("chat", c));
+      const r = await guiCall<{ renewed: boolean; expiresAt?: string }>(guiPaths(ctx.root, ctx.home).socket, { op: "renew", instance, chats }, 30_000);
+      ctx.print(r?.ok ? { renewed: r.renewed, ...(r.expiresAt ? { expiresAt: r.expiresAt } : {}) } : { renewed: false, ...(r ? { error: r.error } : { answered: false }) });
+      return 0;
+    }
     case "release": {
       const instance = assertId("instance", opts.instance);
       const chat = opts.chat === undefined ? undefined : assertId("chat", opts.chat);
@@ -96,7 +105,7 @@ export async function guiMain(sub: string, opts: Record<string, string>, flags: 
       return -1; // keep running
     }
     default:
-      throw new Error(`unknown gui command ${JSON.stringify(sub)} (install, status, release, uninstall, serve)`);
+      throw new Error(`unknown gui command ${JSON.stringify(sub)} (install, status, release, renew, uninstall, serve)`);
   }
 }
 

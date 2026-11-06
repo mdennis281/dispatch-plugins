@@ -83,6 +83,8 @@ export interface HostBackendDeps {
   where?: (backend: string) => string;
   /** Tests: how long a pull-back waits for a run elsewhere in the files. */
   lockWaitMs?: number;
+  /** Overrides for tests: how often the Safari lease is kept. */
+  leaseEveryMs?: number;
   /** `ctx.approvals`, when this Dispatch has it. Without it nothing is ever elevated. */
   approvals?: Approvals;
   /** The agent has remote-host's own tools (tools/, `ctx.tools`), so its note names them. */
@@ -130,6 +132,8 @@ export class HostBackend implements TerminalBackend {
    */
   private readonly pendingDeletes = new Set<string>();
   private forgetting = false;
+  private leaseTimer?: ReturnType<typeof setInterval>;
+  private warnedNoRuns = false;
   /** Running commands as root there, with the user's approval (elevation.ts). */
   readonly elevation: Elevation;
   /** MCP servers running there for chats (core's E7 placement), by chat + server name. */
@@ -156,6 +160,8 @@ export class HostBackend implements TerminalBackend {
       ...(deps.elevationConnect ? { connect: deps.elevationConnect } : {}),
     });
     void this.elevation.refresh();
+    this.leaseTimer = setInterval(() => void this.keepLeases(), deps.leaseEveryMs ?? 5 * 60_000);
+    this.leaseTimer.unref?.();
     this.ports = new PortForwards({
       list: () => link.agent<Attribution>(["ports", "--instance", instanceId], 30_000),
       dial: (host, port) => link.tcp(host, port),
@@ -445,6 +451,37 @@ export class HostBackend implements TerminalBackend {
   /** Core unregistered the backend (the machine was removed, or the plugin is going down). */
   dispose(): void {
     this.ports.dispose();
+    if (this.leaseTimer) clearInterval(this.leaseTimer);
+    this.leaseTimer = undefined;
+  }
+
+  /**
+   * Real Safari is one chat's at a time, leased for 30 minutes from the
+   * chat's last `dispatch-gui safari`. A UI test can run longer than that, so
+   * while the chat holding it has a command running here, the lease is
+   * renewed (every 5 min, well inside its 30). Never released for having no
+   * run: a WebDriver session spans several commands. On a Dispatch that can't
+   * say what runs where (before core E28), say so once, when this
+   * Dispatch actually holds the lease.
+   */
+  async keepLeases(): Promise<void> {
+    const g = this.deps.link.probe?.gui;
+    if (g?.state !== "running" || !this.deps.link.connected) return;
+    if (!this.deps.runs) {
+      if (g.agent.safari?.instance === this.deps.instanceId && !this.warnedNoRuns) {
+        this.warnedNoRuns = true;
+        this.deps.log.warn(
+          `remote-host ${this.deps.host().slug}: this Dispatch can't report runs in flight (ctx.terminals.runs, core E28), ` +
+            `so a Safari lease on ${this.label} lapses 30 min after its last \`dispatch-gui safari\`, even mid-test; update Dispatch`,
+        );
+      }
+      return;
+    }
+    const chats = [...new Set(this.deps.runs.runs().filter((r) => r.backend === this.id).map((r) => r.chatId))].filter((c) => ID.test(c));
+    if (!chats.length) return;
+    await this.deps.link
+      .agent(["gui", "renew", "--instance", this.deps.instanceId, "--chats", chats.join(",")], 30_000)
+      .catch((err: unknown) => this.deps.log.info(`remote-host ${this.deps.host().slug}: keeping the Safari lease: ${errText(err)}`));
   }
 
   /**

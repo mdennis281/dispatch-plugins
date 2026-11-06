@@ -57,6 +57,12 @@ export type GuiRequest =
     }
   | ({ v: number; op: "sim" } & ChatRef)
   | ({ v: number; op: "safari"; release?: boolean } & ChatRef)
+  /**
+   * Keep the Safari lease of whichever of `chats` holds it, without starting
+   * anything: the plugin sends this while a chat has a command running there
+   * (core's runs in flight, E28), so a long test doesn't lose Safari mid-run.
+   */
+  | { v: number; op: "renew"; instance: string; chats: string[] }
   | {
       v: number;
       op: "release";

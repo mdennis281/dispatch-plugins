@@ -346,6 +346,19 @@ d("the Safari lease", () => {
     expect(await guiCall(sock(), { op: "safari", instance: INST, chat: "c2" })).toMatchObject({ ok: true, chat: "c2" });
   });
 
+  it("is kept by `renew` for a chat with runs in flight, which starts nothing for anyone else", async () => {
+    let now = Date.now();
+    await startServer({ now: () => now, timing: { safariLeaseMs: 1_000, tickMs: 3_600_000 } });
+    expect(await guiCall(sock(), { op: "renew", instance: INST, chats: ["c1"] })).toMatchObject({ ok: true, renewed: false });
+    expect(await guiCall(sock(), { op: "status" })).not.toHaveProperty("safari");
+    await guiCall(sock(), { op: "safari", instance: INST, chat: "c1" });
+    now += 800;
+    expect(await guiCall(sock(), { op: "renew", instance: INST, chats: ["c9", "c1"] })).toMatchObject({ ok: true, renewed: true });
+    expect(await guiCall(sock(), { op: "renew", instance: "inst-b", chats: ["c1"] })).toMatchObject({ ok: true, renewed: false });
+    now += 800; // past the first expiry, inside the renewed one
+    expect(await guiCall(sock(), { op: "safari", instance: INST, chat: "c2" })).toMatchObject({ ok: false, code: "leased" });
+  });
+
   it("lapses when the holder stops renewing it", async () => {
     let now = Date.now();
     const s = await startServer({ now: () => now, timing: { safariLeaseMs: 1_000, tickMs: 3_600_000 } });

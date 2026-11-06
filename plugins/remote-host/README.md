@@ -182,8 +182,10 @@ user's login session, and a chat's shell gets `dispatch-gui` to use it:
   same project never share one, and it goes with the chat.
 - `dispatch-gui safari` leases the Mac's **real Safari**, which runs one automation session at a time: one chat holds
   it, with safaridriver on a port of its own, until it lets go (`--release`), goes idle, or doesn't renew it within
-  30 minutes. Another chat asking is told who holds it. Safari's "Allow Remote Automation" (`safaridriver --enable`)
-  needs the Mac's owner, once.
+  30 minutes. While the chat holding it has a command running on the Mac, Dispatch renews it, so a long UI test
+  keeps it (this needs a Dispatch that reports runs in flight, core E28; an older one logs that the lease will lapse).
+  Another chat asking is told who holds it. Safari's "Allow Remote Automation" (`safaridriver --enable`) needs the
+  Mac's owner, once.
 
 How it runs:
 - **One per user, shared.** Both Dispatch instances on the machine (stable and dev) use the same GUI agent, so the

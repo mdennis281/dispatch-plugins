@@ -332,6 +332,12 @@ export class GuiServer {
           }
           return undefined;
         }
+        case "renew": {
+          const instance = assertId("instance", req.instance);
+          const chats = Array.isArray(req.chats) ? req.chats.map((c) => assertId("chat", c)) : [];
+          this.reply(sock, { ok: true, ...this.renewSafari(instance, chats) });
+          return undefined;
+        }
         case "release": {
           const instance = assertId("instance", req.instance);
           const chat = req.chat === undefined ? undefined : assertId("chat", req.chat);
@@ -566,6 +572,16 @@ export class GuiServer {
     this.updateCaffeinate();
     this.log(`Safari leased to ${leaseKey(ref)}: safaridriver on 127.0.0.1:${port}`);
     return { ok: true, ...this.state.safari, renewed: false };
+  }
+
+  /** Push the Safari lease's expiry out if one of `chats` (of `instance`) holds it. Starts nothing. */
+  renewSafari(instance: string, chats: readonly string[]): { renewed: boolean; expiresAt?: string } {
+    const held = this.state.safari;
+    if (!held || held.instance !== instance || !chats.includes(held.chat)) return { renewed: false };
+    const expiresAt = new Date(this.now() + this.t.safariLeaseMs).toISOString();
+    this.state.safari = { ...held, expiresAt };
+    this.save();
+    return { renewed: true, expiresAt };
   }
 
   /** Drop the Safari lease if `ref` holds it. */
