@@ -22,6 +22,7 @@ const listUnder = (key: string) => {
   return [...block.matchAll(/^ {2}- (\S+)$/gm)].map((m) => m[1]!);
 };
 const capabilities = listUnder("capabilities") as PluginCapability[];
+const optionalCapabilities = listUnder("optionalCapabilities");
 const manifestSecrets = listUnder("secrets");
 const settingsSchema = JSON.parse(readFileSync(`${dir}/settings.schema.json`, "utf8")) as unknown;
 
@@ -68,7 +69,7 @@ afterEach(async () => {
 
 async function activate(opts: Parameters<typeof createTestContext>[0] = {}) {
   const mod = await load();
-  const t = createTestContext({ id: "remote-host", capabilities, manifestSecrets, settingsSchema, ...opts });
+  const t = createTestContext({ id: "remote-host", capabilities, optionalCapabilities, manifestSecrets, settingsSchema, ...opts });
   await mod.activate(t.ctx);
   active = { mod, t };
   return t;
@@ -76,7 +77,9 @@ async function activate(opts: Parameters<typeof createTestContext>[0] = {}) {
 
 describe("the manifest", () => {
   it("asks for what the plugin uses and no more", () => {
-    expect(capabilities).toEqual(["terminals", "secrets", "secrets:write", "kv", "routes", "ui", "approvals", "runner"]);
+    expect(capabilities).toEqual(["terminals", "secrets", "secrets:write", "kv", "routes", "ui"]);
+    // Used where the host has them; an older Dispatch loads the plugin without them.
+    expect(optionalCapabilities).toEqual(["approvals", "runner"]);
     expect(manifestSecrets).toEqual(["REMOTE_HOST_KEY_*", "REMOTE_HOST_ELEVATE_KEY_*"]);
     expect(manifest).toMatch(/^id: remote-host$/m);
     const pkg = JSON.parse(readFileSync(`${dir}/package.json`, "utf8")) as { version: string };
@@ -97,6 +100,7 @@ describe("the manifest", () => {
       settings: scalar("settings"),
       secrets: manifestSecrets,
       capabilities,
+      optionalCapabilities,
     });
     expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
     expect(pluginSecretAllowed(manifestSecrets, "REMOTE_HOST_KEY_CVX_MAC")).toBe(true);
@@ -213,7 +217,7 @@ describe("routes", () => {
       secrets: { REMOTE_HOST_KEY_LAB: "k" },
     });
     const listed = await t.routes.call("GET", "/hosts");
-    // Declared, so this Dispatch can ask (core E31); not set up on the machine yet.
+    // Granted (an optional capability this host knows), so this Dispatch can ask (core E31); not set up on the machine yet.
     expect((listed.body as { hosts: Array<{ elevation: unknown }> }).hosts[0]!.elevation).toEqual({ on: false, canAsk: true });
 
     const verifyFirst = await t.routes.call("POST", "/hosts/:slug/elevation/verify", { params: { slug: "lab" } });
@@ -252,5 +256,20 @@ describe("routes", () => {
     expect(removed.body).toMatchObject({ removed: "lab", elevation: "unreachable" });
     expect((removed.body as { note: string }).note).toMatch(/Root with approval couldn't be taken out there.*sudo \/usr\/local\/libexec\/dispatch-elevate uninstall/);
     expect(t.secrets.has("REMOTE_HOST_ELEVATE_KEY_LAB")).toBe(false);
+  });
+
+  it("runs on a Dispatch without its optional capabilities: no ctx.approvals, so Root can't ask, and forwards keep the default ports clear", async () => {
+    // Such a host knows neither name (it is older than #512 / #517), or drops
+    // the whole list (older than #518): either way neither is granted.
+    const port = await closedPort();
+    const t = await activate({ optionalCapabilities: [], settings: { hosts: [host("lab", port)] }, secrets: { REMOTE_HOST_KEY_LAB: "k" } });
+    expect((t.ctx as { approvals?: unknown }).approvals).toBeUndefined();
+    expect((t.ctx as { runner?: unknown }).runner).toBeUndefined();
+    expect(t.terminalBackends.get("remote-host/lab")).toBeDefined();
+    const listed = await t.routes.call("GET", "/hosts");
+    expect((listed.body as { hosts: Array<{ elevation: unknown }> }).hosts[0]!.elevation).toEqual({ on: false, canAsk: false });
+    // The agent is told root needs a newer Dispatch.
+    const note = t.terminalBackends.get("remote-host/lab")!.agentNote?.({ chatId: "chat-1" } as never) ?? "";
+    expect(note).toMatch(/Root: nothing can run as root on LAB: .*needs a newer Dispatch/);
   });
 });

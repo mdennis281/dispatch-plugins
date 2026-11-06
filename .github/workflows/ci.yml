@@ -33,9 +33,10 @@ env:
   # The Dispatch commit the SDK is built from. Pinned, so a change on Dispatch's
   # main can't turn this repository red on its own. Move it when a plugin needs
   # newer SDK types or hooks, and commit the rebuilt bundles in the same PR.
-  # da7d34d (#517): has #512 (plugin approval requests, E31) and #517
-  # (ctx.runner and its reserved ports), both of which remote-host declares.
-  DISPATCH_REF: da7d34d9b437897cfeb4173909251bbe710e45a9
+  # a9ec9ce (#518): has `optionalCapabilities`, where remote-host lists #512's
+  # `approvals` and #517's `runner`, so the SDK's schema and test context
+  # read that list.
+  DISPATCH_REF: a9ec9ce5a8b445e7463d91d35cdf49cc02c76c62
 
 jobs:
   plugins:

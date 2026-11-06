@@ -803,7 +803,7 @@ function rootNote(label: string, state: ElevationState | undefined): string {
   if (state === "unsupported") {
     return (
       `- Root: nothing can run as root on ${label}: \`sudo\` there fails, because this Dispatch can't ask the user for ` +
-      `approval. If something truly needs root, tell the user what and why.`
+      `approval (root with approval needs a newer Dispatch). If something truly needs root, tell the user what and why.`
     );
   }
   return `- Root: if elevation is set up on ${label}, ${how} If it isn't, \`sudo\` says so and fails: then tell the user.`;

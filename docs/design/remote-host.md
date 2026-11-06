@@ -114,7 +114,7 @@ through each plugin's rebuilt bundle.
       - Interrupting it withdraws the request.
       - Options sudo can't honour here (`-u other`, `-E`, `-s`, `-i`, `-n`) are refused with the reason.
     - **In the plugin** (elevation.ts):
-      1. `ctx.approvals.request` (core E31, Dispatch #512; remote-host ≥ 0.7.0 declares `approvals`) shows the exact command, its directory, the machine and the chat. Anything but `approved` is a no.
+      1. `ctx.approvals.request` (core E31, Dispatch #512; remote-host ≥ 0.8.1 lists `approvals` under `optionalCapabilities` (#518), so an older Dispatch loads it without elevation) shows the exact command, its directory, the machine and the chat. Anything but `approved` is a no.
       2. Only on approval does the plugin open a SEPARATE SSH connection, with a per-machine elevation key (`REMOTE_HOST_ELEVATE_KEY_<SLUG>`) that only the plugin holds.
       3. That key logs in as the hidden account `_dispatchelevate`. Its single key line is `restrict,command="/usr/local/libexec/dispatch-elevate",from="…"`.
       4. The root-owned helper takes `run <id> <base64 of NUL-ended cwd and argv>` from `SSH_ORIGINAL_COMMAND`, logs it to `/var/log/dispatch-elevate.log`, and runs it with `sudo -n` (that account's sudoers rule allows the helper only) in the cwd, with no stdin. It stops the command when the channel closes.
