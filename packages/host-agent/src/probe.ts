@@ -31,6 +31,15 @@ export interface GitCheck {
   error?: string;
 }
 
+/** Homebrew on the chat shell's PATH, and whether it runs. */
+export interface BrewCheck {
+  path: string;
+  /** `brew --version`'s first line. It answers even when brew runs nothing else. */
+  version: string | null;
+  /** Why every other brew command stops at once; absent when brew runs. */
+  blocked?: string;
+}
+
 export interface ProbeResult {
   agentVersion: string;
   node: string;
@@ -60,6 +69,8 @@ export interface ProbeResult {
    * Agents older than 0.2.2 don't report it.
    */
   syncGit?: GitCheck;
+  /** Homebrew, when the chat shell's PATH has it. Agents older than 0.2.4 don't report it. */
+  brew?: BrewCheck;
   /**
    * Every Dispatch instance with a namespace here: this one, the other one
    * sharing the machine, and any left behind (a data directory that moved, so
@@ -132,6 +143,40 @@ export async function checkGit(env: NodeJS.ProcessEnv, mac?: { developerDir: str
   return { path, ...dev, exitCode: r.code, version, ...(error ? { error } : {}) };
 }
 
+/**
+ * The `brew` on `env`'s PATH, if any, and whether it runs.
+ *
+ * On a Mac, `bin/brew` re-runs itself under `env -i` with a fixed list of
+ * variables, and DEVELOPER_DIR isn't on it. Then, before every command but a
+ * few (`--version`, `--prefix`, `list`), brew.sh runs `/usr/bin/xcrun --find
+ * clang`. That gets `xcode-select`'s developer directory whatever the shell
+ * set. When that is an Xcode whose license isn't accepted, brew stops with
+ * "You have not agreed to the Xcode license" (cvx-mac, 2026-11-05). The
+ * Command Line Tools' DEVELOPER_DIR, which saves git, can't save brew; only
+ * `xcode-select` can. So run brew's check the way brew does: with no
+ * DEVELOPER_DIR, and only when `xcode-select` chose a directory. brew skips the
+ * check when none is chosen, and the stub would open the install dialog.
+ * `xcrun` is a parameter for the tests.
+ */
+export async function checkBrew(
+  env: NodeJS.ProcessEnv,
+  mac?: { developerDir: string | null },
+  xcrun = "/usr/bin/xcrun",
+): Promise<BrewCheck | undefined> {
+  const path = which("brew", env.PATH);
+  if (!path) return undefined;
+  const v = await out(path, ["--version"], env);
+  const version = v.code === 0 && v.stdout ? v.stdout.split("\n")[0]!.trim() : null;
+  let blocked: string | undefined;
+  if (mac?.developerDir) {
+    const r = await out(xcrun, ["--find", "clang"], { HOME: env.HOME, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });
+    if (r.code !== 0 && /license/i.test(`${r.stderr}\n${r.stdout}`)) {
+      blocked = `Xcode's license isn't accepted (exit ${r.code}), and Homebrew ignores DEVELOPER_DIR, so it uses xcode-select's ${mac.developerDir}`;
+    }
+  }
+  return { path, version, ...(blocked ? { blocked } : {}) };
+}
+
 function osRelease(): ProbeResult["os"] {
   try {
     const kv = Object.fromEntries(
@@ -169,7 +214,7 @@ export async function probe(root?: string): Promise<ProbeResult> {
   const xcode = darwin && !wouldPrompt(which("xcodebuild", xenv.PATH), xenv, mac);
   const shellGit = wouldPrompt(which("git", env.PATH), env, mac) ? Promise.resolve(null) : firstLine("git", ["--version"], env);
 
-  const [name, version, build, consoleUser, git, node, pnpm, xcodebuild, firstLaunch, syncGit] = await Promise.all([
+  const [name, version, build, consoleUser, git, node, pnpm, xcodebuild, firstLaunch, syncGit, brew] = await Promise.all([
     darwin ? firstLine("sw_vers", ["-productName"], env) : Promise.resolve(null),
     darwin ? firstLine("sw_vers", ["-productVersion"], env) : Promise.resolve(null),
     darwin ? firstLine("sw_vers", ["-buildVersion"], env) : Promise.resolve(null),
@@ -180,6 +225,7 @@ export async function probe(root?: string): Promise<ProbeResult> {
     xcode ? firstLine("xcodebuild", ["-version"], xenv) : Promise.resolve(null),
     xcode ? out("xcodebuild", ["-checkFirstLaunchStatus"], xenv) : Promise.resolve(null),
     checkGit(forGit, mac),
+    checkBrew(env, mac),
   ]);
 
   let freeDiskBytes: number | null = null;
@@ -211,6 +257,7 @@ export async function probe(root?: string): Promise<ProbeResult> {
       xcodeFirstLaunchDone: firstLaunch ? firstLaunch.code === 0 : null,
     },
     syncGit,
+    ...(brew ? { brew } : {}),
     ...(root ? { instances: listInstances(root) } : {}),
   };
 }

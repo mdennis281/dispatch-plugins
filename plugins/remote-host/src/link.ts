@@ -25,7 +25,7 @@
  */
 import type { PluginContext, PluginLog, TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
 import { SshConnection, errText, pinnedHostKey, type ExecResult, type SshTarget } from "@dispatch-plugins/remote-core";
-import type { GcResult, ProbeResult } from "@dispatch-plugins/host-agent";
+import { CLT_DEVELOPER_DIR, type GcResult, type ProbeResult } from "@dispatch-plugins/host-agent";
 import type { ClientChannel } from "ssh2";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
 import { dialFamily, hostKeyAlgorithms, keySecretName, type HostConfig } from "./hosts.js";
@@ -677,6 +677,13 @@ export function statusFrom(probe: ProbeResult, lastSeenAt: number): TerminalBack
   }
   const git = gitIssue(probe);
   if (git) issues.push(git);
+  if (probe.brew?.blocked) {
+    // Someone installed Homebrew there to install tools with, and every brew command fails: say why, and the one fix.
+    issues.push(
+      `Homebrew (${probe.brew.path}) won't run: ${probe.brew.blocked}. Point xcode-select at the Command Line Tools ` +
+        `(sudo xcode-select -s ${CLT_DEVELOPER_DIR}), or accept the license (sudo xcodebuild -license accept)`,
+    );
+  }
   if (probe.loginEnvError) issues.push("login shell environment unreadable");
   return issues.length ? { state: "degraded", detail: issues.join("; "), lastSeenAt } : { state: "online", lastSeenAt };
 }

@@ -392,6 +392,7 @@ export class HostBackend implements TerminalBackend {
       `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, ` +
         `with PATH and locale from the login shell. On it: ${tools(probe)}.`,
       ...(probe?.platform === "darwin" ? [xcodeNote(probe)] : []),
+      ...(probe?.brew ? [brewNote(probe.brew)] : []),
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked ` +
         `files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts ` +
         `at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, ` +
@@ -521,6 +522,29 @@ function xcodeNote(probe: ProbeResult): string {
     );
   }
   return `- If Xcode's tools (xcodebuild, xcrun simctl) say they need Xcode, set its developer directory on that command: ${xcode}.`;
+}
+
+/**
+ * Homebrew, for the agent: where tools come from on a machine it can't sudo
+ * on. When brew is blocked (see host-agent's checkBrew), the agent is told
+ * not to work around it, because the fix needs the owner's password.
+ */
+function brewNote(brew: NonNullable<ProbeResult["brew"]>): string {
+  // The machine's own strings go into the prompt only when they look like what they claim to be.
+  const at = /^\/[\w./+-]+$/.test(brew.path) ? ` (\`${brew.path}\`)` : "";
+  if (brew.blocked) {
+    return (
+      `- Homebrew is installed there${at} but won't run: Xcode's license isn't accepted, and brew ignores DEVELOPER_DIR. ` +
+      `Don't try sudo or work around it; tell the user the Mac's owner has to run ` +
+      `\`sudo xcode-select -s ${CLT_DEVELOPER_DIR}\` once.`
+    );
+  }
+  const ver = token(brew.version?.replace(/^\D*(?=\d)/, ""));
+  return (
+    `- Homebrew${ver ? ` ${ver}` : ""} is installed there${at}: install a tool the machine lacks with ` +
+    `\`brew install <formula>\`. No sudo: never \`sudo brew\`. It stays installed for every chat using this machine, so ` +
+    `say what you installed.`
+  );
 }
 
 function tools(probe: ProbeResult | undefined): string {
