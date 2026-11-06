@@ -24,7 +24,7 @@
  */
 import type { PluginLog } from "@dispatch/plugin-sdk";
 import { checkElevate, ELEVATE_ID, type ElevateEndMsg, type ElevateRequestMsg } from "@dispatch-plugins/host-agent";
-import { SshConnection, errText, pinnedHostKey, type SshTarget } from "@dispatch-plugins/remote-core";
+import { SshConnection, channelExit, errText, pinnedHostKey, type SshTarget } from "@dispatch-plugins/remote-core";
 import type { ClientChannel } from "ssh2";
 import { dialFamily, hostKeyAlgorithms, type HostConfig } from "./hosts.js";
 
@@ -336,6 +336,13 @@ export class Elevation {
         ch.on("close", () => {
           abort.signal.removeEventListener("abort", onAbort);
           if (abort.signal.aborted) return resolve({ code: null, error: `cancelled while it ran; ${host.label} was told to stop it` });
+          // A quick command's exit can come before these listeners did (remote-core's channelExit).
+          const early = exited ? undefined : channelExit(ch);
+          if (early) {
+            exited = true;
+            code = early.code;
+            signal = early.signal ?? null;
+          }
           if (!exited) {
             return resolve({
               code: null,

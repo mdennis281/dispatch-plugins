@@ -20245,6 +20245,10 @@ function pinnedHostKey(fingerprints) {
   const want = new Set(typeof fingerprints === "string" ? [fingerprints] : fingerprints);
   return (key2) => want.has(hostKeyFingerprint(key2));
 }
+const exits = /* @__PURE__ */ new WeakMap();
+function channelExit(ch) {
+  return exits.get(ch);
+}
 class SshConnection extends EventEmitter {
   constructor(target) {
     super();
@@ -20360,7 +20364,11 @@ class SshConnection extends EventEmitter {
   channel(command2) {
     const client2 = this.requireClient();
     return new Promise((resolve2, reject) => {
-      client2.exec(command2, (err, ch) => err ? reject(err) : resolve2(ch));
+      client2.exec(command2, (err, ch) => {
+        if (err) return reject(err);
+        ch.once("exit", (code, signal) => exits.set(ch, { code, ...signal ? { signal } : {} }));
+        resolve2(ch);
+      });
     });
   }
   /** `exec`, throwing on a non-zero exit with stderr in the message. */
@@ -22271,6 +22279,12 @@ class Elevation {
         ch.on("close", () => {
           abort.signal.removeEventListener("abort", onAbort);
           if (abort.signal.aborted) return resolve2({ code: null, error: `cancelled while it ran; ${host.label} was told to stop it` });
+          const early = exited ? void 0 : channelExit(ch);
+          if (early) {
+            exited = true;
+            code = early.code;
+            signal = early.signal ?? null;
+          }
           if (!exited) {
             return resolve2({
               code: null,

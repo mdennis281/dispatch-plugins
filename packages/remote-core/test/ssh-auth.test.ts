@@ -11,7 +11,7 @@ import { utils } from "ssh2";
 import { lookup } from "node:dns/promises";
 import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { SshConnection, generateKeyPair, pinnedHostKey, publicKeyOf, scanHostKey } from "../src/index.js";
+import { SshConnection, channelExit, generateKeyPair, pinnedHostKey, publicKeyOf, scanHostKey } from "../src/index.js";
 import { startTestSshServer, type TestSshServer } from "./ssh-server.js";
 
 /** OpenSSH's own tool, where there is one, to check our keys against. Unix only: Windows' wants ACLs, not modes. */
@@ -156,6 +156,30 @@ describe("client keys", () => {
     ch.end();
     await new Promise((r) => ch.on("close", r));
     expect(Buffer.concat(got).toString()).toBe("echo:hi");
+    conn.close();
+  });
+
+  it("keeps a quick command's exit status for a caller that listens only after its await", async () => {
+    const kp = generateKeyPair("dispatch-remote-host:test@box");
+    const s = await server({
+      authorizedKeys: () => [kp.publicKey],
+      // The whole answer at once, as a command that is over before the client reads.
+      exec: ({ channel }) => {
+        channel.write("done\n");
+        channel.exit(7);
+        channel.end();
+      },
+    });
+    const conn = new SshConnection({ host: s.host, port: s.port, username: "dispatch", privateKey: kp.privateKey, hostVerifier: pinnedHostKey(s.fingerprint) });
+    await conn.connect(5_000);
+    const ch = await conn.channel("quick");
+    // Later than the exit event comes: ssh2 emitted it to nobody.
+    await new Promise((r) => setTimeout(r, 200));
+    const got: Buffer[] = [];
+    ch.on("data", (d: Buffer) => got.push(d));
+    await new Promise((r) => ch.on("close", r));
+    expect(Buffer.concat(got).toString()).toBe("done\n"); // the stream kept the output
+    expect(channelExit(ch)).toEqual({ code: 7 });
     conn.close();
   });
 
