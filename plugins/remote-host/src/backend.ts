@@ -45,6 +45,7 @@ import {
   type ProbeResult,
 } from "@dispatch-plugins/host-agent";
 import { errText, git } from "@dispatch-plugins/remote-core";
+import { guiNote } from "./gui.js";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
 import { withAbort, type HostLink } from "./link.js";
@@ -687,6 +688,7 @@ export class HostBackend implements TerminalBackend {
       ...(probe?.platform === "darwin" ? [xcodeNote(probe)] : []),
       ...(probe?.brew ? [brewNote(probe.brew)] : []),
       rootNote(host.label, this.elevation.state),
+      ...[guiNote(probe)].filter((n): n is string => !!n),
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked ` +
         `files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts ` +
         `at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, ` +

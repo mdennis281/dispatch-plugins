@@ -11,6 +11,7 @@ import { posix } from "node:path";
 import { captureLoginEnv, loginShell, shellEnv } from "./env.js";
 import { XCODE_DEVELOPER_DIR, gitEnv, hasCommandLineTools } from "./git-env.js";
 import { listInstances, type InstanceInfo } from "./lifecycle.js";
+import { guiState, type GuiState } from "./gui/client.js";
 import { AGENT_VERSION } from "./version.js";
 
 /** The git the plugin's own git work runs (sync, forget, gc), and whether it runs. */
@@ -91,6 +92,12 @@ export interface ProbeResult {
    * the instance got a new id). Older agents don't report it.
    */
   instances?: InstanceInfo[];
+  /**
+   * The GUI agent (Tier B), or why there is none: nobody logged in at the
+   * screen, not loaded, not answering. macOS only; agents older than 0.4.0
+   * don't report it.
+   */
+  gui?: GuiState;
 }
 
 function out(file: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs = 10_000): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -294,6 +301,7 @@ export async function probe(root?: string): Promise<ProbeResult> {
     checkGit(forGit, mac),
     checkBrew(env, mac),
   ]);
+  const gui = darwin && root ? await guiState({ root, home: homedir() }).catch(() => undefined) : undefined;
 
   let freeDiskBytes: number | null = null;
   try {
@@ -326,5 +334,6 @@ export async function probe(root?: string): Promise<ProbeResult> {
     syncGit,
     ...(brew ? { brew } : {}),
     ...(root ? { instances: listInstances(root) } : {}),
+    ...(gui ? { gui } : {}),
   };
 }

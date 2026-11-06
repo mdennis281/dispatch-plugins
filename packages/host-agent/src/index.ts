@@ -38,3 +38,6 @@ export { CLT_DEVELOPER_DIR, GIT_SH_ENV, XCODE_DEVELOPER_DIR, gitEnv, hasCommandL
 export type { ChatDir, ForgetResult, GcResult, InstanceInfo } from "./lifecycle.js";
 export type { RunEntry } from "./journal.js";
 export { AGENT_VERSION } from "./version.js";
+export type { GuiInstallResult, GuiState } from "./gui/client.js";
+export type { Dialog, GuiAgentStatus, SafariLease, SimLease } from "./gui/protocol.js";
+export { GUI_LABEL } from "./gui/launchd.js";
