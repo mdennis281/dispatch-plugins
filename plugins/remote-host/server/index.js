@@ -25926,7 +25926,7 @@ function rootNote(label, state) {
     return `- Root: nothing can run as root on ${label}: elevation isn't set up there, and \`sudo\` says so and fails. If something truly needs root, tell the user what and why; they can turn elevation on in Settings → Remote hosts.`;
   }
   if (state === "unsupported") {
-    return `- Root: nothing can run as root on ${label}: \`sudo\` there fails, because this Dispatch can't ask the user for approval. If something truly needs root, tell the user what and why.`;
+    return `- Root: nothing can run as root on ${label}: \`sudo\` there fails, because this Dispatch can't ask the user for approval (root with approval needs a newer Dispatch). If something truly needs root, tell the user what and why.`;
   }
   return `- Root: if elevation is set up on ${label}, ${how} If it isn't, \`sudo\` says so and fails: then tell the user.`;
 }

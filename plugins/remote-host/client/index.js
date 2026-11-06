@@ -248,8 +248,8 @@ function statusLine(v) {
 }
 function elevationLine(v) {
   const e = v.elevation;
-  if (!(e == null ? void 0 : e.on)) return "Root: off";
-  return e.canAsk ? "Root: with your approval, each time" : "Root: set up, but this Dispatch can't ask for approval yet, so it's refused";
+  if (!(e == null ? void 0 : e.on)) return e && !e.canAsk ? "Root: off (needs a newer Dispatch)" : "Root: off";
+  return e.canAsk ? "Root: with your approval, each time" : "Root: set up, but refused: asking for approval needs a newer Dispatch";
 }
 function probeLine(v) {
   const p = v.probe;

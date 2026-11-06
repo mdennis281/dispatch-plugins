@@ -50,9 +50,9 @@ export function displayCommand(argv: readonly string[]): string {
   return argv.map((a) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`)).join(" ");
 }
 
-// ---- core E31 (Dispatch #512). The manifest declares `approvals`, so a Dispatch without
-// it doesn't load this plugin at all; still looked up, not assumed, so a context without
-// it (a test, a host that withheld it) refuses instead of throwing.
+// ---- core E31 (Dispatch #512). `approvals` is an OPTIONAL capability (#518): a Dispatch
+// without it loads the plugin without `ctx.approvals`. So it is looked up, never assumed;
+// without it every elevation is refused with the reason (it needs a newer Dispatch).
 
 export interface ApprovalRequest {
   title: string;

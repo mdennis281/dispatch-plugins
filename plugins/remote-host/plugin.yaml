@@ -2,7 +2,7 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: remote-host
 name: Remote host
-version: 0.8.0
+version: 0.8.1
 dispatch: ">=1"
 description: >-
   Run a chat's managed terminals on your own machines over SSH. Each paired
@@ -31,10 +31,16 @@ capabilities:
   - kv
   - routes
   - ui
+# Used where this Dispatch has them, and ignored where it doesn't (#518): an
+# older Dispatch loads the plugin without them. A Dispatch older than #518
+# drops this whole list, so there neither is granted.
+optionalCapabilities:
   # Root with your approval: `sudo` in a chat shell on a machine asks you, on
-  # the same card a tool permission gets, before anything runs as root. A
-  # Dispatch older than plugin approval requests (#512) can't load this.
+  # the same card a tool permission gets, before anything runs as root
+  # (#512). Without it `sudo` there is refused, and the pane says Root needs
+  # a newer Dispatch.
   - approvals
   # The local ports Dispatch keeps for itself and its plugins' processes, so
   # a forwarded dev server never takes one (#517). Only the deny-list is read.
+  # Without it, Dispatch's own default ports are still kept clear.
   - runner
