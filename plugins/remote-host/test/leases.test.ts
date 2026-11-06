@@ -61,11 +61,16 @@ async function setup(runs: Run[] | undefined) {
   m.probe = { ...PROBE, gui: { state: "running", agent: AGENT_STATUS } };
   const t = createTestContext({ id: "remote-host", secrets: { REMOTE_HOST_KEY_STUDIO: "PRIVATE" }, instance: { id: INSTANCE } });
   const asked: Array<{ backend?: string }> = [];
+  const terminals = t.ctx.terminals as unknown as { runs?: (f?: { backend?: string }) => Run[]; onRun?: unknown };
   if (runs) {
-    (t.ctx.terminals as unknown as { runs: (f?: { backend?: string }) => Run[] }).runs = (f) => {
+    terminals.runs = (f) => {
       asked.push(f ?? {});
       return runs.filter((r) => !f?.backend || r.backend === f.backend);
     };
+  } else {
+    // An SDK new enough to fake E28 has it on the test context: take it away, as a Dispatch before it would.
+    delete terminals.runs;
+    delete terminals.onRun;
   }
   const r = new HostRegistry({ ctx: t.ctx, instanceId: INSTANCE, agent: AGENT, runtime: fakeRuntime(), connect: m.connect, timing: { tickMs: 10, helloEveryMs: 1_000, backoffMs: [20] } });
   r.sync([HOST]);
