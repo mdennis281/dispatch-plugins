@@ -21125,11 +21125,15 @@ main() {
   # 1. Root-owned all the way down: otherwise \`dispatch\` (an admin), or
   # anyone, could swap the helper for something else.
   local d
-  for d in / /usr /usr/local /private /private/var; do safe_dir "$d"; done
-  [ -e /usr/local/libexec ] && safe_dir /usr/local/libexec
-  if [ ! -e /usr/local/libexec ]; then
-    mkdir -m 755 /usr/local/libexec && chown root:wheel /usr/local/libexec || fail "can't create /usr/local/libexec"
-  fi
+  for d in / /usr /private /private/var; do safe_dir "$d"; done
+  # A fresh Mac may have neither yet (Homebrew on Apple silicon lives in /opt).
+  for d in /usr/local /usr/local/libexec; do
+    if [ -e "$d" ] || [ -L "$d" ]; then
+      safe_dir "$d"
+    else
+      mkdir -m 755 "$d" && chown root:wheel "$d" || fail "can't create $d"
+    fi
+  done
   step "nobody but root can write above $HELPER"
 
   # 2. The account. Its id is free as both a user and a group id, below 500

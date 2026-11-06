@@ -114,7 +114,7 @@ Once per machine, from Settings → Remote hosts → the machine's **Root: off �
 
 1. **Make the setup command.** Dispatch mints the machine's elevation key, keeps it in memory, and shows one line to paste at the machine. **Show what it runs** shows the script it unpacks.
 2. **Run it at the machine**, in Terminal, as an administrator: it asks for your password (`sudo`). It does this, and says so as it goes:
-   - It refuses unless `/`, `/usr`, `/usr/local` and `/usr/local/libexec` are owned by root and writable by nobody else, so no one else could swap the helper.
+   - It refuses unless `/`, `/usr`, `/usr/local` and `/usr/local/libexec` are owned by root and writable by nobody else, so no one else could swap the helper. It creates the last two (root's, 755) on a Mac that doesn't have them yet.
    - It creates a hidden account, `_dispatchelevate` (a free id below 500, no password, shell `/bin/bash`). Its home `/private/var/dispatch-elevate` and its one `authorized_keys` line are root's: `restrict,command="/usr/local/libexec/dispatch-elevate",from="<this computer's addresses>" <key>`. The `from=` list is the one the machine was paired with.
    - It installs the helper, `/usr/local/libexec/dispatch-elevate`, owned by root.
    - It writes `/etc/sudoers.d/dispatch-elevate`: that account, and nobody else, may run the helper as root without a password. The rule is checked with `visudo -cf` before it is installed, and the whole configuration with `visudo -c` after; if that fails, the rule is taken out again.
