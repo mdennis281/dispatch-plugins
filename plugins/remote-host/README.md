@@ -106,7 +106,7 @@ The account Dispatch logs in as has no sudo password, and never gets one. Instea
 - **Interrupting it** (Ctrl-C, the terminal ending) withdraws the card, or stops the command on the machine.
 - **What `sudo` can't do here** is refused with the reason: another user (`-u`), keeping the environment (`-E`), a root shell (`-s`, `-i`), `-n`. `-v` and `-k` succeed and do nothing.
 
-It needs a Dispatch that can ask for approval (core's approval requests). Without that, or until elevation is set up on the machine, `sudo` there says so and fails, and the agent is told to ask you instead.
+It needs a Dispatch with plugin approval requests (Dispatch #512): this version declares the `approvals` capability, so an older Dispatch won't load it. Until elevation is set up on the machine, `sudo` there says so and fails, and the agent is told to ask you instead.
 
 ### Setting it up
 

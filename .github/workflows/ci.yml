@@ -33,7 +33,8 @@ env:
   # The Dispatch commit the SDK is built from. Pinned, so a change on Dispatch's
   # main can't turn this repository red on its own. Move it when a plugin needs
   # newer SDK types or hooks, and commit the rebuilt bundles in the same PR.
-  DISPATCH_REF: b3e24d4b66c12f3639992836e64cbf07ff162db0
+  # 0adfcd2 (#515): has #512, plugin approval requests (E31), which remote-host declares.
+  DISPATCH_REF: 0adfcd2729261efaad30d9e3c1407b8d81ff1035
 
 jobs:
   plugins:

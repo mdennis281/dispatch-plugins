@@ -31,3 +31,7 @@ capabilities:
   - kv
   - routes
   - ui
+  # Root with your approval: `sudo` in a chat shell on a machine asks you, on
+  # the same card a tool permission gets, before anything runs as root. A
+  # Dispatch older than plugin approval requests (#512) can't load this.
+  - approvals

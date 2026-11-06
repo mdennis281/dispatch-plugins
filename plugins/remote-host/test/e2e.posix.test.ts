@@ -132,6 +132,11 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       id: "remote-host",
       secrets: { REMOTE_HOST_KEY_E2E: kp.privateKey, REMOTE_HOST_ELEVATE_KEY_E2E: elevateKp.privateKey },
       instance: { id: INSTANCE },
+      // Core's approval card (E31), with the test as the human.
+      approve: async (chatId, req) => {
+        approvalsAsked.push({ chatId, req: req as ApprovalRequest });
+        return { decision: await decide(req as ApprovalRequest), by: "Tester" };
+      },
     });
     registry = new HostRegistry({
       ctx: t.ctx,
@@ -145,12 +150,6 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
       timing: { tickMs: 100, helloEveryMs: 1_000, backoffMs: [100] },
       shell: { heartbeatMs: 200, stallAfterMs: 5_000, retryMs: [100] },
       portPollMs: 300,
-      approvals: {
-        request: async (chatId, req) => {
-          approvalsAsked.push({ chatId, req });
-          return { decision: await decide(req), by: "Tester", at: Date.now() };
-        },
-      },
     });
     const host: HostConfig = {
       slug: "e2e",

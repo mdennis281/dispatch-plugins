@@ -76,7 +76,7 @@ async function activate(opts: Parameters<typeof createTestContext>[0] = {}) {
 
 describe("the manifest", () => {
   it("asks for what the plugin uses and no more", () => {
-    expect(capabilities).toEqual(["terminals", "secrets", "secrets:write", "kv", "routes", "ui"]);
+    expect(capabilities).toEqual(["terminals", "secrets", "secrets:write", "kv", "routes", "ui", "approvals"]);
     expect(manifestSecrets).toEqual(["REMOTE_HOST_KEY_*", "REMOTE_HOST_ELEVATE_KEY_*"]);
     expect(manifest).toMatch(/^id: remote-host$/m);
     const pkg = JSON.parse(readFileSync(`${dir}/package.json`, "utf8")) as { version: string };
@@ -213,8 +213,8 @@ describe("routes", () => {
       secrets: { REMOTE_HOST_KEY_LAB: "k" },
     });
     const listed = await t.routes.call("GET", "/hosts");
-    // This Dispatch has no approvals API (core E31) yet.
-    expect((listed.body as { hosts: Array<{ elevation: unknown }> }).hosts[0]!.elevation).toEqual({ on: false, canAsk: false });
+    // Declared, so this Dispatch can ask (core E31); not set up on the machine yet.
+    expect((listed.body as { hosts: Array<{ elevation: unknown }> }).hosts[0]!.elevation).toEqual({ on: false, canAsk: true });
 
     const verifyFirst = await t.routes.call("POST", "/hosts/:slug/elevation/verify", { params: { slug: "lab" } });
     expect(verifyFirst.status).toBe(409);
@@ -236,7 +236,7 @@ describe("routes", () => {
     t.secrets.set("REMOTE_HOST_ELEVATE_KEY_LAB", "an elevation key");
     expect(((await t.routes.call("GET", "/hosts")).body as { hosts: Array<{ elevation: unknown }> }).hosts[0]!.elevation).toEqual({
       on: true,
-      canAsk: false,
+      canAsk: true,
     });
     const off = await t.routes.call("DELETE", "/hosts/:slug/elevation", { params: { slug: "lab" } });
     expect(off.status).toBe(200);

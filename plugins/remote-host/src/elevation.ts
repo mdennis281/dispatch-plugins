@@ -50,7 +50,9 @@ export function displayCommand(argv: readonly string[]): string {
   return argv.map((a) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`)).join(" ");
 }
 
-// ---- core E31, feature-detected: older Dispatches have no `ctx.approvals`.
+// ---- core E31 (Dispatch #512). The manifest declares `approvals`, so a Dispatch without
+// it doesn't load this plugin at all; still looked up, not assumed, so a context without
+// it (a test, a host that withheld it) refuses instead of throwing.
 
 export interface ApprovalRequest {
   title: string;
