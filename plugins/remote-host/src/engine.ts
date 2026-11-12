@@ -49,6 +49,7 @@ import {
   type ProbeResult,
 } from "@dispatch-plugins/host-agent";
 import { errText, git } from "@dispatch-plugins/remote-core";
+import { desktopOf, guiNote } from "./gui.js";
 import type { HostConfig } from "./hosts.js";
 import { agentCommand, type HostPaths } from "./install.js";
 import { withAbort, type MachineLink } from "./link.js";
@@ -110,6 +111,8 @@ export interface EngineDeps {
   where?: (backend: string) => string;
   /** Tests: how long a pull-back waits for a run elsewhere in the files. */
   lockWaitMs?: number;
+  /** Overrides for tests: how often the Safari lease is kept. */
+  leaseEveryMs?: number;
   /** `ctx.approvals`, when this Dispatch has it. Without it nothing is ever elevated. */
   approvals?: Approvals;
   /** The agent has remote-host's own tools (tools/, `ctx.tools`), so its note names them. */
@@ -153,6 +156,8 @@ export class MachineEngine {
    */
   private readonly pendingDeletes = new Set<string>();
   private forgetting = false;
+  private leaseTimer?: ReturnType<typeof setInterval>;
+  private warnedNoRuns = false;
   /** Running commands as root there, with the user's approval (elevation.ts). */
   readonly elevation: Elevation;
   /** MCP servers running there for chats (core's E7 placement), by chat + server name. */
@@ -185,6 +190,8 @@ export class MachineEngine {
       ...(deps.elevationConnect ? { connect: deps.elevationConnect } : {}),
     });
     void this.elevation.refresh();
+    this.leaseTimer = setInterval(() => void this.keepLeases(), deps.leaseEveryMs ?? 5 * 60_000);
+    this.leaseTimer.unref?.();
     this.ports = new PortForwards({
       list: () => link.agent<Attribution>(["ports", "--instance", instanceId], 30_000),
       dial: (host, port) => link.tcp(host, port),
@@ -334,8 +341,14 @@ export class MachineEngine {
    */
   async spawnProcess(info: TerminalProcessSpawnInfo): Promise<TerminalProcessHandle> {
     const chatId = assertId("chat", info.chatId);
-    // Refused before anything is installed or started: a headed browser, WebKit.
-    const plan = planProcess(info, { label: this.label, desktop: false, root: rootLogin(this.deps.link.probe, this.spec.host().user) });
+    // Refused before anything is installed or started: a headed browser, WebKit, with no desktop session there.
+    const desk = desktopOf(this.deps.link.probe);
+    const plan = planProcess(info, {
+      label: this.label,
+      desktop: desk.ok,
+      ...(desk.why ? { noDesktop: desk.why } : {}),
+      root: rootLogin(this.deps.link.probe, this.spec.host().user),
+    });
     const linked = await this.deps.link.ready(info.signal);
     await this.markServed(chatId);
     const paths = linked.paths;
@@ -357,7 +370,9 @@ export class MachineEngine {
       ...(prov?.browsersPath ? { browsersPath: prov.browsersPath } : {}),
       ...(prov?.executablePath ? { executablePath: prov.executablePath } : {}),
     };
-    const exec = plan.argv(pp);
+    // In the desktop session: the same session here, running `dispatch-gui run --stdin`, which starts the
+    // server in the login session, passes its stdio through, and ends it when it ends.
+    const exec = plan.desktop ? [paths.node, paths.agent, "dispatch-gui", "run", "--stdin", "--", ...plan.argv(pp)] : plan.argv(pp);
     const env = plan.env(pp);
     const cwd = plan.ownRoots ? dir : where.cwd;
 
@@ -478,6 +493,37 @@ export class MachineEngine {
   /** Done with the machine: its backend was unregistered (the machine was removed, or the plugin is going down). */
   dispose(): void {
     this.ports.dispose();
+    if (this.leaseTimer) clearInterval(this.leaseTimer);
+    this.leaseTimer = undefined;
+  }
+
+  /**
+   * Real Safari is one chat's at a time, leased for 30 minutes from the
+   * chat's last `dispatch-gui safari`. A UI test can run longer than that, so
+   * while the chat holding it has a command running here, the lease is
+   * renewed (every 5 min, well inside its 30). Never released for having no
+   * run: a WebDriver session spans several commands. On a Dispatch that can't
+   * say what runs where (before core E28), say so once, when this
+   * Dispatch actually holds the lease.
+   */
+  async keepLeases(): Promise<void> {
+    const g = this.deps.link.probe?.gui;
+    if (g?.state !== "running" || !this.deps.link.connected) return;
+    if (!this.deps.runs) {
+      if (g.agent.safari?.instance === this.deps.instanceId && !this.warnedNoRuns) {
+        this.warnedNoRuns = true;
+        this.deps.log.warn(
+          `remote-host ${this.spec.key}: this Dispatch can't report runs in flight (ctx.terminals.runs, core E28), ` +
+            `so a Safari lease on ${this.label} lapses 30 min after its last \`dispatch-gui safari\`, even mid-test; update Dispatch`,
+        );
+      }
+      return;
+    }
+    const chats = [...new Set(this.deps.runs.runs().filter((r) => r.backend === this.spec.backendId).map((r) => r.chatId))].filter((c) => ID.test(c));
+    if (!chats.length) return;
+    await this.deps.link
+      .agent(["gui", "renew", "--instance", this.deps.instanceId, "--chats", chats.join(",")], 30_000)
+      .catch((err: unknown) => this.deps.log.info(`remote-host ${this.spec.key}: keeping the Safari lease: ${errText(err)}`));
   }
 
   /**
@@ -799,6 +845,7 @@ export function machineNote(n: MachineNoteInput): string {
     ...(probe?.platform === "darwin" ? [xcodeNote(probe)] : []),
     ...(probe?.brew && n.user && brewUsable(probe, n.user) ? [brewNote(probe.brew)] : []),
     root,
+    ...[guiNote(probe)].filter((g): g is string => !!g),
     `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked ` +
       `files too, but not ignored ones) is copied to this chat's own checkout there, under ${n.where}, and the shell starts ` +
       `at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, ` +
@@ -815,7 +862,7 @@ export function machineNote(n: MachineNoteInput): string {
       `another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never ` +
       `the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started ` +
       `from this chat's terminals; nothing else on the machine is.`,
-    mcpNote(label, n.mcpLocalDir),
+    mcpNote(label, n.mcpLocalDir, desktopOf(probe).ok),
     ...(n.agentTools
       ? [
           `- To bring here what the sync doesn't (build output, an .xcresult, a screenshot, a test report, a file outside ` +
@@ -1009,7 +1056,7 @@ function rootNote(label: string, state: ElevationState | undefined, mac: boolean
  * MCPs follow the chat's terminal), for the agent. Core's own "Where your MCP
  * servers run" section says WHICH run there; this says what that means.
  */
-function mcpNote(label: string, localDir: string): string {
+function mcpNote(label: string, localDir: string, desktop: boolean): string {
   return (
     `- Browser tools that run on ${label} (core lists which, under "Where your MCP servers run") drive a headless ` +
     `Chromium (Chrome for Testing) THERE, not a browser on this computer. In them \`localhost\` is the machine: open a dev ` +
@@ -1017,8 +1064,11 @@ function mcpNote(label: string, localDir: string): string {
     `one. Files they save (screenshots, snapshots, traces) are copied back here, under ${localDir}, and their results name ` +
     `the copies; a path you give one to save to is where its copy lands. A local file you pass to an upload, or open as a ` +
     `file:// page, is copied there first (just that file, not the folder around it). The browser sees the chat's files there ` +
-    `as of the last terminal command's sync. Headed browsers and WebKit need a desktop session on ${label}, which isn't set ` +
-    `up yet: they fail and say so. Their first use there installs the browser, which takes a minute or two.`
+    `as of the last terminal command's sync. ` +
+    (desktop
+      ? `Headed browsers and WebKit run in ${label}'s desktop session (nobody here sees their windows). `
+      : `Headed browsers and WebKit need a desktop session on ${label}, which it doesn't have now: they fail and say so. `) +
+    `A browser's first use there installs it, which takes a minute or two.`
   );
 }
 
