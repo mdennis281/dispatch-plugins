@@ -76,7 +76,7 @@ function ContainersPage({ host }: { host: ClientHost }) {
       {view && (
         <>
           <div className="flex items-center gap-2 text-xs">
-            <span className={`inline-block h-2 w-2 rounded-full ${TONE[view.status.state] ?? "bg-warn"}`} />
+            <span className={`inline-block shrink-0 rounded-full ${TONE[view.status.state] ?? "bg-warn"}`} style={{ width: 8, height: 8 }} />
             <span className="text-primary">{view.status.state === "online" ? "Terminals can run" : "Terminals are refused"}</span>
             {view.status.detail && <span className="text-muted">— {view.status.detail}</span>}
           </div>

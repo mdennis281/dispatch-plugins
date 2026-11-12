@@ -67,7 +67,7 @@ function ContainersPage({ host }) {
     view === void 0 && !error && /* @__PURE__ */ jsx("p", { className: "text-xs text-muted", children: "Loading…" }),
     view && /* @__PURE__ */ jsxs(Fragment, { children: [
       /* @__PURE__ */ jsxs("div", { className: "flex items-center gap-2 text-xs", children: [
-        /* @__PURE__ */ jsx("span", { className: `inline-block h-2 w-2 rounded-full ${TONE[view.status.state] ?? "bg-warn"}` }),
+        /* @__PURE__ */ jsx("span", { className: `inline-block shrink-0 rounded-full ${TONE[view.status.state] ?? "bg-warn"}`, style: { width: 8, height: 8 } }),
         /* @__PURE__ */ jsx("span", { className: "text-primary", children: view.status.state === "online" ? "Terminals can run" : "Terminals are refused" }),
         view.status.detail && /* @__PURE__ */ jsxs("span", { className: "text-muted", children: [
           "— ",
