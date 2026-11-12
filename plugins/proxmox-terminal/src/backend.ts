@@ -29,7 +29,7 @@ import { LegacyRescue, sshRescueRemote, type RescueJob, type RescueRemote, type 
 import type { MachineLease, ProvisionedBackendOptions, ProvisionRequest } from "@dispatch-plugins/remote-host-api";
 import { Proxmox, ProxmoxError, sleep } from "./proxmox.js";
 import { RemoteHostLink, type PluginDependencies } from "./remote-host-link.js";
-import type { Settings } from "./settings.js";
+import { templateHostKeys, type Settings } from "./settings.js";
 
 export type { ShutdownReason };
 export { BACKEND_ID };
@@ -240,7 +240,7 @@ export class ProxmoxTerminal {
     legacy.sort((a, b) => a.vmid - b.vmid);
     return {
       status: this.status(),
-      hostKeyPinned: !!s.templateHostKey,
+      hostKeyPinned: templateHostKeys(s).length > 0,
       templateVmid: s.templateVmid,
       range: {
         start: s.vmidStart,
@@ -333,6 +333,7 @@ export class ProxmoxTerminal {
    */
   provision(req: ProvisionRequest): Promise<MachineLease> {
     const s = this.deps.settings();
+    const pins = templateHostKeys(s);
     return this.life.lease(req.chatId, async (chat) => {
       const up = await this.provider.ensureUp(chat, req.signal);
       const ref: ContainerRef = { vmid: up.vmid, hostname: up.hostname };
@@ -353,7 +354,7 @@ export class ProxmoxTerminal {
         addresses: [up.ip],
         user: s.sshUser,
         auth: () => this.auth(),
-        hostKey: s.templateHostKey ? { pin: [s.templateHostKey] } : { trust: "provisioner" },
+        hostKey: pins.length ? { pin: pins } : { trust: "provisioner" },
         hostname: up.hostname,
         notices,
       } satisfies MachineLease;
@@ -399,14 +400,15 @@ export class ProxmoxTerminal {
 
   private async rescueRemote(ip: string, s: Settings): Promise<RescueRemote> {
     const auth = await this.auth();
+    const pins = templateHostKeys(s);
     if (this.deps.rescueRemote) return this.deps.rescueRemote(ip, s, auth);
     const conn = new SshConnection({
       host: ip,
       username: s.sshUser,
       ...auth,
-      hostVerifier: s.templateHostKey ? pinnedHostKey([s.templateHostKey]) : trustProvisioner(),
+      hostVerifier: pins.length ? pinnedHostKey(pins) : trustProvisioner(),
       // A host offers one key per type: ask for the type the pin is (the template's ed25519 key).
-      ...(s.templateHostKey ? { algorithms: { serverHostKey: ["ssh-ed25519"] } } : {}),
+      ...(pins.length ? { algorithms: { serverHostKey: ["ssh-ed25519"] } } : {}),
     });
     await conn.connect(60_000);
     return { ...sshRescueRemote(conn), close: () => conn.close() };

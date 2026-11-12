@@ -21,7 +21,11 @@ export interface Settings {
   sshKeyPath: string;
   /** Only used to rescue checkouts made before 0.2. */
   workDir: string;
-  /** The template's SSH host key (`SHA256:…`), which every clone shares. Empty: trust the Proxmox API. */
+  /**
+   * The template's SSH host key (`SHA256:…`), which every clone shares. Several,
+   * separated by spaces or commas, while clones of an older template live on.
+   * Empty: trust the Proxmox API. Read it through {@link templateHostKeys}.
+   */
   templateHostKey: string;
   spawnTimeoutSeconds: number;
   caCert: string;
@@ -48,6 +52,11 @@ export const DEFAULTS: Settings = {
   caCert: "",
   insecureTls: false,
 };
+
+/** The pinned host key fingerprints; none means the Proxmox API is trusted. */
+export function templateHostKeys(s: Pick<Settings, "templateHostKey">): string[] {
+  return s.templateHostKey.split(/[\s,]+/).filter(Boolean);
+}
 
 /** Merge what is stored over the defaults, coercing the obvious mistakes. */
 export function readSettings(raw: Record<string, unknown>): Settings {

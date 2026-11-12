@@ -53,7 +53,7 @@
     "templateHostKey": {
       "type": "string",
       "title": "Template SSH host key",
-      "description": "The template's ed25519 host key fingerprint (SHA256:…, from `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on it), which every linked clone shares; remote-host pins it. Password logins need it. Leave empty to trust whatever answers at the address the Proxmox API gives (Settings → Proxmox containers warns)."
+      "description": "The template's ed25519 host key fingerprint (SHA256:…, from `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on it), which every linked clone shares; remote-host pins it. Moving to a new template with its own key? List both, separated by a space, until the old template's clones are gone. Password logins need it. Leave empty to trust whatever answers at the address the Proxmox API gives (Settings → Proxmox containers warns)."
     },
     "spawnTimeoutSeconds": {
       "type": "integer",

@@ -65,6 +65,12 @@ describe("with remote-host", () => {
     expect(rh.leases[0]!.hostKey).toEqual({ pin: ["SHA256:abc"] });
   });
 
+  it("pins every key listed: a new template's and the old one's, while its clones live on", async () => {
+    const { b, rh } = terminal(fakeProxmox(), undefined, { templateHostKey: " SHA256:new, SHA256:old\n" });
+    await b.forwarder.spawn(spawnInfo());
+    expect(rh.leases[0]!.hostKey).toEqual({ pin: ["SHA256:new", "SHA256:old"] });
+  });
+
   it("registers with the caller's id and io, and forwards beforeRun, touching the unused clock", async () => {
     const f = fakeProxmox({ 9002: ours("c1", "stopped") });
     const { b, rh, kvNow } = terminal(f, { instance: INSTANCE, "chat:c1": rec(9002, { layout: 2, lastUsedAt: 1 }) });

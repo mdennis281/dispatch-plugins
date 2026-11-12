@@ -21811,6 +21811,32 @@ function safeState(deps) {
     return void 0;
   }
 }
+const DEFAULTS = {
+  apiUrl: "",
+  node: "pve",
+  templateVmid: 9e3,
+  pool: "dispatch-terminals",
+  bridge: "vmbr0",
+  cores: 2,
+  memory: 4096,
+  vmidStart: 9001,
+  vmidEnd: 9099,
+  idleStopMinutes: 30,
+  destroyUnusedDays: 7,
+  sshUser: "root",
+  sshKeyPath: "",
+  workDir: "/root/work",
+  templateHostKey: "",
+  spawnTimeoutSeconds: 240,
+  caCert: "",
+  insecureTls: false
+};
+function templateHostKeys(s) {
+  return s.templateHostKey.split(/[\s,]+/).filter(Boolean);
+}
+function readSettings(raw) {
+  return coerceSettings(DEFAULTS, raw);
+}
 const LAYOUT = 2;
 const DESTROY_WAIT_MS = 45e3;
 const PROBE_MS = 3e4;
@@ -21944,7 +21970,7 @@ class ProxmoxTerminal {
     legacy.sort((a, b) => a.vmid - b.vmid);
     return {
       status: this.status(),
-      hostKeyPinned: !!s.templateHostKey,
+      hostKeyPinned: templateHostKeys(s).length > 0,
       templateVmid: s.templateVmid,
       range: {
         start: s.vmidStart,
@@ -22030,6 +22056,7 @@ class ProxmoxTerminal {
    */
   provision(req) {
     const s = this.deps.settings();
+    const pins = templateHostKeys(s);
     return this.life.lease(req.chatId, async (chat) => {
       const up = await this.provider.ensureUp(chat, req.signal);
       const ref = { vmid: up.vmid, hostname: up.hostname };
@@ -22049,7 +22076,7 @@ class ProxmoxTerminal {
         addresses: [up.ip],
         user: s.sshUser,
         auth: () => this.auth(),
-        hostKey: s.templateHostKey ? { pin: [s.templateHostKey] } : { trust: "provisioner" },
+        hostKey: pins.length ? { pin: pins } : { trust: "provisioner" },
         hostname: up.hostname,
         notices
       };
@@ -22090,14 +22117,15 @@ class ProxmoxTerminal {
   }
   async rescueRemote(ip, s) {
     const auth = await this.auth();
+    const pins = templateHostKeys(s);
     if (this.deps.rescueRemote) return this.deps.rescueRemote(ip, s, auth);
     const conn = new SshConnection({
       host: ip,
       username: s.sshUser,
       ...auth,
-      hostVerifier: s.templateHostKey ? pinnedHostKey([s.templateHostKey]) : trustProvisioner(),
+      hostVerifier: pins.length ? pinnedHostKey(pins) : trustProvisioner(),
       // A host offers one key per type: ask for the type the pin is (the template's ed25519 key).
-      ...s.templateHostKey ? { algorithms: { serverHostKey: ["ssh-ed25519"] } } : {}
+      ...pins.length ? { algorithms: { serverHostKey: ["ssh-ed25519"] } } : {}
     });
     await conn.connect(6e4);
     return { ...sshRescueRemote(conn), close: () => conn.close() };
@@ -22445,29 +22473,6 @@ function defineRoutes(ctx, t) {
       return { ok: true };
     }));
   };
-}
-const DEFAULTS = {
-  apiUrl: "",
-  node: "pve",
-  templateVmid: 9e3,
-  pool: "dispatch-terminals",
-  bridge: "vmbr0",
-  cores: 2,
-  memory: 4096,
-  vmidStart: 9001,
-  vmidEnd: 9099,
-  idleStopMinutes: 30,
-  destroyUnusedDays: 7,
-  sshUser: "root",
-  sshKeyPath: "",
-  workDir: "/root/work",
-  templateHostKey: "",
-  spawnTimeoutSeconds: 240,
-  caCert: "",
-  insecureTls: false
-};
-function readSettings(raw) {
-  return coerceSettings(DEFAULTS, raw);
 }
 const TOKEN = "PROXMOX_TERMINAL_API_TOKEN";
 const KEY = "PROXMOX_TERMINAL_SSH_KEY";
