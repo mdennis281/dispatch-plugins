@@ -6,7 +6,7 @@
  */
 import { EventEmitter } from "node:events";
 import { createTestContext } from "@dispatch/plugin-sdk/testing";
-import { RemoteChats, type Provider, type SshConnection } from "../src/index.js";
+import { MachineLifecycle, RemoteChats, type Provider, type SshConnection } from "../src/index.js";
 
 /** A shell handle that records what was written to it. */
 export class FakeShell extends EventEmitter {
@@ -157,4 +157,30 @@ export function chats(
   return { c, t, published, kvNow: () => Object.fromEntries(t.kv) as Record<string, unknown> };
 }
 
-export const rec = (id: number, extra: Record<string, unknown> = {}) => ({ id, createdAt: 1, lastUsedAt: Date.now(), ...extra });
+/**
+ * The same, over MachineLifecycle: `spawn` is a lease whose bring-up is the
+ * provider's, then fails the way a spawn in a non-repo cwd does. Lets the
+ * lifecycle tests run unchanged against both.
+ */
+export function lifeChats(
+  f: ReturnType<typeof fakeProvider>,
+  kv: Record<string, unknown> = { instance: INSTANCE },
+  policy: Partial<{ idleStopMinutes: number; destroyUnusedDays: number; workDir: string }> = {},
+) {
+  const t = createTestContext({ id: "test-remote", kv });
+  const life = new MachineLifecycle<Ref>({
+    provider: f.provider,
+    kv: t.ctx.kv,
+    log: t.ctx.log,
+    policy: () => ({ idleStopMinutes: 30, destroyUnusedDays: 7, ...policy }),
+  });
+  const c = Object.assign(life, {
+    spawn: async (info: { chatId: string; signal: AbortSignal }) => {
+      await life.lease(info.chatId, (chat) => f.provider.bringUp(chat, info.signal));
+      throw new Error("not a git repository");
+    },
+  });
+  return { c, t, published: [], kvNow: () => Object.fromEntries(t.kv) as Record<string, unknown> };
+}
+
+export const rec =(id: number, extra: Record<string, unknown> = {}) => ({ id, createdAt: 1, lastUsedAt: Date.now(), ...extra });

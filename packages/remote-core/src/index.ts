@@ -16,14 +16,16 @@ export { copyIndex, git, localHas, pack, remotePathFor, repoInfo, snapshot, type
 export { RemoteCheckouts, githubHttps, type RemoteCheckoutsOptions } from "./sync/remote-repo.js";
 export { PortWatch, parseListeners, type PortWatchOptions } from "./ports/watch.js";
 export {
-  RemoteChats,
+  MachineLifecycle,
   type ChatRecord,
-  type ChatState,
+  type DetachReason,
+  type LeaseChat,
+  type MachineLifecycleOptions,
+  type MachineProvider,
   type MachineRef,
   type PendingDestroy,
-  type Provider,
-  type RemoteChatsOptions,
   type ShutdownReason,
-} from "./lifecycle/chats.js";
+} from "./lifecycle/machines.js";
+export { RemoteChats, type ChatState, type Provider, type RemoteChatsOptions } from "./lifecycle/chats.js";
 export { errText, withDeadline } from "./lifecycle/deadline.js";
 export { coerceSettings, normaliseKey, sshAuthFrom } from "./plugin/helpers.js";
