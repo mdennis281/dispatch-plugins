@@ -182,6 +182,18 @@ describe("a container re-created under the same vmid", () => {
   });
 });
 
+describe("a started container's sshd", () => {
+  it("is waited for before remote-host is handed the container", async () => {
+    const f = fakeProxmox();
+    const { b, rh } = terminal(f);
+    let asks = 0;
+    (b.provider as unknown as { deps: { sshReady: () => Promise<boolean> } }).deps.sshReady = async () => ++asks >= 2;
+    await b.forwarder.spawn({ chatId: "c1", name: "main", cwd: "/w", worktreePath: "/w", repoPath: "/w", signal: new AbortController().signal });
+    expect(asks).toBe(2);
+    expect(rh.leases).toHaveLength(1);
+  });
+});
+
 describe("Destroy without rescue", () => {
   it("destroys the container and forgets it; the chat's next spawn clones a new one", async () => {
     const f = fakeProxmox({ 9002: ours("c1", "stopped") });
@@ -236,6 +248,7 @@ describe("routes", () => {
       token: async () => "u@pve!t=x",
       sshAuth: async () => ({ privateKey: "k" }),
       proxmox: () => f.api,
+      sshReady: async () => true,
       dependencies: () => t.ctx.dependencies,
       rescueRemote: emptyContainer,
     });

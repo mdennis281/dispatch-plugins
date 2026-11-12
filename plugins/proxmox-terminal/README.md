@@ -42,9 +42,9 @@ pct exec 9000 -- bash -c '
   apt-get install -y -qq nodejs
   corepack enable && corepack prepare pnpm@latest --activate
   git config --system safe.directory "*"
-  mkdir -p /root/work
   apt-get clean; rm -rf /var/lib/apt/lists/*
   truncate -s 0 /etc/machine-id   # so clones do not share a DHCP identity
+  rm -f /var/lib/dhcp/*.leases    # nor all ask for the address it had
 '
 pct shutdown 9000
 pct template 9000
@@ -60,7 +60,7 @@ pct exec 9000 -- ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub   # 256 SHA256
 
 Moving to a new template that has its own host key? List both fingerprints, separated by a space, until the old template's clones are gone: those keep the old key. Left blank, a container is trusted because the Proxmox API gave its address, and the Settings pane warns about it. Either way remote-host also writes a token on each container at its first connect and checks it on every later one, so a container at another chat's old address is refused.
 
-**Optional, faster first commands.** On a container's first connect remote-host installs its own Node runtime (about 50 MB) and dispatch-host under `/root/.dispatch-host`, and a chat's first browser use installs Chromium's system libraries with apt. Both can be baked into the template instead: install them in a container made from it, then make *that* the template (never change a template that has linked clones). Leave out `/root/.dispatch-host/incarnation` and the per-instance directories; only `runtime/` and `agent/` belong in a template.
+**Optional, faster first commands.** On a container's first connect remote-host installs its own Node runtime (about 50 MB) and dispatch-host under `/root/.dispatch-host`, and a chat's first browser use installs Chromium's system libraries with apt. Both can be baked into the template instead: install them in a container made from it, then make *that* the template (never change a template that has linked clones). Leave out `/root/.dispatch-host/incarnation` and the per-instance directories; only `runtime/` and `agent/` belong in a template. Before converting, also `truncate -s 0 /etc/machine-id` and `rm -f /var/lib/dhcp/*.leases` again: a lease left in the template makes every clone ask for the same address.
 
 ## 2. A least-privilege API token
 

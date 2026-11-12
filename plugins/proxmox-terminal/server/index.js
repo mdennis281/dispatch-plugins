@@ -3,7 +3,7 @@ import { dirname as __pt_dirname } from "node:path";
 const __filename = __pt_fileURLToPath(import.meta.url);
 const __dirname = __pt_dirname(__filename);
 import { EventEmitter } from "node:events";
-import { createServer } from "node:net";
+import { createServer, connect } from "node:net";
 import require$$0$4 from "net";
 import require$$1$1 from "stream";
 import require$$0$3 from "path";
@@ -22309,6 +22309,7 @@ class ProxmoxProvider {
       await api.waitTask(s.node, upid, 6e4, signal);
     }
     const ip = await this.waitForIp(api, s.node, vmid, signal);
+    await this.waitForSsh(ip, vmid, signal);
     return { vmid, hostname, ip, created };
   }
   /** Linked-clone the template into a free vmid, size it, and remember it. */
@@ -22343,6 +22344,24 @@ class ProxmoxProvider {
     throw new Error(
       `no free vmid in ${s.vmidStart}-${s.vmidEnd}` + (lastErr instanceof Error ? ` (last error: ${lastErr.message})` : "")
     );
+  }
+  /**
+   * Until the container's sshd answers, up to {@link SSH_WAIT_MS}. A container
+   * that just booted has its address before sshd listens, and a reused address
+   * can sit in this computer's ARP cache under the last container's MAC for a
+   * while (seen live on node g: remote-host's one connect then got "no answer"
+   * and the command failed). Retrying a TCP connect here rides both out.
+   * Still not answering: go on, and remote-host says why.
+   */
+  async waitForSsh(ip, vmid, signal) {
+    const ready = this.deps.sshReady ?? tcpReady;
+    const until = Date.now() + SSH_WAIT_MS;
+    while (Date.now() < until && !signal.aborted) {
+      if (await ready(ip, signal)) return;
+      await sleep(1e3, signal).catch(() => {
+      });
+    }
+    this.log.warn(`container ${vmid}: nothing answers on ${ip}:22 after ${SSH_WAIT_MS / 1e3}s; handing it over anyway`);
   }
   async waitForIp(api, node, vmid, signal) {
     const until = Date.now() + 6e4;
@@ -22447,6 +22466,22 @@ class ProxmoxProvider {
   }
 }
 const GONE = /does not exist|no such|not found/i;
+const SSH_WAIT_MS = 45e3;
+function tcpReady(ip, signal) {
+  return new Promise((resolve) => {
+    const sock = connect({ host: ip, port: 22, timeout: 3e3 });
+    const done = (ok) => {
+      sock.destroy();
+      signal.removeEventListener("abort", abort);
+      resolve(ok);
+    };
+    const abort = () => done(false);
+    signal.addEventListener("abort", abort, { once: true });
+    sock.once("connect", () => done(true));
+    sock.once("timeout", () => done(false));
+    sock.once("error", () => done(false));
+  });
+}
 function inRange(s, vmid) {
   return vmid >= s.vmidStart && vmid <= s.vmidEnd && vmid !== s.templateVmid;
 }

@@ -12,6 +12,7 @@
  * brings a chat's container up, rescues a pre-0.2 checkout once
  * (legacy-rescue.ts), and hands remote-host a lease to connect with.
  */
+import { connect as tcpConnect } from "node:net";
 import type { PluginContext } from "@dispatch/plugin-sdk";
 import {
   MachineLifecycle,
@@ -107,6 +108,8 @@ export interface BackendDeps {
   statusChanged?: () => void;
   /** Injectable for tests. */
   proxmox?: (s: Settings, token: string) => Proxmox;
+  /** Does `ip`'s port 22 accept a connection yet? Default: a TCP connect. Injectable for tests. */
+  sshReady?: (ip: string, signal: AbortSignal) => Promise<boolean>;
   /** A shell on a container for the legacy rescue. Default: SSH with the same key. Injectable for tests. */
   rescueRemote?: (host: string, s: Settings, auth: SshAuth) => Promise<RescueRemote>;
 }
@@ -614,6 +617,7 @@ export class ProxmoxProvider implements MachineProvider<ContainerRef> {
       await api.waitTask(s.node, upid, 60_000, signal);
     }
     const ip = await this.waitForIp(api, s.node, vmid, signal);
+    await this.waitForSsh(ip, vmid, signal);
     return { vmid, hostname, ip, created };
   }
 
@@ -659,6 +663,24 @@ export class ProxmoxProvider implements MachineProvider<ContainerRef> {
     throw new Error(
       `no free vmid in ${s.vmidStart}-${s.vmidEnd}` + (lastErr instanceof Error ? ` (last error: ${lastErr.message})` : ""),
     );
+  }
+
+  /**
+   * Until the container's sshd answers, up to {@link SSH_WAIT_MS}. A container
+   * that just booted has its address before sshd listens, and a reused address
+   * can sit in this computer's ARP cache under the last container's MAC for a
+   * while (seen live on node g: remote-host's one connect then got "no answer"
+   * and the command failed). Retrying a TCP connect here rides both out.
+   * Still not answering: go on, and remote-host says why.
+   */
+  private async waitForSsh(ip: string, vmid: number, signal: AbortSignal): Promise<void> {
+    const ready = this.deps.sshReady ?? tcpReady;
+    const until = Date.now() + SSH_WAIT_MS;
+    while (Date.now() < until && !signal.aborted) {
+      if (await ready(ip, signal)) return;
+      await sleep(1_000, signal).catch(() => {});
+    }
+    this.log.warn(`container ${vmid}: nothing answers on ${ip}:22 after ${SSH_WAIT_MS / 1_000}s; handing it over anyway`);
   }
 
   private async waitForIp(api: Proxmox, node: string, vmid: number, signal: AbortSignal): Promise<string> {
@@ -787,6 +809,26 @@ interface LxcConfig {
 }
 
 const GONE = /does not exist|no such|not found/i;
+
+/** How long a started container gets for its sshd to answer. */
+const SSH_WAIT_MS = 45_000;
+
+/** One TCP connect to `ip`:22, given up after 3 s. */
+function tcpReady(ip: string, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = tcpConnect({ host: ip, port: 22, timeout: 3_000 });
+    const done = (ok: boolean) => {
+      sock.destroy();
+      signal.removeEventListener("abort", abort);
+      resolve(ok);
+    };
+    const abort = () => done(false);
+    signal.addEventListener("abort", abort, { once: true });
+    sock.once("connect", () => done(true));
+    sock.once("timeout", () => done(false));
+    sock.once("error", () => done(false));
+  });
+}
 
 function inRange(s: Settings, vmid: number): boolean {
   return vmid >= s.vmidStart && vmid <= s.vmidEnd && vmid !== s.templateVmid;

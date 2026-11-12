@@ -245,6 +245,7 @@ export function terminal(
     token: async () => "u@pve!t=x",
     sshAuth: async () => opts.sshAuth ?? { privateKey: "k" },
     proxmox: () => f.api,
+    sshReady: async () => true,
     dependencies: () => deps,
     statusChanged: () => void changed++,
     rescueRemote: opts.rescueRemote ?? emptyContainer,
