@@ -26241,6 +26241,7 @@ function tools(probe) {
   return list2.join(", ");
 }
 const INCARNATION_FILE = ".dispatch-host/incarnation";
+const FRESH_LEASE_MS = 6e4;
 class ProvisionedLink extends LinkBase {
   constructor(machine, deps) {
     super(deps.now);
@@ -26248,7 +26249,7 @@ class ProvisionedLink extends LinkBase {
     this.deps = deps;
     this.t = { ...DEFAULT_TIMING, ...deps.timing };
   }
-  /** A lease the next connect uses instead of asking again (the spawn that just provisioned). */
+  /** A lease the next connect uses instead of asking again (the spawn that just provisioned), and when. */
   fresh;
   /** The lease the live connection came from: extra connections for shells use it too. */
   current;
@@ -26266,12 +26267,22 @@ class ProvisionedLink extends LinkBase {
   get address() {
     return this.linked?.address ?? this.lastAddress;
   }
-  /** A lease just provisioned for this machine: the next connect uses it. */
+  /**
+   * A lease just provisioned for this machine, for the connect that follows
+   * it. With a connection up, or one being made, nothing takes it now, and
+   * kept until the next drop it would be stale by then: a machine stopped,
+   * then dialled at its old address without the provisioner starting it or
+   * saying where it is now.
+   */
   use(lease) {
-    this.fresh = lease;
+    if (this.linked?.conn.isOpen || this.connecting) return;
+    this.fresh = { lease, at: this.now() };
   }
   ready(signal) {
-    if (this.linked?.conn.isOpen) return Promise.resolve(this.linked);
+    if (this.linked?.conn.isOpen) {
+      this.fresh = void 0;
+      return Promise.resolve(this.linked);
+    }
     if (this.disposed) return Promise.reject(new Error(`${this.deps.label}: the connection was closed`));
     this.connecting ??= this.connect().finally(() => {
       this.connecting = void 0;
@@ -26281,6 +26292,7 @@ class ProvisionedLink extends LinkBase {
   /** End the connections (the chat went idle). The next thing that needs the machine provisions and dials again. */
   close() {
     this.gen++;
+    this.fresh = void 0;
     const l = this.linked;
     this.linked = void 0;
     l?.conn.close();
@@ -26311,8 +26323,9 @@ class ProvisionedLink extends LinkBase {
     return conn;
   }
   async connect() {
-    const lease = this.fresh ?? await this.deps.provision();
+    const f = this.fresh;
     this.fresh = void 0;
+    const lease = f && this.now() - f.at < FRESH_LEASE_MS ? f.lease : await this.deps.provision();
     if (lease.machine !== this.machine) {
       throw new Error(`${this.deps.label}: this chat's machine was made again, so its terminals there are gone; open the terminal again`);
     }

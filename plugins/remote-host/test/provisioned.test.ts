@@ -13,7 +13,7 @@ import type { MachineLease, ProvisionedBackendOptions } from "@dispatch-plugins/
 import type { MachineEngine } from "../src/engine.js";
 import { machinesCode } from "../src/machines-error.js";
 import { ProvisionedMachines, checkLease } from "../src/provisioned.js";
-import type { ProvisionedLink } from "../src/provisioned-link.js";
+import { FRESH_LEASE_MS, ProvisionedLink } from "../src/provisioned-link.js";
 import { AGENT, FakeMachine, fakeRuntime } from "./fake-machine.js";
 
 const ADDR = "10.0.9.1";
@@ -216,6 +216,60 @@ describe("a provisioned machine's connection", () => {
     m.open()[0]!.close();
     state.lease = { ...state.lease, machine: "9001:2" };
     await expect(slot.link.ready()).rejects.toThrow(/made again.*open the terminal again/);
+  });
+
+  it("asks again after a drop, even when another spawn provisioned while it was up", async () => {
+    const { m, state, attach } = setup();
+    const slot = await attach();
+    await slot.link.ready();
+    // A second terminal: provisioned, but the connection it would have used is already up.
+    await attach();
+    await slot.link.ready();
+    expect(state.provisions).toHaveLength(2);
+    m.open()[0]!.close();
+    // The machine was stopped since, say: only the provisioner starts it and says where it is.
+    await slot.link.ready();
+    expect(state.provisions).toHaveLength(3);
+  });
+
+  it("uses a spawn's lease only for the connect right after it", async () => {
+    const m = new FakeMachine({ [ADDR]: "ok" });
+    m.hostKey = HOST_KEY;
+    m.hostname = "dt-chat";
+    let clock = 1_000_000;
+    let provisions = 0;
+    const lease = { machine: "9001:1", addresses: [ADDR], user: "root", hostKey: { pin: [PIN] }, auth: async () => ({ privateKey: KEY }) } as MachineLease;
+    let token: string | undefined;
+    const link = new ProvisionedLink("9001:1", {
+      instanceId: "inst-1",
+      label: "Proxmox container",
+      agent: AGENT,
+      runtime: fakeRuntime(),
+      log: { info: () => {}, warn: () => {}, error: () => {} } as never,
+      provision: async () => {
+        provisions++;
+        return lease;
+      },
+      token: { get: async () => token, set: async (t) => void (token = t) },
+      connect: m.connect,
+      timing: { tickMs: 10, helloEveryMs: 1_000, idleSessionConnectionMs: 60_000 },
+      now: () => clock,
+    });
+    disposers.push(async () => link.dispose());
+    link.use(lease);
+    await link.ready();
+    expect(provisions).toBe(0);
+    link.close();
+    // A spawn that provisioned, then failed before dialling: its lease goes stale.
+    link.use(lease);
+    clock += FRESH_LEASE_MS;
+    await link.ready();
+    expect(provisions).toBe(1);
+    // Closing drops one not yet used: what it named may be gone with the connection.
+    link.use(lease);
+    link.close();
+    await link.ready();
+    expect(provisions).toBe(2);
   });
 });
 

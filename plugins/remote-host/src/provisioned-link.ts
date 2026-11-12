@@ -31,6 +31,8 @@ import { MachinesError } from "./machines-error.js";
 
 /** Where the token is, under the login's home. */
 export const INCARNATION_FILE = ".dispatch-host/incarnation";
+/** How long a spawn's lease stays good for the connect after it. Older, and the connect provisions again. */
+export const FRESH_LEASE_MS = 60_000;
 
 export interface ProvisionedLinkDeps {
   instanceId: string;
@@ -49,8 +51,8 @@ export interface ProvisionedLinkDeps {
 }
 
 export class ProvisionedLink extends LinkBase {
-  /** A lease the next connect uses instead of asking again (the spawn that just provisioned). */
-  private fresh?: MachineLease;
+  /** A lease the next connect uses instead of asking again (the spawn that just provisioned), and when. */
+  private fresh?: { lease: MachineLease; at: number };
   /** The lease the live connection came from: extra connections for shells use it too. */
   private current?: MachineLease;
   private connecting?: Promise<Linked>;
@@ -79,13 +81,23 @@ export class ProvisionedLink extends LinkBase {
     return this.linked?.address ?? this.lastAddress;
   }
 
-  /** A lease just provisioned for this machine: the next connect uses it. */
+  /**
+   * A lease just provisioned for this machine, for the connect that follows
+   * it. With a connection up, or one being made, nothing takes it now, and
+   * kept until the next drop it would be stale by then: a machine stopped,
+   * then dialled at its old address without the provisioner starting it or
+   * saying where it is now.
+   */
   use(lease: MachineLease): void {
-    this.fresh = lease;
+    if (this.linked?.conn.isOpen || this.connecting) return;
+    this.fresh = { lease, at: this.now() };
   }
 
   ready(signal?: AbortSignal): Promise<Linked> {
-    if (this.linked?.conn.isOpen) return Promise.resolve(this.linked);
+    if (this.linked?.conn.isOpen) {
+      this.fresh = undefined;
+      return Promise.resolve(this.linked);
+    }
     if (this.disposed) return Promise.reject(new Error(`${this.deps.label}: the connection was closed`));
     this.connecting ??= this.connect().finally(() => {
       this.connecting = undefined;
@@ -96,6 +108,7 @@ export class ProvisionedLink extends LinkBase {
   /** End the connections (the chat went idle). The next thing that needs the machine provisions and dials again. */
   close(): void {
     this.gen++;
+    this.fresh = undefined;
     const l = this.linked;
     this.linked = undefined;
     l?.conn.close();
@@ -131,8 +144,11 @@ export class ProvisionedLink extends LinkBase {
   }
 
   private async connect(): Promise<Linked> {
-    const lease = this.fresh ?? (await this.deps.provision());
+    // Only a lease from just now: one a spawn left behind (it failed before
+    // dialling) may name an address the machine has since left.
+    const f = this.fresh;
     this.fresh = undefined;
+    const lease = f && this.now() - f.at < FRESH_LEASE_MS ? f.lease : await this.deps.provision();
     if (lease.machine !== this.machine) {
       // The provisioner made a new machine for the chat: what this link served is gone with the old one.
       throw new Error(`${this.deps.label}: this chat's machine was made again, so its terminals there are gone; open the terminal again`);
