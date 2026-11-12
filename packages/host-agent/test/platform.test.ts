@@ -27,8 +27,8 @@ const linux = process.platform === "linux";
 const posix = process.platform !== "win32";
 
 /** A /proc/<pid>/stat line: fields 3.. after the name, starttime at field 22. */
-function stat(pid: number, comm: string, o: { ppid: number; pgrp: number; session: number; start: number }): string {
-  const rest = ["S", o.ppid, o.pgrp, o.session, 0, -1, 4194560, 100, 0, 0, 0, 1, 2, 0, 0, 20, 0, 1, 0, o.start, 1000, 200, 1];
+function stat(pid: number, comm: string, o: { ppid: number; pgrp: number; session: number; start: number; state?: string }): string {
+  const rest = [o.state ?? "S", o.ppid, o.pgrp, o.session, 0, -1, 4194560, 100, 0, 0, 0, 1, 2, 0, 0, 20, 0, 1, 0, o.start, 1000, 200, 1];
   return `${pid} (${comm}) ${rest.join(" ")}\n`;
 }
 
@@ -37,6 +37,7 @@ describe("parseProcStat", () => {
     expect(parseProcStat(stat(4242, "my (odd) name) x", { ppid: 1, pgrp: 4242, session: 4242, start: 987654 }))).toEqual({
       pid: 4242,
       comm: "my (odd) name) x",
+      state: "S",
       ppid: 1,
       pgrp: 4242,
       session: 4242,
@@ -122,7 +123,12 @@ describe.skipIf(!posix)("Linux from a /proc tree", () => {
 
   function fake(): string {
     proc = mkdtempSync(join(tmpdir(), "dh-proc-"));
-    const add = (pid: number, comm: string, o: { ppid: number; pgrp: number; session: number; start: number }, fds: Record<string, string> = {}) => {
+    const add = (
+      pid: number,
+      comm: string,
+      o: { ppid: number; pgrp: number; session: number; start: number; state?: string },
+      fds: Record<string, string> = {},
+    ) => {
       mkdirSync(join(proc, String(pid), "fd"), { recursive: true });
       writeFileSync(join(proc, String(pid), "stat"), stat(pid, comm, o));
       writeFileSync(join(proc, String(pid), "comm"), `${comm}\n`);
@@ -132,6 +138,8 @@ describe.skipIf(!posix)("Linux from a /proc tree", () => {
     add(800, "bash", { ppid: 700, pgrp: 800, session: 800, start: 5000 });
     add(810, "node", { ppid: 800, pgrp: 800, session: 800, start: 5100 }, { "0": "/dev/null", "20": "socket:[31337]", "21": "socket:[31340]" });
     add(820, "sshd", { ppid: 1, pgrp: 820, session: 820, start: 200 }, { "3": "socket:[900]" });
+    // A dead owner no init reaped.
+    add(830, "node", { ppid: 1, pgrp: 830, session: 830, start: 4000, state: "Z" });
     mkdirSync(join(proc, "self"));
     mkdirSync(join(proc, "net"));
     writeFileSync(
@@ -156,6 +164,9 @@ describe.skipIf(!posix)("Linux from a /proc tree", () => {
     expect(await p.sessionMembers(800)).toEqual([800, 810]);
     expect(await p.procStart(800)).toBe("@5000");
     expect(await p.procStart(999)).toBeUndefined();
+    // A zombie is no process: its session is swept, not taken for live.
+    expect(rows.find((r) => r.pid === 830)).toBeUndefined();
+    expect(await p.procStart(830)).toBeUndefined();
     expect(linuxProcs(proc).map((r) => r.pid).sort((a, b) => a - b)).toEqual([1, 800, 810, 820]);
   });
 

@@ -149,12 +149,20 @@ class Relay {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const sid = () => `s${Date.now().toString(36)}${++seq}`;
+/** Whether `pid` runs. A zombie doesn't: in a container whose init never reaps, a killed process stays one. */
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
+  }
+  return !zombie(pid);
+};
+const zombie = (pid: number) => {
+  try {
+    return /\)\s+Z/.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
+  } catch {
+    return false; // no /proc (macOS): reaped by launchd
   }
 };
 const cli = (...args: string[]) =>

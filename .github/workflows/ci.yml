@@ -172,6 +172,9 @@ jobs:
   linux-root:
     name: host-agent and remote-host on Debian 12, as root, through sshd
     runs-on: ubuntu-latest
+    # No --init, on purpose: PID 1 here never reaps, so a killed process stays
+    # a zombie. dispatch-host's process list leaves zombies out, and the sweep
+    # test (an owner that died) proves it does.
     container: debian:12
     timeout-minutes: 25
 

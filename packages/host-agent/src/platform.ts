@@ -138,6 +138,8 @@ function run(file: string, args: readonly string[], okCodes: number[] = [0]): Pr
 export interface ProcStat {
   pid: number;
   comm: string;
+  /** R, S, D, Z (a zombie), …: proc(5)'s field 3. */
+  state: string;
   ppid: number;
   pgrp: number;
   session: number;
@@ -159,7 +161,7 @@ export function parseProcStat(text: string): ProcStat | undefined {
   const [ppid, pgrp, session] = [f[1], f[2], f[3]].map(Number);
   const starttime = f[19];
   if (![pid, ppid, pgrp, session].every((n) => Number.isInteger(n)) || !starttime || !/^\d+$/.test(starttime)) return undefined;
-  return { pid, comm: text.slice(open + 1, close), ppid: ppid!, pgrp: pgrp!, session: session!, starttime };
+  return { pid, comm: text.slice(open + 1, close), state: f[0] ?? "", ppid: ppid!, pgrp: pgrp!, session: session!, starttime };
 }
 
 /**
@@ -171,10 +173,16 @@ export function linuxStart(s: Pick<ProcStat, "starttime">): string {
   return `@${s.starttime}`;
 }
 
+/**
+ * One process, or undefined when it is gone. A zombie is gone too: it runs
+ * nothing, and holds nothing but its pid until its parent reaps it. Where
+ * PID 1 never reaps (a container started without an init), a dead owner
+ * would stay a zombie, look alive, and its session would never be swept.
+ */
 function linuxProc(proc: string, pid: number): ProcRow | undefined {
   try {
     const s = parseProcStat(readFileSync(`${proc}/${pid}/stat`, "utf8"));
-    return s && s.pid === pid ? rowOf(s) : undefined;
+    return s && s.pid === pid && s.state !== "Z" && s.state !== "X" ? rowOf(s) : undefined;
   } catch {
     return undefined; // gone
   }

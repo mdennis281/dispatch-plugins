@@ -636,9 +636,14 @@ function fetchText(url: string): Promise<string> {
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+  // In a container whose init never reaps, a killed process stays a zombie: that is no longer running.
+  try {
+    return !/\)\s+Z/.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
+  } catch {
+    return true; // no /proc (macOS)
   }
 }
 
