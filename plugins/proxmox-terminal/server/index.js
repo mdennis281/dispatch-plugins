@@ -21395,6 +21395,13 @@ class ProxmoxTerminalBackend {
   id = BACKEND_ID;
   label = "Proxmox container";
   shell = "bash";
+  /**
+   * When a container can't be brought up, Dispatch refuses the terminal (with
+   * the reason) instead of running it locally. A local fallback runs Linux
+   * commands in a Windows shell against a different tree. Shipped ahead of
+   * 0.2, so every instance remembers "refuse" for `proxmox` before 0.2 exists.
+   */
+  fallback = "refuse";
   chats;
   get spawnTimeoutMs() {
     return Math.max(30, this.deps.settings().spawnTimeoutSeconds) * 1e3;

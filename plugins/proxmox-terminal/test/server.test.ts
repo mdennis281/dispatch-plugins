@@ -172,7 +172,7 @@ describe("ProxmoxTerminalBackend", () => {
     expect(t.kv.get("chat:c1")).toBeUndefined();
   });
 
-  it("refuses loudly with no API URL or token, so Dispatch falls back to local and says why", async () => {
+  it("refuses loudly with no API URL or token, so Dispatch can say why", async () => {
     const t = createTestContext({ id: "proxmox-terminal" });
     const backend = new ProxmoxTerminalBackend({
       ctx: t.ctx,
@@ -192,7 +192,7 @@ describe("activate", () => {
     const t = createTestContext({ id: "proxmox-terminal", capabilities: ["terminals", "secrets", "kv"] });
     await plugin.activate(t.ctx);
     expect([...t.terminalBackends.keys()]).toEqual(["proxmox"]);
-    expect(t.terminalBackends.get("proxmox")).toMatchObject({ label: "Proxmox container", shell: "bash" });
+    expect(t.terminalBackends.get("proxmox")).toMatchObject({ label: "Proxmox container", shell: "bash", fallback: "refuse" });
   });
 });
 

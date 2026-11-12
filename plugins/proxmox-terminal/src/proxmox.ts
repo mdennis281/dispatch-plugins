@@ -11,7 +11,7 @@
  *
  * Every call fails LOUDLY with the API's own message: pveproxy has had outages
  * on the box this was written against, and the plugin's job when that happens
- * is to tell Dispatch so it can fall back to a local shell and say why.
+ * is to tell Dispatch so it can refuse the terminal and say why.
  */
 import { request } from "node:https";
 
