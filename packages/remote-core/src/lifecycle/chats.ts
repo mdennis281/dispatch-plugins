@@ -7,6 +7,10 @@
  * it, proving it is the chat's — is a {@link Provider}. Everything else is
  * here.
  *
+ * The lifecycle half on its own — for a plugin that hands its machines to
+ * someone else to run things on — is {@link MachineLifecycle}. This class is
+ * proxmox-terminal 0.1's, kept as it was until 0.2 replaces it.
+ *
  * Everything that has to outlive this process is in kv, and a sweep (at load,
  * then every minute) acts on what is due. So nothing depends on a timer or a
  * hook having fired in THIS process:
@@ -24,41 +28,9 @@ import type { SshConnection } from "../ssh/connection.js";
 import { RemoteCheckouts } from "../sync/remote-repo.js";
 import { remotePathFor, repoInfo } from "../sync/snapshot.js";
 import { errText, withDeadline } from "./deadline.js";
+import type { ChatRecord, MachineRef, PendingDestroy, ShutdownReason } from "./machines.js";
 
-/** Why core is shutting the plugin down (the timed `onShutdown` hook). */
-export type ShutdownReason = "restart" | "stop" | "disable" | "uninstall";
-
-/**
- * What a provider stores to name a chat's machine, e.g. `{ vmid, hostname }`.
- * Flat: its fields are spread into the kv records.
- */
-export type MachineRef = Record<string, unknown>;
-
-/** `chat:<chatId>` in kv. */
-export type ChatRecord<R extends MachineRef> = R & {
-  createdAt: number;
-  /**
-   * When the idle stop is due (epoch ms). Kept here and not only in a timer:
-   * an in-memory setTimeout dies with every Dispatch restart, and the machine
-   * it was meant to stop runs until someone notices.
-   */
-  idleDeadline?: number;
-  /** Last spawn. A machine unused for `destroyUnusedDays` is destroyed. */
-  lastUsedAt?: number;
-};
-
-/**
- * `destroy:<key>` in kv: a destroy that has not succeeded yet. Written BEFORE
- * the first attempt, so a crash mid-destroy is retried too. Core fires
- * onChatDeleted without waiting on older versions, so an outage at that moment
- * used to leak the machine for good.
- */
-export type PendingDestroy<R extends MachineRef> = R & {
-  chatId: string;
-  attempts: number;
-  nextAt: number;
-  lastError?: string;
-};
+export type { ChatRecord, MachineRef, PendingDestroy, ShutdownReason };
 
 /** The machine-specific half of a backend. */
 export interface Provider<R extends MachineRef> {
