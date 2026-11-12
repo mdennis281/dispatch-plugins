@@ -87,9 +87,9 @@ export function defineRoutes(deps: RoutesDeps): (r: PluginRouter<PluginRequest, 
     const name = elevateSecretName(host.slug);
     if (!(await ctx.secrets?.get(name))?.trim()) return { there: "not-set-up" };
     const e = registry.get(host.slug);
-    const res = e ? await removeElevation(e.backend.elevation) : { there: "unreachable" as const };
+    const res = e ? await removeElevation(e.engine.elevation) : { there: "unreachable" as const };
     await ctx.secrets?.delete?.(name);
-    await e?.backend.elevation.refresh();
+    await e?.engine.elevation.refresh();
     ctx.log.info(`remote-host ${host.slug}: elevation turned off (${res.there}${res.detail ? `: ${res.detail}` : ""})`);
     return { ...res, ...(res.there !== "removed" && res.there !== "not-set-up" ? { manual: MANUAL_UNINSTALL } : {}) };
   };
@@ -131,18 +131,18 @@ export function defineRoutes(deps: RoutesDeps): (r: PluginRouter<PluginRequest, 
       const name = elevateSecretName(host.slug);
       const key = pending ?? ((await ctx.secrets?.get(name))?.trim() || undefined);
       if (!key) throw new UserError(`make ${host.label}'s setup command first`, 409);
-      const { version } = await verifyElevation(e.backend.elevation, key, host.label, deps.rootUid ?? 0);
+      const { version } = await verifyElevation(e.engine.elevation, key, host.label, deps.rootUid ?? 0);
       if (pending) {
         if (!ctx.secrets?.set) throw new Error("this Dispatch cannot store secrets for plugins (secrets:write); update Dispatch");
         await ctx.secrets.set(name, pending);
         deps.setups.drop(host.slug);
         ctx.log.info(`remote-host ${host.slug}: elevation is on (helper ${version})`);
       }
-      await e.backend.elevation.refresh();
+      await e.engine.elevation.refresh();
       // An older helper still works; the pane offers the setup again, which installs this plugin's.
       const outdated = version !== HELPER_VERSION;
       if (outdated) ctx.log.info(`remote-host ${host.slug}: its root helper is version ${version}; this plugin has ${HELPER_VERSION}`);
-      return { on: true, version, current: HELPER_VERSION, outdated, canAsk: e.backend.elevation.canAsk };
+      return { on: true, version, current: HELPER_VERSION, outdated, canAsk: e.engine.elevation.canAsk };
     }));
 
     r.delete("/hosts/:slug/elevation", h(async (req) => elevationOff(find(req))));

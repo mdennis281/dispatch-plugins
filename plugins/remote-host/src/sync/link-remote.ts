@@ -1,15 +1,15 @@
 /**
- * The sync's view of a machine, over its HostLink: short scripts on the
+ * The sync's view of a machine, over its link: short scripts on the
  * control connection (they take turns there, see `HostLink.exec`), transfers
  * on a channel of their own so a big pack never holds the control
  * connection.
  */
 import { shCommand } from "@dispatch-plugins/host-agent";
 import { channelExit } from "@dispatch-plugins/remote-core";
-import type { HostLink } from "../link.js";
+import type { MachineLink } from "../link.js";
 import type { RemoteSide } from "./remote.js";
 
-export function linkRemote(link: HostLink): RemoteSide {
+export function linkRemote(link: MachineLink): RemoteSide {
   return {
     run(script, opts = {}) {
       const input = opts.input;

@@ -49,7 +49,7 @@ describe.skipIf(!SH)("the agent's tools (the machine played by the local sh)", (
     const remote = localRemote();
     return {
       host: { slug, label },
-      backend: {
+      engine: {
         whereThere: async (_chat: string, cwd?: string) => ({
           cwd: fwd(join(checkout, cwd && cwd.startsWith(join(here, "app")) ? "app" : "")),
           checkout: fwd(checkout),
@@ -186,7 +186,7 @@ describe.skipIf(!SH)("the agent's tools (the machine played by the local sh)", (
 
   it("says plainly when the machine can't be reached", async () => {
     const m = cvx();
-    m.backend.whereThere = async () => {
+    m.engine.whereThere = async () => {
       throw new Error("10.0.4.250: no answer (asleep, off, or off the network)");
     };
     const t = setup([m]);
@@ -200,9 +200,9 @@ describe.skipIf(!SH)("the agent's tools (the machine played by the local sh)", (
   it("says the connection dropped, and that nothing was written here, when a copy is cut off", async () => {
     for (const what of ["build/report.txt", "build/Run.xcresult"]) {
       const m = cvx();
-      const real = m.backend.remoteSide();
+      const real = m.engine.remoteSide();
       // The channel closes with no exit status: what a dropped connection looks like.
-      m.backend.remoteSide = () => ({ ...real, stream: async () => ({ code: null, stderr: "" }) });
+      m.engine.remoteSide = () => ({ ...real, stream: async () => ({ code: null, stderr: "" }) });
       const t = setup([m]);
       const mine = join(work, `cut-${what.length}.txt`);
       writeFileSync(mine, "precious");

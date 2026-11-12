@@ -1030,6 +1030,20 @@ describe.skipIf(!SH)("restarts and lost state", () => {
     expect(text(b)).not.toMatch(/Set up/);
     expect([...t.kv.keys()]).toEqual(["sync:test-mac:chat-1"]);
   });
+
+  it("keeps its record under its own prefix, and adopts no per-chat one when told not to (a provisioned machine)", async () => {
+    const t = setup();
+    const theirs = { checkout: "/elsewhere/chat-1", note: "a paired machine's, from before records were per machine" };
+    t.kv.set("sync:chat-1", theirs);
+    const own = { kvPrefix: "x/caller/backend/m1", adoptLegacy: false };
+    const r1 = run();
+    const s = t.mk(own);
+    const b = await s.beforeRun(r1);
+    expect(text(b)).toMatch(/Set up/);
+    await s.afterRun(after(r1));
+    expect([...t.kv.keys()].sort()).toEqual(["sync:chat-1", "sync:x/caller/backend/m1:chat-1"]);
+    expect(t.kv.get("sync:chat-1")).toEqual(theirs);
+  });
 });
 
 describe.skipIf(!SH)("which checkout it is", () => {

@@ -131,6 +131,17 @@ interface PoolEntry {
 /** Below this much free disk the machine is still usable, but flagged. */
 const LOW_DISK_BYTES = 5 * 1024 ** 3;
 
+/**
+ * What a {@link MachineEngine} and the sync use of a link: reaching the
+ * machine and running things on it. Watching it, the status line and the
+ * reconnect timer stay with whoever owns the link (the registry, for a
+ * paired machine), so an engine can sit on a link it doesn't manage.
+ */
+export type MachineLink = Pick<
+  HostLink,
+  "ready" | "connected" | "probe" | "paths" | "address" | "exec" | "agent" | "openSession" | "tcp"
+>;
+
 export class HostLink {
   private linked?: Linked;
   private connecting?: { gen: number; p: Promise<Linked> };

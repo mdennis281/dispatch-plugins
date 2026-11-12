@@ -47,7 +47,7 @@ function rig(answer: () => string, secrets: Record<string, string> = {}, probe: 
     refresh: async () => {},
   };
   const registry = {
-    get: (slug: string) => (slug === HOST.slug ? { host: HOST, link: { probe }, backend: { elevation } } : undefined),
+    get: (slug: string) => (slug === HOST.slug ? { host: HOST, link: { probe }, engine: { elevation } } : undefined),
   } as unknown as HostRegistry;
   t.ctx.routes!(
     defineRoutes({

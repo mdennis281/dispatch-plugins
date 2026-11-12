@@ -122,9 +122,9 @@ async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall
     const e = await pickOne(deps.registry, call.chatId, args.host === undefined ? undefined : text(args.host, "host"));
     label = e.host.label;
     const signal = call.signal as unknown as AbortSignal;
-    const there = await e.backend.whereThere(call.chatId, call.cwd, signal);
+    const there = await e.engine.whereThere(call.chatId, call.cwd, signal);
     from = remotePath(path, there);
-    const remote = e.backend.remoteSide();
+    const remote = e.engine.remoteSide();
     const found = await look(remote, from);
     if (found.kind === "missing") {
       const rel = path.startsWith("/") || path.startsWith("~") ? "" : ` (a relative path is taken in ${there.cwd})`;
@@ -140,7 +140,7 @@ async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall
         replacing = true;
       }
     } else {
-      dest = resolve(e.backend.fetchedDir(call.chatId), localName(from));
+      dest = resolve(e.engine.fetchedDir(call.chatId), localName(from));
     }
 
     const got = await pull(remote, from, found, dest, { signal });
@@ -300,7 +300,7 @@ async function describe(e: Entry, v: HostView, call: PluginToolCall): Promise<st
     if (p.consoleUser === "root") lines.push("  nobody is logged in at its screen (no desktop session)");
   }
   lines.push(`  root with approval: ${v.elevation.on ? (v.elevation.canAsk ? "on (sudo asks the user)" : "set up, but this Dispatch can't ask the user") : "off (sudo is refused)"}`);
-  const act = e.backend.chatActivity(call.chatId);
+  const act = e.engine.chatActivity(call.chatId);
   const mine: string[] = [];
   if (act.shells.length) mine.push(`terminals ${act.shells.join(", ")}`);
   if (act.servers.length) mine.push(`MCP servers ${act.servers.join(", ")}`);
@@ -308,7 +308,7 @@ async function describe(e: Entry, v: HostView, call: PluginToolCall): Promise<st
   lines.push(`  this chat there: ${mine.length ? mine.join("; ") : "nothing running"}`);
   if (v.status.state !== "offline") {
     try {
-      const there = await withTimeout(e.backend.whereThere(call.chatId, call.cwd, call.signal as unknown as AbortSignal), 5_000);
+      const there = await withTimeout(e.engine.whereThere(call.chatId, call.cwd, call.signal as unknown as AbortSignal), 5_000);
       lines.push(`  this chat's ${there.checkout ? `checkout there: ${there.checkout} (your working directory is ${there.cwd})` : `directory there: ${there.cwd}`}`);
     } catch {
       /* not reachable right now: the status line says so */
@@ -334,7 +334,7 @@ async function pickOne(registry: HostRegistry, chatId: string, name: string | un
 }
 
 async function chatsMachines(all: Entry[], chatId: string): Promise<Entry[]> {
-  const known = await Promise.all(all.map((e) => e.backend.knowsChat(chatId).catch(() => false)));
+  const known = await Promise.all(all.map((e) => e.engine.knowsChat(chatId).catch(() => false)));
   return all.filter((_, i) => known[i]);
 }
 

@@ -284,7 +284,7 @@ describe("the agent's note", () => {
     const approvals: Approvals = { request: async () => ({ decision: "denied", at: 0 }) };
     const { r, connected } = setup({ approvals, elevateKey: "ELEVATE" });
     await connected();
-    await r.get("studio")!.backend.elevation.refresh();
+    await r.get("studio")!.engine.elevation.refresh();
     const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
     expect(note).toContain("- Root: `sudo <command>` (or `dispatch-elevate <command>`) there asks the user to approve");
     expect(note).toMatch(/your command's timeout is paused meanwhile/);
@@ -296,11 +296,11 @@ describe("the agent's note", () => {
     const approvals: Approvals = { request: async () => ({ decision: "denied", at: 0 }) };
     const off = setup({ approvals });
     await off.connected();
-    await off.r.get("studio")!.backend.elevation.refresh();
+    await off.r.get("studio")!.engine.elevation.refresh();
     expect(off.r.get("studio")!.backend.agentNote({ chatId: "chat-1" })).toMatch(/nothing can run as root on Studio: elevation isn't set up there/);
     const old = setup({ elevateKey: "ELEVATE", withoutApprovals: true });
     await old.connected();
-    await old.r.get("studio")!.backend.elevation.refresh();
+    await old.r.get("studio")!.engine.elevation.refresh();
     expect(old.r.get("studio")!.backend.agentNote({ chatId: "chat-1" })).toMatch(/this Dispatch can't ask the user for\s+approval/);
   });
 
@@ -341,13 +341,13 @@ describe("the agent's note", () => {
       brew: { path: "/home/linuxbrew/.linuxbrew/bin/brew", version: "Homebrew 7.0.12", writable: true },
     };
     await connected();
-    await r.get("studio")!.backend.elevation.refresh();
+    await r.get("studio")!.engine.elevation.refresh();
     const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
     expect(note).toContain("This terminal runs on Studio (Debian GNU/Linux 12, x64)");
     expect(note).toContain("- Root: the login on Studio is root, so everything you run there runs as root already: no sudo");
     expect(note).not.toContain("dispatch-elevate");
     expect(note).not.toMatch(/brew/i);
-    expect(r.get("studio")!.backend.elevation.state).toBe("root");
+    expect(r.get("studio")!.engine.elevation.state).toBe("root");
   });
 
   it("on Linux as someone else, says root with approval isn't there yet, and keeps Homebrew only when it can install", async () => {
@@ -362,7 +362,7 @@ describe("the agent's note", () => {
       brew: { path: "/home/linuxbrew/.linuxbrew/bin/brew", version: "Homebrew 7.0.12", writable: true },
     };
     await connected();
-    await r.get("studio")!.backend.elevation.refresh();
+    await r.get("studio")!.engine.elevation.refresh();
     const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
     expect(note).toMatch(/nothing can run as root on Studio: root with approval can only be set up on a Mac so far/);
     expect(note).not.toContain("Homebrew never needs it");

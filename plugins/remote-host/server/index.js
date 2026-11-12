@@ -24834,7 +24834,7 @@ class ChatSync {
   async prepare() {
     if (!this.loaded) {
       let saved = await this.d.kv?.get(this.key()).catch(() => void 0);
-      if (!saved) {
+      if (!saved && this.d.adoptLegacy !== false) {
         const legacy = legacySyncKey(this.d.chatId);
         saved = await this.d.kv?.get(legacy).catch(() => void 0);
         if (saved) {
@@ -25294,7 +25294,7 @@ class ChatSync {
     };
   }
   key() {
-    return syncKey(this.d.slug, this.d.chatId);
+    return syncKey(this.d.kvPrefix ?? this.d.slug, this.d.chatId);
   }
   async save() {
     try {
@@ -25518,17 +25518,17 @@ ${err instanceof Error ? err.message : String(err)}`;
     }
   };
 }
-class HostBackend {
-  constructor(id, deps) {
-    this.id = id;
+class MachineEngine {
+  constructor(spec, deps) {
+    this.spec = spec;
     this.deps = deps;
-    this.label = deps.host().label;
+    this.label = spec.host().label;
     const { link, instanceId } = deps;
     this.elevation = new Elevation({
-      host: deps.host,
+      host: spec.host,
       address: () => link.address,
       machine: () => {
-        const user = deps.host().user;
+        const user = spec.host().user;
         return { root: rootLogin(link.probe, user), setup: elevationSetupPossible(link.probe, user) };
       },
       key: deps.elevateKey ?? (async () => void 0),
@@ -25550,12 +25550,6 @@ class HostBackend {
       ...deps.portPollMs ? { intervalMs: deps.portPollMs } : {}
     });
   }
-  shell = "bash";
-  fallback = "refuse";
-  /** The first connect to a machine may push Node's ~50 MB runtime before the shell starts. */
-  spawnTimeoutMs = 5 * 6e4;
-  /** A chat's first sync sends its whole worktree; it resumes if cut short, but give it room. */
-  runHookTimeoutMs = 30 * 6e4;
   label;
   /** The live shell per chat + terminal name, so `beforeRun` can mark its run in the journal. */
   shells = /* @__PURE__ */ new Map();
@@ -25608,7 +25602,7 @@ class HostBackend {
       },
       killDetached: () => {
         void this.deps.link.agent(["kill", "--instance", instance, "--sid", sid], 15e3).catch((err) => {
-          this.deps.log.info(`remote-host ${this.deps.host().slug}: could not end session ${sid}: ${errText$1(err)}`);
+          this.deps.log.info(`remote-host ${this.spec.key}: could not end session ${sid}: ${errText$1(err)}`);
         });
       }
     };
@@ -25695,7 +25689,7 @@ class HostBackend {
    */
   async spawnProcess(info) {
     const chatId = assertId("chat", info.chatId);
-    const plan = planProcess(info, { label: this.label, root: rootLogin(this.deps.link.probe, this.deps.host().user) });
+    const plan = planProcess(info, { label: this.label, root: rootLogin(this.deps.link.probe, this.spec.host().user) });
     const linked = await this.deps.link.ready(info.signal);
     await this.markServed(chatId);
     const paths = linked.paths;
@@ -25738,7 +25732,7 @@ class HostBackend {
       },
       killDetached: () => {
         void this.deps.link.agent(["kill", "--instance", instance, "--sid", sid], 15e3).catch((err) => {
-          this.deps.log.info(`remote-host ${this.deps.host().slug}: could not end MCP server ${info.name} (${sid}): ${errText$1(err)}`);
+          this.deps.log.info(`remote-host ${this.spec.key}: could not end MCP server ${info.name} (${sid}): ${errText$1(err)}`);
         });
       }
     };
@@ -25768,7 +25762,7 @@ class HostBackend {
       if (this.processes.get(key2) === bridge) this.processes.delete(key2);
     });
     this.deps.log.info(
-      `remote-host ${this.deps.host().slug}: MCP server ${info.name} for chat ${chatId} runs there` + (info.bundled ? ` (${info.bundled.package}@${info.bundled.version})` : "") + (plan.notes.length ? `; ${plan.notes.join("; ")}` : "")
+      `remote-host ${this.spec.key}: MCP server ${info.name} for chat ${chatId} runs there` + (info.bundled ? ` (${info.bundled.package}@${info.bundled.version})` : "") + (plan.notes.length ? `; ${plan.notes.join("; ")}` : "")
     );
     return bridge;
   }
@@ -25783,10 +25777,10 @@ class HostBackend {
     let p = this.provisions.get(key2);
     if (!p) {
       const what = spec.packages.map((x) => `${x.name}@${x.version}`).join(", ");
-      this.deps.log.info(`remote-host ${this.deps.host().slug}: making sure ${what}${spec.browser ? ` and ${spec.browser}` : ""} are installed there`);
+      this.deps.log.info(`remote-host ${this.spec.key}: making sure ${what}${spec.browser ? ` and ${spec.browser}` : ""} are installed there`);
       p = this.deps.link.agent(["mcp-provision", "--spec", Buffer.from(JSON.stringify(spec), "utf8").toString("base64")], PROVISION_MS).then(
         (r) => {
-          if (r.installed.length) this.deps.log.info(`remote-host ${this.deps.host().slug}: installed ${r.installed.join(", ")} there`);
+          if (r.installed.length) this.deps.log.info(`remote-host ${this.spec.key}: installed ${r.installed.join(", ")} there`);
           return r;
         },
         (err) => {
@@ -25802,7 +25796,7 @@ class HostBackend {
     return join(this.mcpLocalHostDir(), assertId("chat", chatId));
   }
   mcpLocalHostDir() {
-    return join(this.deps.mcpLocalRoot ?? join(tmpdir(), "dispatch-remote-host"), this.deps.instanceId, this.deps.host().slug);
+    return join(this.deps.mcpLocalRoot ?? join(tmpdir(), "dispatch-remote-host"), this.deps.instanceId, this.spec.key);
   }
   /**
    * End every shell this backend holds, KILL down each channel, and wait
@@ -25817,7 +25811,7 @@ class HostBackend {
     for (const sh of shells) sh.kill();
     if (shells.length) await new Promise((r) => setTimeout(r, waitMs).unref?.());
   }
-  /** Core unregistered the backend (the machine was removed, or the plugin is going down). */
+  /** Done with the machine: its backend was unregistered (the machine was removed, or the plugin is going down). */
   dispose() {
     this.ports.dispose();
   }
@@ -25827,14 +25821,13 @@ class HostBackend {
    * back. A machine that can't be reached now ends them itself once their
    * heartbeat stops.
    */
-  async onChatIdle(e) {
-    const chatId = e.chatId;
+  async chatIdle(chatId) {
     if (!ID.test(chatId)) return;
     const ended = this.endShells(chatId);
     if (!ended && !await this.wasServed(chatId)) return;
     if (!this.deps.link.connected) return;
     await this.deps.link.agent(["kill", "--instance", this.deps.instanceId, "--chat", chatId], 3e4).catch((err) => {
-      this.deps.log.info(`remote-host ${this.deps.host().slug}: ending idle chat ${chatId}'s sessions: ${errText$1(err)}`);
+      this.deps.log.info(`remote-host ${this.spec.key}: ending idle chat ${chatId}'s sessions: ${errText$1(err)}`);
     });
   }
   /**
@@ -25843,8 +25836,7 @@ class HostBackend {
    * machine can't be reached (asleep, off) and is a no-op for a chat this
    * machine never served, which must not wait for it.
    */
-  async onChatDeleted(e) {
-    const chatId = e.chatId;
+  async chatDeleted(chatId) {
     if (!ID.test(chatId)) return;
     this.endShells(chatId);
     this.syncs.delete(chatId);
@@ -25887,7 +25879,7 @@ class HostBackend {
           this.pendingDeletes.delete(chat);
         } catch (err) {
           if (this.deps.link.connected) this.pendingDeletes.delete(chat);
-          this.deps.log.warn(`remote-host ${this.deps.host().slug}: removing deleted chat ${chat}'s files failed: ${errText$1(err)}`);
+          this.deps.log.warn(`remote-host ${this.spec.key}: removing deleted chat ${chat}'s files failed: ${errText$1(err)}`);
         }
       }
     } finally {
@@ -25906,9 +25898,9 @@ class HostBackend {
     const since = this.orphansSince;
     if (since === void 0 || this.cleaning || !this.deps.link.connected) return;
     this.cleaning = true;
-    const slug = this.deps.host().slug;
+    const slug = this.spec.key;
     try {
-      const prefix = `served:${slug}:`;
+      const prefix = `served:${this.spec.kvPrefix}:`;
       const served = (await this.deps.kv?.list(prefix) ?? []).map((k) => k.slice(prefix.length));
       const dirs = await this.deps.link.agent(["chats", "--instance", this.deps.instanceId], 6e4);
       const orphans = /* @__PURE__ */ new Set();
@@ -25939,11 +25931,11 @@ class HostBackend {
     const r = await this.deps.link.agent(["forget", "--instance", this.deps.instanceId, "--chat", chatId], 5e4);
     this.served.delete(chatId);
     await this.deps.kv?.delete(this.servedKey(chatId));
-    await this.deps.kv?.delete(syncKey(this.deps.host().slug, chatId));
-    await this.deps.kv?.delete(legacySyncKey(chatId));
+    await this.deps.kv?.delete(syncKey(this.spec.kvPrefix, chatId));
+    if (this.spec.adoptLegacySync) await this.deps.kv?.delete(legacySyncKey(chatId));
     if (r.removed || r.killed.length) {
       this.deps.log.info(
-        `remote-host ${this.deps.host().slug}: deleted chat ${chatId}'s checkout there` + (r.killed.length ? `, ending ${r.killed.length} session(s)` : "")
+        `remote-host ${this.spec.key}: deleted chat ${chatId}'s checkout there` + (r.killed.length ? `, ending ${r.killed.length} session(s)` : "")
       );
     }
   }
@@ -25965,7 +25957,7 @@ class HostBackend {
     return n;
   }
   servedKey(chatId) {
-    return `served:${this.deps.host().slug}:${chatId}`;
+    return `served:${this.spec.kvPrefix}:${chatId}`;
   }
   async markServed(chatId) {
     this.live?.add(chatId);
@@ -25974,7 +25966,7 @@ class HostBackend {
       await this.deps.kv?.set(this.servedKey(chatId), { at: Date.now() });
       this.served.add(chatId);
     } catch (err) {
-      this.deps.log.warn(`remote-host ${this.deps.host().slug}: could not record chat ${chatId}: ${errText$1(err)}`);
+      this.deps.log.warn(`remote-host ${this.spec.key}: could not record chat ${chatId}: ${errText$1(err)}`);
     }
   }
   async wasServed(chatId) {
@@ -26002,12 +25994,13 @@ class HostBackend {
   }
   chatSync(chatId, root) {
     this.remote ??= linkRemote(this.deps.link);
-    const host = this.deps.host();
     return new ChatSync({
       chatId,
       root,
-      label: host.label,
-      slug: host.slug,
+      label: this.spec.host().label,
+      slug: this.spec.key,
+      kvPrefix: this.spec.kvPrefix,
+      adoptLegacy: this.spec.adoptLegacySync,
       instanceId: this.deps.instanceId,
       hostRoot: async () => (await this.deps.link.ready()).paths.root,
       remote: this.remote,
@@ -26020,13 +26013,13 @@ class HostBackend {
   lock(runs) {
     return new CheckoutLock({
       runs,
-      self: this.id,
+      self: this.spec.backendId,
       where: (backend) => backend === "local" ? "this computer" : this.deps.where?.(backend) ?? backend,
       ...this.deps.lockWaitMs !== void 0 ? { afterWaitMs: this.deps.lockWaitMs } : {}
     });
   }
   agentNote(info) {
-    const host = this.deps.host();
+    const host = this.spec.host();
     const probe = this.deps.link.probe;
     const paths = this.deps.link.paths;
     const where = paths ? chatDir(paths, this.deps.instanceId, info.chatId) : `~/.dispatch-host/…/chats/${info.chatId}`;
@@ -26158,6 +26151,50 @@ function tools(probe) {
   const list2 = [has("git", t.git), has("node", t.node), has("pnpm", t.pnpm)];
   if (probe.platform === "darwin") list2.push(has("Xcode", t.xcodebuild));
   return list2.join(", ");
+}
+class PairedBackend {
+  constructor(id, engine) {
+    this.id = id;
+    this.engine = engine;
+  }
+  shell = "bash";
+  fallback = "refuse";
+  /** The first connect to a machine may push Node's ~50 MB runtime before the shell starts. */
+  spawnTimeoutMs = 5 * 6e4;
+  /** A chat's first sync sends its whole worktree; it resumes if cut short, but give it room. */
+  runHookTimeoutMs = 30 * 6e4;
+  /** The machine's label, which the engine's messages use too. */
+  get label() {
+    return this.engine.label;
+  }
+  set label(v) {
+    this.engine.label = v;
+  }
+  spawn(info) {
+    return this.engine.spawn(info);
+  }
+  spawnProcess(info) {
+    return this.engine.spawnProcess(info);
+  }
+  beforeRun(info) {
+    return this.engine.beforeRun(info);
+  }
+  afterRun(info) {
+    return this.engine.afterRun(info);
+  }
+  agentNote(info) {
+    return this.engine.agentNote(info);
+  }
+  onChatIdle(e) {
+    return this.engine.chatIdle(e.chatId);
+  }
+  onChatDeleted(e) {
+    return this.engine.chatDeleted(e.chatId);
+  }
+  /** Core unregistered the backend (the machine was removed, or the plugin is going down). */
+  dispose() {
+    this.engine.dispose();
+  }
 }
 const BLOCK = 512;
 async function extractTar(archive, dest, signal) {
@@ -26470,9 +26507,9 @@ async function remoteFetch(deps, args, call) {
     const e = await pickOne(deps.registry, call.chatId, args.host === void 0 ? void 0 : text(args.host, "host"));
     label = e.host.label;
     const signal = call.signal;
-    const there = await e.backend.whereThere(call.chatId, call.cwd, signal);
+    const there = await e.engine.whereThere(call.chatId, call.cwd, signal);
     from = remotePath(path, there);
-    const remote = e.backend.remoteSide();
+    const remote = e.engine.remoteSide();
     const found = await look(remote, from);
     if (found.kind === "missing") {
       const rel = path.startsWith("/") || path.startsWith("~") ? "" : ` (a relative path is taken in ${there.cwd})`;
@@ -26487,7 +26524,7 @@ async function remoteFetch(deps, args, call) {
         replacing = true;
       }
     } else {
-      dest = resolve(e.backend.fetchedDir(call.chatId), localName(from));
+      dest = resolve(e.engine.fetchedDir(call.chatId), localName(from));
     }
     const got = await pull(remote, from, found, dest, { signal });
     deps.log.info(`remote-host ${e.host.slug}: remote_fetch for ${call.chatId}: ${from} → ${dest} (${mb(got.bytes)})`);
@@ -26625,7 +26662,7 @@ async function describe(e, v, call) {
     if (p.consoleUser === "root") lines.push("  nobody is logged in at its screen (no desktop session)");
   }
   lines.push(`  root with approval: ${v.elevation.on ? v.elevation.canAsk ? "on (sudo asks the user)" : "set up, but this Dispatch can't ask the user" : "off (sudo is refused)"}`);
-  const act = e.backend.chatActivity(call.chatId);
+  const act = e.engine.chatActivity(call.chatId);
   const mine = [];
   if (act.shells.length) mine.push(`terminals ${act.shells.join(", ")}`);
   if (act.servers.length) mine.push(`MCP servers ${act.servers.join(", ")}`);
@@ -26633,7 +26670,7 @@ async function describe(e, v, call) {
   lines.push(`  this chat there: ${mine.length ? mine.join("; ") : "nothing running"}`);
   if (v.status.state !== "offline") {
     try {
-      const there = await withTimeout(e.backend.whereThere(call.chatId, call.cwd, call.signal), 5e3);
+      const there = await withTimeout(e.engine.whereThere(call.chatId, call.cwd, call.signal), 5e3);
       lines.push(`  this chat's ${there.checkout ? `checkout there: ${there.checkout} (your working directory is ${there.cwd})` : `directory there: ${there.cwd}`}`);
     } catch {
     }
@@ -26653,7 +26690,7 @@ async function pickOne(registry, chatId, name) {
   );
 }
 async function chatsMachines(all, chatId) {
-  const known = await Promise.all(all.map((e) => e.backend.knowsChat(chatId).catch(() => false)));
+  const known = await Promise.all(all.map((e) => e.engine.knowsChat(chatId).catch(() => false)));
   return all.filter((_, i) => known[i]);
 }
 function byName(all, name) {
@@ -26692,9 +26729,9 @@ class HostRegistry {
       if (wanted.has(slug)) continue;
       this.entries.delete(slug);
       void (async () => {
-        await e.backend.killAll().catch(() => {
+        await e.engine.killAll().catch(() => {
         });
-        e.backend.dispose();
+        e.engine.dispose();
         await terminals.unregisterBackend(backendId(slug)).catch((err) => {
           ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText$1(err)}`);
         });
@@ -26732,7 +26769,7 @@ class HostRegistry {
       agent: this.deps.agent,
       runtime: this.deps.runtime,
       setStatus: (s) => terminals.setStatus(id, s),
-      onConnected: () => entry.backend?.onConnected(),
+      onConnected: () => entry.engine?.onConnected(),
       log: ctx.log,
       ...ctx.kv ? { kv: ctx.kv } : {},
       ...this.deps.connect ? { connect: this.deps.connect } : {},
@@ -26741,8 +26778,8 @@ class HostRegistry {
     const approvals = this.deps.approvals ?? approvalsOf(ctx);
     const reservedPorts = reservedPortsOf(ctx);
     const runs = runsOf(ctx);
-    entry.backend = new HostBackend(id, {
-      host: () => entry.host,
+    const spec = { backendId: id, key: host.slug, kvPrefix: host.slug, adoptLegacySync: true, host: () => entry.host };
+    entry.engine = new MachineEngine(spec, {
       link: entry.link,
       instanceId: this.deps.instanceId,
       log: ctx.log,
@@ -26758,6 +26795,7 @@ class HostRegistry {
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || void 0,
       ...this.deps.elevationConnect ? { elevationConnect: this.deps.elevationConnect } : {}
     });
+    entry.backend = new PairedBackend(id, entry.engine);
     try {
       terminals.registerBackend(entry.backend);
     } catch (err) {
@@ -26782,7 +26820,7 @@ class HostRegistry {
   }
   list() {
     const prev = this.deps.previousInstanceId;
-    return [...this.entries.values()].map(({ host, link, backend }) => {
+    return [...this.entries.values()].map(({ host, link, engine }) => {
       const abandoned = prev && prev !== this.deps.instanceId ? link.probe?.instances?.find((i) => i.id === prev) : void 0;
       return {
         ...host,
@@ -26791,17 +26829,17 @@ class HostRegistry {
         ...link.address ? { address: link.address } : {},
         ...link.probe ? { probe: link.probe } : {},
         ...abandoned ? { abandoned } : {},
-        elevation: { on: backend.elevation.configured, canAsk: backend.elevation.canAsk }
+        elevation: { on: engine.elevation.configured, canAsk: engine.elevation.canAsk }
       };
     });
   }
   /** Look again at which machines have elevation on (the pane, the other instance, may have changed it). */
   async refreshElevation() {
-    await Promise.all([...this.entries.values()].map((e) => e.backend.elevation.refresh().catch(() => void 0)));
+    await Promise.all([...this.entries.values()].map((e) => e.engine.elevation.refresh().catch(() => void 0)));
   }
   /** Dispatch listed the chats that exist: each machine drops what it holds for any other. */
   reconcile(live2, at = Date.now()) {
-    for (const e of this.entries.values()) e.backend.reconcile(live2, at);
+    for (const e of this.entries.values()) e.engine.reconcile(live2, at);
   }
   /**
    * The plugin is being uninstalled: every reachable machine forgets this
@@ -26812,7 +26850,7 @@ class HostRegistry {
     const { ctx } = this.deps;
     await Promise.all(
       [...this.entries.values()].flatMap((e) => [
-        e.backend.forgetAll(timeoutMs).catch((err) => {
+        e.engine.forgetAll(timeoutMs).catch((err) => {
           ctx.log.warn(`remote-host ${e.host.slug}: could not remove this Dispatch's files there: ${errText$1(err)}`);
         }),
         this.elevationOff(e, timeoutMs)
@@ -26827,7 +26865,7 @@ class HostRegistry {
     const late = new Promise((resolve2) => {
       timer = setTimeout(() => resolve2({ there: "unreachable", detail: "no answer in time" }), timeoutMs);
     });
-    const res = await Promise.race([removeElevation(e.backend.elevation), late]);
+    const res = await Promise.race([removeElevation(e.engine.elevation), late]);
     clearTimeout(timer);
     if (res.there === "removed") {
       await ctx.secrets?.delete?.(name);
@@ -26842,10 +26880,10 @@ class HostRegistry {
   async dispose() {
     const entries = [...this.entries.values()];
     this.entries.clear();
-    await Promise.all(entries.map((e) => e.backend.killAll().catch(() => {
+    await Promise.all(entries.map((e) => e.engine.killAll().catch(() => {
     })));
     for (const e of entries) {
-      e.backend.dispose();
+      e.engine.dispose();
       e.link.dispose();
     }
   }
@@ -26879,9 +26917,9 @@ function defineRoutes(deps) {
     const name = elevateSecretName(host.slug);
     if (!(await ctx.secrets?.get(name))?.trim()) return { there: "not-set-up" };
     const e = registry.get(host.slug);
-    const res = e ? await removeElevation(e.backend.elevation) : { there: "unreachable" };
+    const res = e ? await removeElevation(e.engine.elevation) : { there: "unreachable" };
     await ctx.secrets?.delete?.(name);
-    await e?.backend.elevation.refresh();
+    await e?.engine.elevation.refresh();
     ctx.log.info(`remote-host ${host.slug}: elevation turned off (${res.there}${res.detail ? `: ${res.detail}` : ""})`);
     return { ...res, ...res.there !== "removed" && res.there !== "not-set-up" ? { manual: MANUAL_UNINSTALL } : {} };
   };
@@ -26916,17 +26954,17 @@ function defineRoutes(deps) {
       const name = elevateSecretName(host.slug);
       const key2 = pending ?? ((await ctx.secrets?.get(name))?.trim() || void 0);
       if (!key2) throw new UserError(`make ${host.label}'s setup command first`, 409);
-      const { version: version2 } = await verifyElevation(e.backend.elevation, key2, host.label, deps.rootUid ?? 0);
+      const { version: version2 } = await verifyElevation(e.engine.elevation, key2, host.label, deps.rootUid ?? 0);
       if (pending) {
         if (!ctx.secrets?.set) throw new Error("this Dispatch cannot store secrets for plugins (secrets:write); update Dispatch");
         await ctx.secrets.set(name, pending);
         deps.setups.drop(host.slug);
         ctx.log.info(`remote-host ${host.slug}: elevation is on (helper ${version2})`);
       }
-      await e.backend.elevation.refresh();
+      await e.engine.elevation.refresh();
       const outdated = version2 !== HELPER_VERSION;
       if (outdated) ctx.log.info(`remote-host ${host.slug}: its root helper is version ${version2}; this plugin has ${HELPER_VERSION}`);
-      return { on: true, version: version2, current: HELPER_VERSION, outdated, canAsk: e.backend.elevation.canAsk };
+      return { on: true, version: version2, current: HELPER_VERSION, outdated, canAsk: e.engine.elevation.canAsk };
     }));
     r.delete("/hosts/:slug/elevation", h(async (req) => elevationOff(find(req))));
     r.post("/pair/scan", h((req) => pairing.scan(body(req))));
