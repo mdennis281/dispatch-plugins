@@ -48,7 +48,7 @@
     "spawnTimeoutSeconds": {
       "type": "integer",
       "title": "Provisioning timeout (seconds)",
-      "description": "How long Dispatch waits for a container before falling back to a local shell.",
+      "description": "How long Dispatch waits for a container before refusing the terminal (it never falls back to a local shell).",
       "default": 240
     },
     "caCert": {
