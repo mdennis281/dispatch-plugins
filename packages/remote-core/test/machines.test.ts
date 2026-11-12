@@ -153,6 +153,45 @@ describe("lease", () => {
     expect(f.machines.get(2)?.status).toBe("running");
   });
 
+  it("a chat deleted while a lease makes its machine: destroyed after the lease, and its record never comes back", async () => {
+    const f = fakeProvider();
+    const { l, kvNow } = life(f);
+    const g = gate();
+    const leased = l.lease("c1", async (chat) => {
+      await g.p;
+      await f.provider.bringUp(chat, new AbortController().signal); // creates and remembers machine 1
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const deleted = l.onChatDeleted({ chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 10));
+    g.open();
+    await Promise.all([leased, deleted]);
+    expect(f.machines.size).toBe(0);
+    expect(f.calls).toEqual(["create 1", "start 1", "destroy 1"]);
+    expect(Object.keys(kvNow()).filter((k) => /^(chat|destroy):/.test(k))).toEqual([]);
+  });
+
+  it("a delete during an idle stop: the stop finishes, the destroy follows, and the record stays gone", async () => {
+    const f = fakeProvider({ 2: ours("c1") });
+    const g = gate();
+    const stop = f.provider.stop.bind(f.provider);
+    f.provider.stop = async (chatId, ref) => {
+      await g.p;
+      return stop(chatId, ref);
+    };
+    const { l, kvNow } = life(f, { instance: INSTANCE, "chat:c1": rec(2, { idleDeadline: Date.now() - 1 }) });
+    const swept = l.sweep(); // starts the due idle stop, which waits on the gate
+    await new Promise((r) => setTimeout(r, 10));
+    const deleted = l.onChatDeleted({ chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 10));
+    g.open();
+    await Promise.all([swept, deleted]);
+    expect(f.calls).toEqual(["stop 2", "destroy 2"]);
+    expect(kvNow()["chat:c1"]).toBeUndefined();
+    await l.onChatIdle({ chatId: "c1" }); // a late hook writes nothing either
+    expect(kvNow()["chat:c1"]).toBeUndefined();
+  });
+
   it("detaches before a stop, and before a destroy", async () => {
     const f = fakeProvider({ 2: ours("c1"), 3: ours("c2") });
     const { l, detached } = life(f, { instance: INSTANCE, "chat:c1": rec(2, { idleDeadline: Date.now() - 1 }), "chat:c2": rec(3) });
@@ -273,6 +312,13 @@ describe("reviving destroys an older version queued for live chats", () => {
     await l.reconcile({ chats: ["c1"] });
     expect(f.machines.has(2)).toBe(false);
     expect(kvNow()["chat:c1"]).toBeUndefined();
+  });
+
+  it("after an earlier run did it, a sweep with no reconcile works the queue (a core that never reconciles)", async () => {
+    const f = fakeProvider({ 2: ours("gone", "stopped") });
+    const { l } = life(f, { instance: INSTANCE, [MARKER]: true, "destroy:2": row(2, "gone") }, opts);
+    await l.start();
+    expect(f.machines.has(2)).toBe(false);
   });
 
   it("without the option, the queue is worked from the first sweep, as before", async () => {

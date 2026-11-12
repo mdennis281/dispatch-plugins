@@ -144,9 +144,11 @@ export interface MachineLifecycleOptions<R extends MachineRef> {
    * Once per instance, at the first reconcile: a `destroy:` row whose chat
    * still exists is turned back into that chat's `chat:` record instead of
    * being destroyed — for rows queued by an older version under rules that
-   * no longer hold. Until that reconcile has run, the sweep attempts no
-   * pending destroy (a chat's own delete still does). `marker` is the kv key
-   * that records it was done.
+   * no longer hold. Until the first reconcile on this instance has run, the
+   * sweep attempts no pending destroy (a chat's own delete and uninstall
+   * still do); on a core that never calls reconcile they wait for good,
+   * which errs on keeping a machine. `marker` is the kv key that records it
+   * was done; later runs read it and work the queue from their first sweep.
    */
   reviveLiveDestroys?: { marker: string };
 }
@@ -168,6 +170,8 @@ interface LifeState<R extends MachineRef> {
   leasing: number;
   /** Leased by this process: its machine is not a crash leftover, whatever the boot sweep sees. */
   leased: boolean;
+  /** Forgotten because its machine is being destroyed: nothing may write its record again. */
+  gone: boolean;
   /** Serialises bring-up, stop and destroy for this chat's machine. */
   opChain: Promise<unknown>;
   /** Serialises writes of `chat:<id>`, so a merge never loses a concurrent one. */
@@ -210,8 +214,8 @@ export class MachineLifecycle<R extends MachineRef> {
   /**
    * The chat is about to use its machine: bump its generation (so a stop
    * decided before now is dropped), clear any idle deadline, mark it used,
-   * then run `up` — after any stop or destroy already in flight for the chat,
-   * and before any decided later. `up` brings the machine up (or finds it
+   * then run `up` on the chat's op chain — after any stop or destroy already
+   * in flight for the chat, and before any decided later. `up` brings the machine up (or finds it
    * already up) and returns whatever the caller needs to reach it. The chat
    * counts as busy until `up` settles.
    */
@@ -231,6 +235,12 @@ export class MachineLifecycle<R extends MachineRef> {
           ref: st.ref,
           record: await this.record(chatId),
           remember: async (ref) => {
+            if (st.gone) {
+              // Only a shutdown path forgets a chat outside the op chain. The
+              // machine was made for a chat that is going: queue it to go too.
+              await this.recordDestroy({ chatId, ...ref, attempts: 0, nextAt: 0 });
+              throw new Error(`chat ${chatId}'s machine was being made while the chat was being cleaned up`);
+            }
             st.ref = ref;
             await this.persist(st);
           },
@@ -286,6 +296,7 @@ export class MachineLifecycle<R extends MachineRef> {
       generation: 0,
       leasing: 0,
       leased: false,
+      gone: false,
       opChain: Promise.resolve(),
       writeChain: Promise.resolve(),
     };
@@ -312,10 +323,10 @@ export class MachineLifecycle<R extends MachineRef> {
    */
   private persist(st: LifeState<R>): Promise<void> {
     const kv = this.opts.kv;
-    if (!st.ref || !kv) return Promise.resolve();
+    if (!st.ref || !kv || st.gone) return Promise.resolve();
     return this.write(st, async () => {
       const ref = st.ref;
-      if (!ref) return;
+      if (!ref || st.gone) return;
       const stored = await kv.get<ChatRecord<R>>(`chat:${st.chatId}`);
       const prev = stored && this.sameMachine(stored, ref) ? stored : undefined;
       await kv.set(`chat:${st.chatId}`, {
@@ -417,7 +428,10 @@ export class MachineLifecycle<R extends MachineRef> {
     const kv = this.opts.kv;
     if (!this.provider.configured() || !kv) return; // not configured yet: nothing can exist
     for (const key of await kv.list("chat:")) await this.stateFor(key.slice("chat:".length));
-    if (opts.liveChats && !this.revived) await this.reviveLiveDestroys(opts.liveChats);
+    if (!this.revived) {
+      if (opts.liveChats) await this.reviveLiveDestroys(opts.liveChats);
+      else if (await kv.get(this.opts.reviveLiveDestroys!.marker)) this.revived = true; // done on an earlier run
+    }
     // Adoption failing (the provider down, a permission missing) must not cost
     // the idle stops and retries below.
     if (opts.adopt) await this.adopt().catch((err: unknown) => this.log.warn(`re-adopting machines: ${errText(err)}`));
@@ -445,7 +459,7 @@ export class MachineLifecycle<R extends MachineRef> {
         // to local, or (with per-terminal locations) just never picks it. The
         // machine only holds installs and build output, so a later lease
         // making a new one costs a reinstall, not work.
-        await this.enqueueDestroy(st, `unused for ${policy.destroyUnusedDays} days`).catch(() => {});
+        await this.enqueueDestroy(st, `unused for ${policy.destroyUnusedDays} days`, st.generation).catch(() => {});
       } else if (st.idleDeadline !== undefined && st.idleDeadline <= now) {
         await this.stopIdle(st, st.generation).catch((err: unknown) => this.log.warn(`stopping ${this.provider.name(st.ref!)}: ${errText(err)}`));
       } else if (st.idleDeadline !== undefined) {
@@ -564,25 +578,38 @@ export class MachineLifecycle<R extends MachineRef> {
    */
   async onChatDeleted({ chatId }: { chatId: string }): Promise<void> {
     const pending = await this.pendingFor(chatId);
-    const st = await this.stateFor(chatId);
-    if (st.ref) await this.enqueueDestroy(st, "its chat was deleted");
-    else await this.forget(st, "destroy");
+    await this.enqueueDestroy(await this.stateFor(chatId), "its chat was deleted");
     // A retry from core after an earlier failure: the record is all that is left.
     for (const p of pending) await this.attemptDestroy(p);
   }
 
-  /** Forget the chat's machine and destroy it: pending in kv first, then one attempt now. */
-  private async enqueueDestroy(st: LifeState<R>, why: string): Promise<void> {
-    const ref = st.ref!;
-    const p: PendingDestroy<R> = { chatId: st.chatId, ...ref, attempts: 0, nextAt: 0 };
-    this.log.info(`destroying ${this.provider.name(ref)} (chat ${p.chatId}): ${why}`);
-    await this.recordDestroy(p);
-    await this.forget(st, "destroy");
-    await this.write(st, async () => this.opts.kv?.delete(`chat:${st.chatId}`));
-    await this.attemptDestroy(p);
+  /**
+   * Forget the chat's machine and destroy it: pending in kv first, then one
+   * attempt now. The forgetting runs on the chat's op chain, after any lease
+   * or stop in flight, so neither can write the record back afterwards; the
+   * provider call runs after it, off the chain. With `gen`, a lease since
+   * then cancels it: the machine is in use again.
+   */
+  private async enqueueDestroy(st: LifeState<R>, why: string, gen?: number): Promise<void> {
+    const p = await this.serial(st, async () => {
+      if (gen !== undefined && st.generation !== gen) return undefined;
+      const ref = st.ref;
+      if (!ref) {
+        await this.forget(st, "destroy");
+        return undefined;
+      }
+      const pending: PendingDestroy<R> = { chatId: st.chatId, ...ref, attempts: 0, nextAt: 0 };
+      this.log.info(`destroying ${this.provider.name(ref)} (chat ${st.chatId}): ${why}`);
+      await this.recordDestroy(pending);
+      await this.forget(st, "destroy");
+      await this.write(st, async () => this.opts.kv?.delete(`chat:${st.chatId}`));
+      return pending;
+    });
+    if (p) await this.attemptDestroy(p);
   }
 
   private async forget(st: LifeState<R>, why: DetachReason): Promise<void> {
+    st.gone = true;
     st.generation++;
     if (st.idleTimer) clearTimeout(st.idleTimer);
     st.idleTimer = undefined;
