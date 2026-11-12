@@ -220,7 +220,12 @@ export function terminal(
   f: ReturnType<typeof fakeProxmox>,
   kv: Record<string, unknown> = { instance: INSTANCE },
   settings: Record<string, unknown> = {},
-  opts: { deps?: PluginDependencies | null; rh?: ReturnType<typeof fakeRemoteHost>; rescueRemote?: () => Promise<RescueRemote> } = {},
+  opts: {
+    deps?: PluginDependencies | null;
+    rh?: ReturnType<typeof fakeRemoteHost>;
+    rescueRemote?: (host: string, s: unknown, auth: { privateKey?: string; password?: string }) => Promise<RescueRemote>;
+    sshAuth?: { privateKey?: string; password?: string };
+  } = {},
 ) {
   const rh = opts.rh ?? fakeRemoteHost();
   const real = opts.deps === undefined;
@@ -237,7 +242,7 @@ export function terminal(
     kv: t.ctx.kv,
     settings: () => readSettings({ apiUrl: "https://pve:8006", node: "g", ...settings }),
     token: async () => "u@pve!t=x",
-    sshAuth: async () => ({ privateKey: "k" }),
+    sshAuth: async () => opts.sshAuth ?? { privateKey: "k" },
     proxmox: () => f.api,
     dependencies: () => deps,
     statusChanged: () => void changed++,

@@ -101,8 +101,10 @@ export interface LeaseChat<R extends MachineRef> {
   record?: ChatRecord<R>;
   /**
    * Call the moment a new machine exists, so a failure after that still
-   * cleans it up. A ref naming a different machine starts a fresh record:
-   * fields kept for the old machine do not carry over.
+   * cleans it up. It always starts a fresh record (a new `createdAt`; fields
+   * kept for the old machine do not carry over), even when the new machine
+   * reuses the old one's key: a container re-created under the same vmid is
+   * not the one that was there.
    */
   remember(ref: R): Promise<void>;
 }
@@ -242,6 +244,8 @@ export class MachineLifecycle<R extends MachineRef> {
               throw new Error(`chat ${chatId}'s machine was being made while the chat was being cleaned up`);
             }
             st.ref = ref;
+            st.idleDeadline = undefined;
+            await this.write(st, async () => this.opts.kv?.delete(`chat:${chatId}`));
             await this.persist(st);
           },
         }),

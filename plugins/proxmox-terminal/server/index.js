@@ -20578,6 +20578,8 @@ class MachineLifecycle {
               throw new Error(`chat ${chatId}'s machine was being made while the chat was being cleaned up`);
             }
             st.ref = ref;
+            st.idleDeadline = void 0;
+            await this.write(st, async () => this.opts.kv?.delete(`chat:${chatId}`));
             await this.persist(st);
           }
         })
@@ -22116,8 +22118,14 @@ class ProxmoxTerminal {
     return done;
   }
   async rescueRemote(ip, s) {
-    const auth = await this.auth();
     const pins = templateHostKeys(s);
+    const all = await this.auth();
+    const auth = pins.length ? all : { privateKey: all.privateKey };
+    if (!auth.privateKey && !auth.password) {
+      throw new Error(
+        "an SSH password is sent only to a container whose host key is pinned: set templateHostKey (see the README), or use an SSH key"
+      );
+    }
     if (this.deps.rescueRemote) return this.deps.rescueRemote(ip, s, auth);
     const conn = new SshConnection({
       host: ip,
@@ -22478,12 +22486,15 @@ const TOKEN = "PROXMOX_TERMINAL_API_TOKEN";
 const KEY = "PROXMOX_TERMINAL_SSH_KEY";
 const PASSWORD = "PROXMOX_TERMINAL_SSH_PASSWORD";
 let terminal;
+let offSettings;
 function dependenciesOf(ctx) {
   const d = ctx.dependencies;
   return d && typeof d.get === "function" ? d : void 0;
 }
 const plugin = definePlugin({
   deactivate() {
+    offSettings?.();
+    offSettings = void 0;
     terminal = void 0;
   },
   activate(ctx) {
@@ -22505,13 +22516,25 @@ const plugin = definePlugin({
         keyPath: () => settings().sshKeyPath
       }),
       dependencies: () => dependenciesOf(ctx),
-      statusChanged: () => terminals.setStatus?.(BACKEND_ID, t.status())
+      statusChanged: () => pushStatus()
     });
+    let pushed = "";
+    const pushStatus = () => {
+      const s = t.status();
+      const key = JSON.stringify(s);
+      if (key === pushed) return;
+      pushed = key;
+      terminals.setStatus?.(BACKEND_ID, s);
+    };
     terminal = t;
     terminals.registerBackend(t.forwarder);
     ctx.routes?.(defineRoutes(ctx, () => terminal));
     t.link.connect();
-    terminals.setStatus?.(BACKEND_ID, t.status());
+    pushStatus();
+    offSettings = ctx.settings.onChange?.(() => {
+      pushStatus();
+      void t.probe().then(pushStatus);
+    });
     const why = t.link.reason();
     if (why) ctx.log.warn(`terminals are refused: ${why}. Containers are still managed.`);
     else ctx.log.info('registered terminal backend "proxmox" (through remote-host)');

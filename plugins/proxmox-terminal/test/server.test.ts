@@ -241,6 +241,20 @@ describe("activate", () => {
     await plugin.deactivate?.();
   });
 
+  it("follows a settings change: not set up, then online once the API URL is saved", async () => {
+    const t = createTestContext({
+      id: "proxmox-terminal",
+      capabilities: ["terminals", "secrets", "kv"],
+      dependencies: { "remote-host": { machines: { 1: fakeRemoteHost().api } } },
+      optionalDependencies: ["remote-host"],
+    });
+    await plugin.activate(t.ctx);
+    expect(t.terminalStatus.get("proxmox")).toMatchObject({ state: "offline", detail: expect.stringMatching(/not set up/) });
+    t.settings.set({ apiUrl: "https://pve:8006", node: "g" });
+    expect(t.terminalStatus.get("proxmox")).toMatchObject({ state: "online" });
+    await plugin.deactivate?.();
+  });
+
   it("goes online through ctx.dependencies when remote-host is there", async () => {
     const t = createTestContext({
       id: "proxmox-terminal",

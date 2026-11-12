@@ -341,6 +341,21 @@ describe("reviving destroys an older version queued for live chats", () => {
   });
 });
 
+describe("remember", () => {
+  it("starts a fresh record for a new machine under a reused key (re-created at the same id)", async () => {
+    const f = fakeProvider({});
+    const { l, kvNow } = life(f, { instance: INSTANCE, "chat:c1": rec(2, { layout: 2, machine: "2:1", createdAt: 1 }) });
+    await l.lease("c1", async (chat) => {
+      await chat.remember({ id: 2 });
+    });
+    const now = kvNow()["chat:c1"] as ChatRecord<Ref> & { layout?: number; machine?: string };
+    expect(now.id).toBe(2);
+    expect(now.createdAt).toBeGreaterThan(1);
+    expect(now.layout).toBeUndefined();
+    expect(now.machine).toBeUndefined();
+  });
+});
+
 describe("destroyMachine", () => {
   it("destroys the chat's machine while the chat goes on; its next lease makes a new one", async () => {
     const f = fakeProvider({ 2: ours("c1", "stopped") });

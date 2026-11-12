@@ -135,6 +135,53 @@ describe("Skip rescue", () => {
   });
 });
 
+describe("the rescue's SSH login", () => {
+  it("never sends the password to a host whose key isn't pinned: key only, or refused", async () => {
+    const seen: Array<{ privateKey?: string; password?: string }> = [];
+    const rescueRemote = async (_h: string, _s: unknown, auth: { privateKey?: string; password?: string }) => {
+      seen.push(auth);
+      return emptyContainer();
+    };
+    const spawn = (b: ReturnType<typeof terminal>["b"]) =>
+      b.forwarder.spawn({ chatId: "c1", name: "main", cwd: "/w", worktreePath: "/w", repoPath: "/w", signal: new AbortController().signal });
+    const legacy = () => ({ instance: INSTANCE, "chat:c1": rec(9002) });
+
+    const onlyPassword = terminal(fakeProxmox({ 9002: ours("c1", "stopped") }), legacy(), {}, { sshAuth: { password: "pw" }, rescueRemote });
+    await expect(spawn(onlyPassword.b)).rejects.toThrow(/password is sent only to a container whose host key is pinned/);
+    expect(seen).toEqual([]);
+
+    const both = terminal(fakeProxmox({ 9002: ours("c1", "stopped") }), legacy(), {}, { sshAuth: { privateKey: "k", password: "pw" }, rescueRemote });
+    await spawn(both.b);
+    expect(seen.pop()).toEqual({ privateKey: "k" });
+
+    const pinned = terminal(fakeProxmox({ 9002: ours("c1", "stopped") }), legacy(), { templateHostKey: "SHA256:abc" }, {
+      sshAuth: { password: "pw" },
+      rescueRemote,
+    });
+    await spawn(pinned.b);
+    expect(seen.pop()).toMatchObject({ password: "pw" });
+  });
+});
+
+describe("a container re-created under the same vmid", () => {
+  it("is a new machine to remote-host: a new incarnation, not the old one's", async () => {
+    const f = fakeProxmox();
+    const { b, rh, kvNow } = terminal(f);
+    const spawn = () =>
+      b.forwarder.spawn({ chatId: "c1", name: "main", cwd: "/w", worktreePath: "/w", repoPath: "/w", signal: new AbortController().signal });
+    await spawn();
+    const first = rh.leases[0]!.machine;
+    expect(first).toMatch(/^9001:\d+$/);
+    f.cts.delete(9001); // destroyed behind the plugin's back
+    await new Promise((r) => setTimeout(r, 5));
+    await spawn();
+    const second = rh.leases[1]!.machine;
+    expect(second).toMatch(/^9001:\d+$/);
+    expect(second).not.toBe(first);
+    expect(kvNow()["chat:c1"]).toMatchObject({ vmid: 9001, layout: 2, machine: second });
+  });
+});
+
 describe("Destroy without rescue", () => {
   it("destroys the container and forgets it; the chat's next spawn clones a new one", async () => {
     const f = fakeProxmox({ 9002: ours("c1", "stopped") });

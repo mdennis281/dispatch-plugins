@@ -399,8 +399,15 @@ export class ProxmoxTerminal {
   }
 
   private async rescueRemote(ip: string, s: Settings): Promise<RescueRemote> {
-    const auth = await this.auth();
     const pins = templateHostKeys(s);
+    const all = await this.auth();
+    // As remote-host does: a password goes only to a host whose key is pinned.
+    const auth = pins.length ? all : { privateKey: all.privateKey };
+    if (!auth.privateKey && !auth.password) {
+      throw new Error(
+        "an SSH password is sent only to a container whose host key is pinned: set templateHostKey (see the README), or use an SSH key",
+      );
+    }
     if (this.deps.rescueRemote) return this.deps.rescueRemote(ip, s, auth);
     const conn = new SshConnection({
       host: ip,

@@ -29,6 +29,8 @@ interface CleanupHooks {
 
 /** The live plugin, for the module-level hooks. One per activation. */
 let terminal: ProxmoxTerminal | undefined;
+/** Unsubscribes this activation's settings listener. */
+let offSettings: (() => void) | undefined;
 
 /** `ctx.dependencies`, on a core that has plugin dependencies (C2). Feature-detected, never assumed. */
 function dependenciesOf(ctx: PluginContext): PluginDependencies | undefined {
@@ -38,6 +40,8 @@ function dependenciesOf(ctx: PluginContext): PluginDependencies | undefined {
 
 const plugin = definePlugin({
   deactivate() {
+    offSettings?.();
+    offSettings = undefined;
     terminal = undefined;
   },
   activate(ctx) {
@@ -59,8 +63,17 @@ const plugin = definePlugin({
         keyPath: () => settings().sshKeyPath,
       }),
       dependencies: () => dependenciesOf(ctx),
-      statusChanged: () => terminals.setStatus?.(BACKEND_ID, t.status()),
+      statusChanged: () => pushStatus(),
     });
+    // Only a change is pushed: core broadcasts every one to every client.
+    let pushed = "";
+    const pushStatus = () => {
+      const s = t.status();
+      const key = JSON.stringify(s);
+      if (key === pushed) return;
+      pushed = key;
+      terminals.setStatus?.(BACKEND_ID, s);
+    };
     terminal = t;
     // Registered before anything that could fail: with `fallback: "refuse"`,
     // a terminal is refused rather than run locally whatever happens next.
@@ -68,7 +81,13 @@ const plugin = definePlugin({
     // The Settings pane's (client.tsx): pre-0.2 containers and their actions.
     ctx.routes?.(defineRoutes(ctx, () => terminal));
     t.link.connect();
-    terminals.setStatus?.(BACKEND_ID, t.status());
+    pushStatus();
+    // A saved API URL, token or CA: say so now, and ask the API again (while
+    // offline, core calls nothing that would find out).
+    offSettings = ctx.settings.onChange?.(() => {
+      pushStatus();
+      void t.probe().then(pushStatus);
+    });
     const why = t.link.reason();
     if (why) ctx.log.warn(`terminals are refused: ${why}. Containers are still managed.`);
     else ctx.log.info('registered terminal backend "proxmox" (through remote-host)');
