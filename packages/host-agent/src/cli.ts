@@ -33,7 +33,8 @@ import { probe } from "./probe.js";
 import { decodeEnvArg, decodeExecArg, takeSessionEnv } from "./env.js";
 import { provision, runProgram } from "./provision.js";
 import { processSignals, runElevate } from "./elevate.js";
-import { attribute, hostKillIo, killTree, listListeners, listProcs, type KillTarget } from "./procs.js";
+import { hostPlatform } from "./platform.js";
+import { attribute, killTree, type KillTarget } from "./procs.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import { listRecords, ownerLive, readRecord, touchContact, writeRecord } from "./records.js";
 import type { SessionRecord } from "./layout.js";
@@ -167,7 +168,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     case "list": {
       const id = instance();
       touchContact(root, id);
-      const rows = await listProcs().catch(() => []);
+      const rows = await hostPlatform().procs().catch(() => []);
       print(
         listRecords(root, id).map(({ rec }) => ({
           sid: rec.sid,
@@ -187,7 +188,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     case "ports": {
       const id = instance();
       touchContact(root, id);
-      const [rows, listeners] = await Promise.all([listProcs(), listListeners()]);
+      const [rows, listeners] = await Promise.all([hostPlatform().procs(), hostPlatform().listeners()]);
       // A hosted process (an MCP server's browser) is not a dev server the chat started.
       const live = listRecords(root, id).filter(({ rec }) => rec.state === "running" && rec.kind !== "process" && ownerLive(rows, rec));
       const att = attribute(
@@ -253,6 +254,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           run: runProgram,
           say: (line) => process.stderr.write(`dispatch-host: ${line}\n`),
           env: process.env,
+          system: { os: process.platform, uid: process.getuid?.() ?? -1 },
         }),
       );
       return 0;
@@ -282,7 +284,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           now: Date.now(),
           deadManMs: num(opts, "dead-man-hours", DEFAULT_DEAD_MAN_HOURS) * 3_600_000,
           self: process.pid,
-          io: hostKillIo,
+          io: hostPlatform().killIo,
         }),
       );
       return 0;
@@ -301,7 +303,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 export async function killSession(recordFile: string, rec: SessionRecord): Promise<void> {
   // Only signal the owner while it is provably still that process: a pid
   // alone may have been reused by something of the user's.
-  const owner = async () => ownerLive(await listProcs(), rec);
+  const owner = async () => ownerLive(await hostPlatform().procs(), rec);
   if (await owner()) {
     try {
       process.kill(rec.ownerPid, "SIGTERM");
@@ -315,7 +317,7 @@ export async function killSession(recordFile: string, rec: SessionRecord): Promi
     }
   }
   const target: KillTarget = { root: rec.shellPid, rootStart: rec.shellStart, tracked: rec.tracked, self: process.pid };
-  await killTree(hostKillIo, target);
+  await killTree(hostPlatform().killIo, target);
   if (await owner()) {
     try {
       process.kill(rec.ownerPid, "SIGKILL");

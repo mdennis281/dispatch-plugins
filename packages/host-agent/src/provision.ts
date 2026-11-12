@@ -13,6 +13,12 @@
  *   serves chrome-devtools-mcp too.
  *
  * An installed prefix is used as it is: everything in it is pinned.
+ *
+ * On Linux the browser also needs system libraries a minimal Debian lacks
+ * (libnss3, libgbm1, …). They are checked with `ldd` after each install
+ * check. Logged in as root, the missing ones are installed with Playwright's
+ * own `install-deps` (apt-get). Otherwise the provision fails and names
+ * them, rather than the browser failing at its first launch.
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -35,6 +41,11 @@ export interface ProvisionDeps {
   /** Progress, for the log. */
   say(line: string): void;
   env: Record<string, string | undefined>;
+  /**
+   * The machine, for the browser's system libraries: on Linux they are
+   * checked, and installed when `uid` is 0. Absent: not checked.
+   */
+  system?: { os: NodeJS.Platform; uid: number };
   now?(): number;
   sleep?(ms: number): Promise<void>;
 }
@@ -98,19 +109,79 @@ export async function provision(rawSpec: unknown, d: ProvisionDeps): Promise<Pro
       if (r.code !== 0) throw new Error(`installing ${spec.browser} failed (exit ${r.code}): ${tail(r.stderr || r.stdout)}`);
       if (/download|downloaded/i.test(r.stdout + r.stderr)) installed.push(spec.browser!);
     });
-    if (spec.executable) {
+    const linux = d.system?.os === "linux";
+    if (spec.executable || linux) {
       const r = await d.run(
         d.node,
         ["-e", `process.stdout.write(require(process.argv[1])[process.argv[2]].executablePath())`, join(prefix, "node_modules", "playwright-core"), spec.browser],
         { env, cwd: prefix, timeoutMs: 60_000 },
       );
-      executablePath = r.stdout.trim();
-      if (r.code !== 0 || !isAbsolute(executablePath) || !existsSync(executablePath)) {
-        throw new Error(`${spec.browser} is installed but its executable wasn't found: ${tail(r.stderr) || executablePath || `exit ${r.code}`}`);
+      const found = r.stdout.trim();
+      if (r.code === 0 && isAbsolute(found) && existsSync(found)) executablePath = found;
+      else if (spec.executable) {
+        throw new Error(`${spec.browser} is installed but its executable wasn't found: ${tail(r.stderr) || found || `exit ${r.code}`}`);
       }
+      // Wanted only for its libraries: one that can't be found can't be checked, and the browser's own launch says why.
     }
+    if (linux && executablePath) {
+      const libs = await systemLibraries(spec.browser, executablePath, pwCli, prefix, env, d);
+      if (libs) installed.push(libs);
+    }
+    if (!spec.executable) executablePath = undefined;
   }
   return { entry, browsersPath, ...(executablePath ? { executablePath } : {}), installed };
+}
+
+/** What `ldd` says `exe` needs and can't find: `libnss3.so`, …. Undefined: ldd couldn't tell (none, or not glibc). */
+async function missingLibraries(exe: string, env: Record<string, string>, d: ProvisionDeps): Promise<string[] | undefined> {
+  const r = await d.run("ldd", [exe], { env, cwd: dirname(exe), timeoutMs: 60_000 });
+  if (r.code !== 0) return undefined;
+  const missing = new Set<string>();
+  for (const line of r.stdout.split("\n")) {
+    const m = line.match(/^\s*(\S+)\s+=>\s+not found/);
+    if (m) missing.add(m[1]!);
+  }
+  return [...missing].sort();
+}
+
+/**
+ * The browser's system libraries on Linux. Missing ones are installed as root
+ * (`playwright install-deps`, which runs apt-get), once, under the browsers
+ * lock; otherwise the provision fails naming them. Says what it installed.
+ */
+async function systemLibraries(
+  browser: string,
+  exe: string,
+  pwCli: string,
+  prefix: string,
+  env: Record<string, string>,
+  d: ProvisionDeps,
+): Promise<string | undefined> {
+  const missing = await missingLibraries(exe, env, d);
+  if (!missing?.length) return undefined;
+  const list = missing.slice(0, 12).join(", ") + (missing.length > 12 ? `, and ${missing.length - 12} more` : "");
+  if (d.system?.uid !== 0) {
+    throw new Error(
+      `${browser} is installed, but this machine lacks system libraries it needs (${list}), and only root can install them: ` +
+        `run \`npx playwright install-deps ${browser}\` there as root, or install them with the system's package manager`,
+    );
+  }
+  let error: string | undefined;
+  await withLock(join(browsersDir(d.root), ".install.lock"), d, async () => {
+    if (!(await missingLibraries(exe, env, d))?.length) return;
+    d.say(`installing the system libraries ${browser} needs (${list})`);
+    const r = await d.run(d.node, [pwCli, "install-deps", browser], {
+      env: { ...env, DEBIAN_FRONTEND: "noninteractive" },
+      cwd: prefix,
+      timeoutMs: STEP_MS,
+    });
+    if (r.code !== 0) error = `installing them failed (exit ${r.code}): ${tail(r.stderr || r.stdout)}`;
+  });
+  const still = await missingLibraries(exe, env, d);
+  if (still?.length) {
+    throw new Error(`${browser} needs system libraries this machine lacks (${still.slice(0, 12).join(", ")}); ${error ?? "they are still missing after installing them"}`);
+  }
+  return `system libraries for ${browser}`;
 }
 
 function ready(prefix: string): boolean {

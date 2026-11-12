@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CLT_DEVELOPER_DIR, gitEnv } from "../src/git-env.js";
-import { checkBrew, checkGit, which } from "../src/probe.js";
+import { checkBrew, checkGit, probe, which } from "../src/probe.js";
 
 const posix = process.platform !== "win32";
 const dirs: string[] = [];
@@ -208,8 +208,10 @@ describe.skipIf(!posix)("checkBrew", () => {
     });
   });
 
-  // Root writes anywhere, so a read-only prefix proves nothing there.
-  it.skipIf(process.getuid?.() === 0)("says this account can't install with a Homebrew whose prefix another account owns", async () => {
+  // Root writes anywhere, so as root a read-only prefix stays writable. (Homebrew
+  // refuses to run as root anyway, so remote-host says nothing of it to a root login.)
+  const root = process.getuid?.() === 0;
+  it("says this account can't install with a Homebrew whose prefix another account owns", async () => {
     const prefix = mkdtempSync(join(tmpdir(), "dh-brew-"));
     dirs.push(prefix);
     mkdirSync(join(prefix, "Cellar"));
@@ -219,7 +221,7 @@ describe.skipIf(!posix)("checkBrew", () => {
     expect(await checkBrew(env, undefined)).toEqual({ path: join(b, "brew"), version: "Homebrew 7.0.12", writable: true });
     chmodSync(join(prefix, "Cellar"), 0o555);
     try {
-      expect(await checkBrew(env, undefined)).toMatchObject({ writable: false });
+      expect(await checkBrew(env, undefined)).toMatchObject({ writable: root });
     } finally {
       chmodSync(join(prefix, "Cellar"), 0o755);
     }
@@ -233,4 +235,15 @@ describe("gitEnv", () => {
     expect(gitEnv(base, false)).toEqual({ PATH: "/usr/bin", HOME: "/Users/dispatch", LC_ALL: "C" });
     expect(base.DEVELOPER_DIR).toBe(XCODE);
   });
+});
+
+describe.skipIf(!posix)("probe", () => {
+  it("says who it runs as, how a shell gets root, what finds ports, and which bash", async () => {
+    const p = await probe();
+    expect(p.uid).toBe(process.getuid!());
+    expect(p.elevation).toBe(p.uid === 0 ? "root" : "approval-helper");
+    expect(p.ports).toEqual(process.platform === "darwin" ? "lsof" : expect.stringMatching(/^(ss|proc)$/));
+    expect(p.bash).toMatch(/\/bash$/);
+    if (process.platform === "linux") expect(p.os.id).toMatch(/^[a-z0-9._-]+$/);
+  }, 30_000);
 });

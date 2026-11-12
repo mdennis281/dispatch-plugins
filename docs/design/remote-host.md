@@ -260,7 +260,7 @@ Sizes: S is under a day, M is a few days, L is about a week, XL is more.
 | 4 | plugins repo | Tier B GUI agent: LaunchAgent, leases, dialog detection, side-by-side upgrades (+ core E27, E28) | 3 |
 | 5 | core + plugins | E7, E8, E23, E10/E26: playwright and chrome-devtools on the Mac, artifact fetch, opt-in reverse forwards | 4 |
 | 6 | core | E9, E11, E13, E22, terminal tool text | as needed |
-| 7 | plugins repo | Linux machines (headless only), then Windows machines. Windows needs `administrators_authorized_keys`, cmd as the default shell (so `powershell -EncodedCommand`), session-0 sshd, locked-file checkouts, and a loopback port that needs mutual auth. | 4 |
+| 7 | plugins repo | Linux machines (headless only), then Windows machines. Windows needs `administrators_authorized_keys`, cmd as the default shell (so `powershell -EncodedCommand`), session-0 sshd, locked-file checkouts, and a loopback port that needs mutual auth. **Linux headless: done in remote-host 0.10.0 / dispatch-host 0.5.0** (L1–L10 of the plugin-dependencies design): processes and ports from /proc and ss behind host-agent's `Platform` seam (platform.ts; `RemotePlatform` checks in remote-host's remote-platform.ts), a root login without the sudo shim, browsers' system libraries and `--no-sandbox` as root, pairing refusing root, musl and 32-bit refused with the reason, and a Debian 12 CI job as root through a real sshd. | 4 |
 
 ## 8. Unverified, test before building on it
 - `launchctl bootstrap gui/<uid>` run from an SSH session as the console user. It's reported to fail with errors 5 or 125 on some versions.

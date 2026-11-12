@@ -31,6 +31,7 @@ import type { AgentBundle, RuntimeSource } from "./agent.js";
 import { dialFamily, hostKeyAlgorithms, keySecretName, type HostConfig } from "./hosts.js";
 import { agentCommand, ensureAgent, type Exec, type HostPaths } from "./install.js";
 import { CONNECTING, CONNECTION_LOST, SETTINGS_CHANGED } from "./link-status.js";
+import { gitTooOld, installHint, refusedHint } from "./remote-platform.js";
 
 /** A connection to one address. `SshConnection` is one; tests pass fakes. */
 export interface LinkConnection extends Exec {
@@ -415,7 +416,7 @@ export class HostLink {
         await conn.connectOnce();
       } catch (err) {
         conn.close();
-        misses.push(`${address}: ${describeConnectError(err)}`);
+        misses.push(`${address}: ${describeConnectError(err, this.memory.probe?.platform)}`);
         continue;
       }
       // The right machine answered. Anything that fails from here is about
@@ -488,7 +489,7 @@ export class HostLink {
       await conn.connectOnce();
     } catch (err) {
       conn.close();
-      throw new Error(`could not open another connection for shells: ${describeConnectError(err)}`);
+      throw new Error(`could not open another connection for shells: ${describeConnectError(err, this.memory.probe?.platform)}`);
     }
     const entry: PoolEntry = { conn, open: 0, idleSince: this.now() };
     conn.on("close", () => {
@@ -681,6 +682,11 @@ export function statusFrom(probe: ProbeResult, lastSeenAt: number): TerminalBack
   }
   const git = gitIssue(probe);
   if (git) issues.push(git);
+  // Agents before 0.5.0 report neither: undefined is "can't tell", never missing.
+  if (probe.bash === null) issues.push(`no bash, which a terminal there runs${installHint(probe, { apt: "bash" })}`);
+  if (probe.ports === null) {
+    issues.push(`its listening ports can't be read (no ${probe.platform === "darwin" ? "lsof" : "ss or /proc"}), so no server there is forwarded`);
+  }
   if (probe.brew?.blocked) {
     // Someone installed Homebrew there to install tools with, and every brew command fails: say why, and the one fix.
     issues.push(
@@ -707,10 +713,11 @@ export function statusFrom(probe: ProbeResult, lastSeenAt: number): TerminalBack
  * when there is none. An agent older than 0.2.2 reports only the shell's.
  */
 function gitIssue(probe: ProbeResult): string | undefined {
+  const missing = `git not found${installHint(probe, { apt: "git" })}`;
   const g = probe.syncGit;
-  if (!g) return probe.tools?.git ? undefined : "git not found";
-  if (g.version) return undefined;
-  if (!g.path) return "git not found";
+  if (!g) return probe.tools?.git ? gitTooOld(probe.tools.git) : missing;
+  if (g.version) return gitTooOld(g.version);
+  if (!g.path) return missing;
   const which = `git (${g.path}${g.developerDir ? ` from ${g.developerDir}` : ""})`;
   if (g.exitCode === 69) {
     // Only without the Command Line Tools: with them, git runs from theirs.
@@ -723,12 +730,12 @@ function gitIssue(probe: ProbeResult): string | undefined {
   return `${which} won't run (exit ${g.exitCode}${g.error ? `: ${g.error}` : ""})`;
 }
 
-/** One short reason per address, for the status line and the refusal. */
-export function describeConnectError(err: unknown): string {
+/** One short reason per address, for the status line and the refusal. `platform`: the OS last seen there, for what to check. */
+export function describeConnectError(err: unknown, platform?: string): string {
   const m = errText(err);
   if (/host denied/i.test(m)) return "a different host key answered (not this machine)";
   if (/authentication/i.test(m)) return "the key was refused (taken out of authorized_keys, or this computer's address isn't in its from= list)";
-  if (/ECONNREFUSED/.test(m)) return "connection refused (is Remote Login on?)";
+  if (/ECONNREFUSED/.test(m)) return `connection refused (${refusedHint(platform)})`;
   if (/ENOTFOUND|EAI_AGAIN/.test(m)) return "unknown name";
   if (/EHOSTUNREACH|ENETUNREACH/.test(m)) return "unreachable";
   if (/ETIMEDOUT|timed out|Timed out/i.test(m)) return "no answer (asleep, off, or off the network)";

@@ -1,7 +1,7 @@
 /**
- * The host's process table, as `ps` and `lsof` print it. Kept as pure parsing
- * and planning functions so they can be tested anywhere. The few calls that
- * run `ps`, `pgrep` and `lsof` sit at the bottom.
+ * The host's process table and its listeners, and what to kill. Pure parsing
+ * and planning functions, so they can be tested anywhere. Reading them from
+ * the machine (`ps` and `lsof` on macOS, /proc on Linux) is platform.ts's.
  *
  * WHAT A SESSION OWNS. The shell is started with `setsid`, so its pid is its
  * session id and its process group. It owns:
@@ -11,7 +11,7 @@
  *   shell, so this finds a background job reparented to launchd after the
  *   shell died. (Measured: macOS `pgrep -s` doesn't find those once the
  *   session leader is gone.);
- * - every process still in its session (`pgrep -s`), where that works;
+ * - every process still in its session (`pgrep -s`, or /proc), where that works;
  * - every process the owner saw in its tree and recorded with its start
  *   time ("tracked"), which catches one that left the session with `setsid`
  *   or a double fork;
@@ -20,13 +20,17 @@
  * Process groups are killed as well as pids, so a child forked between the
  * listing and the kill still goes.
  */
-import { execFile } from "node:child_process";
-
 export interface ProcRow {
   pid: number;
   ppid: number;
   pgid: number;
-  /** `ps -o lstart=`, e.g. `Sun Nov  1 12:00:00 2026`. With the pid, a process's identity. */
+  /** The session id, where the platform reads it with the rest (Linux). */
+  sid?: number;
+  /**
+   * When it started; with the pid, a process's identity. macOS: `ps -o
+   * lstart=`, e.g. `Sun Nov  1 12:00:00 2026`. Linux: `@` and its starttime in
+   * /proc (platform.ts).
+   */
   start: string;
   command: string;
 }
@@ -69,14 +73,23 @@ export function descendantsOf(rows: readonly ProcRow[], roots: Iterable<number>)
 }
 
 /**
+ * Whether two starts can be compared: both `ps`'s lstart, or both /proc's
+ * `@starttime`. An agent before 0.5.0 recorded lstart on Linux too; such a
+ * start is treated like none at all, as in a record older still.
+ */
+export function comparableStarts(a: string, b: string): boolean {
+  return a.startsWith("@") === b.startsWith("@");
+}
+
+/**
  * Whether `pid` is still the process that was recorded with start time
- * `start`. With no recorded start (an older record), a live pid is taken on
- * trust.
+ * `start`. With no recorded start (an older record), or one in another form,
+ * a live pid is taken on trust.
  */
 export function sameProcess(rows: readonly ProcRow[], pid: number | undefined, start: string | undefined): boolean {
   if (!pid) return false;
   const r = rows.find((x) => x.pid === pid);
-  return Boolean(r) && (!start || r!.start === start);
+  return Boolean(r) && (!start || !comparableStarts(r!.start, start) || r!.start === start);
 }
 
 /**
@@ -88,7 +101,7 @@ export function sameProcess(rows: readonly ProcRow[], pid: number | undefined, s
 export function rootReused(rows: readonly ProcRow[], root: number | undefined, rootStart: string | undefined): boolean {
   if (!root || !rootStart) return false;
   const r = rows.find((x) => x.pid === root);
-  return Boolean(r) && r!.start !== rootStart;
+  return Boolean(r) && comparableStarts(r!.start, rootStart) && r!.start !== rootStart;
 }
 
 /** Processes in the shell's process group (its pid), unless that pid is someone else's now. */
@@ -174,12 +187,7 @@ export interface Listener {
 /** The `lsof` that {@link parseLsof} reads: TCP listeners, numeric, in field form. */
 export const LSOF_ARGS = ["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"];
 
-/**
- * Listeners from `lsof -nP -iTCP -sTCP:LISTEN -F pcn`. A port held on several
- * addresses by one process is listed once, preferring 127.0.0.1, then a
- * wildcard. Vite's `localhost` on a resolver that prefers IPv6 binds only
- * `[::1]`, and that must be dialled on ::1.
- */
+/** Listeners from `lsof -nP -iTCP -sTCP:LISTEN -F pcn`, each added as {@link addListener} does. */
 export function parseLsof(out: string): Listener[] {
   const found = new Map<string, Listener>();
   let pid = 0;
@@ -196,16 +204,27 @@ export function parseLsof(out: string): Listener[] {
     } else if (tag === "n" && pid) {
       const cut = val.lastIndexOf(":");
       if (cut < 0) continue;
-      const port = Number(val.slice(cut + 1));
-      if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
-      const addr = val.slice(0, cut).replace(/^\[|\]$/g, "").replace(/%.*$/, "");
-      const host = addr === "*" || addr === "0.0.0.0" || addr === "::" ? "127.0.0.1" : addr;
-      const key = `${pid}:${port}`;
-      const prev = found.get(key);
-      if (!prev || host === "127.0.0.1") found.set(key, { pid, command, host, port });
+      addListener(found, pid, command, val.slice(0, cut), Number(val.slice(cut + 1)));
     }
   }
   return [...found.values()].sort((a, b) => a.port - b.port || a.pid - b.pid);
+}
+
+/**
+ * Add a listener, once per process and port. A port held on several
+ * addresses by one process is listed once, preferring 127.0.0.1, then a
+ * wildcard. Vite's `localhost`, on a resolver that prefers IPv6, binds only
+ * `[::1]`, and that must be dialled on ::1. An IPv4-mapped address is dialled
+ * as the IPv4 one.
+ */
+export function addListener(found: Map<string, Listener>, pid: number, command: string, address: string, port: number): void {
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !pid) return;
+  const addr = address.replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+  const mapped = addr.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i)?.[1];
+  const host = addr === "*" || addr === "0.0.0.0" || addr === "::" ? "127.0.0.1" : (mapped ?? addr);
+  const key = `${pid}:${port}`;
+  const prev = found.get(key);
+  if (!prev || host === "127.0.0.1") found.set(key, { pid, command, host, port });
 }
 
 export interface SessionTree {
@@ -239,45 +258,7 @@ export function attribute(listeners: readonly Listener[], rows: readonly ProcRow
   return out;
 }
 
-/* ---------------------------------------------------------------- the host */
-
-function run(file: string, args: string[], okCodes: number[] = [0]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(file, args, { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
-      const code = err ? (typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : -1) : 0;
-      if (okCodes.includes(code)) resolve(stdout);
-      else reject(err);
-    });
-  });
-}
-
-export async function listProcs(): Promise<ProcRow[]> {
-  return parsePs(await run("ps", PS_ARGS));
-}
-
-/** Pids in session `sid`. `pgrep` exits 1 when there are none. */
-export async function sessionMembers(sid: number): Promise<number[]> {
-  const out = await run("pgrep", ["-s", String(sid)], [0, 1]).catch(() => "");
-  return out
-    .split(/\s+/)
-    .map(Number)
-    .filter((n) => Number.isInteger(n) && n > 1);
-}
-
-/** TCP listeners of THIS user's processes (lsof shows no one else's without root). `lsof` exits 1 when there are none. */
-export async function listListeners(): Promise<Listener[]> {
-  return parseLsof(await run("lsof", LSOF_ARGS, [0, 1]));
-}
-
-/** Whether `pid` exists (signal 0). EPERM means it exists but isn't ours. */
-export function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
+/* ------------------------------------------------------------ killing */
 
 export interface KillIo {
   listProcs(): Promise<ProcRow[]>;
@@ -286,19 +267,6 @@ export interface KillIo {
   kill(pid: number, signal: NodeJS.Signals): void;
   sleep(ms: number): Promise<void>;
 }
-
-export const hostKillIo: KillIo = {
-  listProcs,
-  sessionMembers,
-  kill: (pid, signal) => {
-    try {
-      process.kill(pid, signal);
-    } catch {
-      /* already gone */
-    }
-  },
-  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-};
 
 /**
  * SIGKILL the whole tree, groups first, then pids. Looks again, up to three

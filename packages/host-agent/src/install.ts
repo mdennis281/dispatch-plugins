@@ -82,7 +82,9 @@ export function installRuntimeScript(root: string, t: NodeTarball): string {
     'rm -rf "$T"; mkdir -p "$T"',
     'cat > "$T/node.tar.gz"',
     `if [ "$(sha "$T/node.tar.gz")" != ${sq(t.sha256)} ]; then rm -rf "$T"; echo "node tarball checksum mismatch" >&2; exit ${INSTALL_EXIT.checksum}; fi`,
-    'tar -xzf "$T/node.tar.gz" -C "$T"',
+    // As root, tar keeps the archive's owners (nodejs.org's build uid); the
+    // runtime must be the login's own. GNU tar and macOS's bsdtar both take this.
+    'tar --no-same-owner -xzf "$T/node.tar.gz" -C "$T"',
     `if [ "$("$T"/${sq(t.dir)}/bin/node --version)" != ${sq(`v${t.version}`)} ]; then rm -rf "$T"; echo "unpacked node is not v${t.version}" >&2; exit ${INSTALL_EXIT.checksum}; fi`,
     // Two renames: a directory can't be renamed over a non-empty one. For the
     // instant between them the path is missing, and a session started in that

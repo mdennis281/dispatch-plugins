@@ -125,6 +125,86 @@ describe("provision", () => {
     expect(r.executablePath).toBe(join(root, "browsers", "chromium-1", "chrome"));
   });
 
+  describe("on Linux, the browser's system libraries", () => {
+    /** What ldd says, call by call; the last answer repeats. */
+    let ldd: RunResult[];
+    let depsRun: Array<{ args: readonly string[]; env: Record<string, string> }>;
+    const MISSING = "\tlinux-vdso.so.1 (0x0000)\n\tlibnss3.so => not found\n\tlibgbm.so.1 => not found\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x0000)\n";
+    const linux = (uid: number): ProvisionDeps => {
+      const d = deps();
+      const run = d.run;
+      return {
+        ...d,
+        system: { os: "linux", uid },
+        run: async (cmd, args, opts) => {
+          if (cmd === "ldd") return ldd.length > 1 ? ldd.shift()! : ldd[0]!;
+          if (args[1] === "install-deps") {
+            depsRun.push({ args, env: opts.env });
+            return { code: 0, stdout: "", stderr: "" };
+          }
+          return run(cmd, args, opts);
+        },
+      };
+    };
+    beforeEach(() => {
+      depsRun = [];
+      ldd = [{ code: 0, stdout: "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x0000)\n", stderr: "" }];
+    });
+
+    it("are checked, and nothing more happens when they're all there", async () => {
+      const r = await provision(SPEC, linux(0));
+      expect(depsRun).toEqual([]);
+      expect(r.installed).toEqual(["@playwright/mcp@0.0.79", "chromium"]);
+      // Looked up only to check its libraries: the spec didn't ask for the executable.
+      expect(r.executablePath).toBeUndefined();
+    });
+
+    it("are installed with Playwright's install-deps as root, when some are missing", async () => {
+      ldd = [
+        { code: 0, stdout: MISSING, stderr: "" },
+        { code: 0, stdout: MISSING, stderr: "" },
+        { code: 0, stdout: "", stderr: "" },
+      ];
+      const r = await provision(SPEC, linux(0));
+      expect(depsRun).toHaveLength(1);
+      expect(depsRun[0]!.args).toEqual([join(prefixFor(root, SPEC), "node_modules", "playwright-core", "cli.js"), "install-deps", "chromium"]);
+      expect(depsRun[0]!.env.DEBIAN_FRONTEND).toBe("noninteractive");
+      expect(r.installed).toContain("system libraries for chromium");
+    });
+
+    it("fail the provision with their names when the login isn't root", async () => {
+      ldd = [{ code: 0, stdout: MISSING, stderr: "" }];
+      await expect(provision(SPEC, linux(1000))).rejects.toThrow(/lacks system libraries it needs \(libgbm\.so\.1, libnss3\.so\), and only root can install them/);
+      expect(depsRun).toEqual([]);
+    });
+
+    it("fail it when they are still missing after installing them", async () => {
+      ldd = [{ code: 0, stdout: MISSING, stderr: "" }];
+      await expect(provision(SPEC, linux(0))).rejects.toThrow(/needs system libraries this machine lacks \(libgbm\.so\.1, libnss3\.so\)/);
+    });
+
+    it("aren't looked for when the browser's executable can't be found, unless the spec wanted it", async () => {
+      const d = linux(1000);
+      const run = d.run;
+      let lddRan = false;
+      const lost: ProvisionDeps = {
+        ...d,
+        run: async (cmd, args, opts) => {
+          if (cmd === "ldd") lddRan = true;
+          return args[0] === "-e" ? { code: 1, stdout: "", stderr: "Cannot find module 'playwright-core'" } : run(cmd, args, opts);
+        },
+      };
+      await expect(provision(SPEC, lost)).resolves.toMatchObject({ installed: ["@playwright/mcp@0.0.79", "chromium"] });
+      expect(lddRan).toBe(false);
+      await expect(provision({ ...SPEC, executable: true }, lost)).rejects.toThrow(/executable wasn't found: Cannot find module/);
+    });
+
+    it("aren't held against it when ldd can't tell", async () => {
+      ldd = [{ code: 127, stdout: "", stderr: "ldd: not found" }];
+      await expect(provision(SPEC, linux(1000))).resolves.toMatchObject({ installed: ["@playwright/mcp@0.0.79", "chromium"] });
+    });
+  });
+
   it("says why npm failed, and leaves nothing half-installed", async () => {
     npmFails = "404 Not Found - @playwright/mcp@0.0.79";
     await expect(provision(SPEC, deps())).rejects.toThrow(/npm install @playwright\/mcp@0\.0\.79 failed \(exit 1\): npm ERR! 404/);

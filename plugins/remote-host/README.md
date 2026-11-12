@@ -13,6 +13,7 @@ A [Dispatch](https://github.com/mdennis281/dispatch) plugin, part of [dispatch-p
 - **Fails closed.** A machine that is asleep, off, or answering with the wrong host key is reported **offline**. A command sent to it is refused at once with the reason. It never runs in PowerShell on the Dispatch computer instead (`fallback: "refuse"`). The same goes for a sync that fails: the command doesn't run against stale files.
 - **Cleans up after a chat** (see [When a chat ends](#when-a-chat-ends)): idle, its shells end; deleted, its checkout there goes too.
 - **Stable and dev share machines safely.** Everything the plugin leaves on a machine lives under that Dispatch instance's id (`~/.dispatch-host/<instance>/`), so one instance's cleanup never touches the other's sessions.
+- **Linux works too** (see [Linux machines](#linux-machines)): a 64-bit Debian, Ubuntu or the like, over its sshd.
 
 ## Pairing a machine
 
@@ -123,6 +124,29 @@ On a Dispatch with agent tools (#519), the agent gets two tools of remote-host's
 
 Both copy and read as `dispatch`, so they reach nothing a chat shell couldn't. On an older Dispatch the plugin works the same without them.
 
+## Linux machines
+
+A Linux machine pairs like a Mac: its own sshd, an account of its own for Dispatch, the same three steps. What differs:
+
+- **What it needs.** A 64-bit machine (x86_64 or arm64) with glibc: Debian, Ubuntu, Fedora and the like. Alpine and
+  others on musl, and 32-bit ARM (armv7l), aren't supported: the pinned Node doesn't run there, and the status says so
+  before anything is sent. It also needs sshd running, `bash`, and git 2.26 or newer for the sync (Debian 11 and
+  Ubuntu 22.04 have newer). The status names whatever is missing, with the `apt install` for it on Debian and Ubuntu.
+- **Processes and ports come from /proc.** dispatch-host reads each process's exact start time from /proc (no
+  procps needed), and finds the ports a chat's servers listen on with `ss` (iproute2), or from /proc/net/tcp when
+  there is no `ss`. lsof isn't needed.
+- **Root with approval is for Macs only, so far.** On a Linux machine `sudo` in a chat's terminal still asks
+  Dispatch, which says it can't be set up there, and the Root row offers no setup.
+- **Pairing refuses root.** A paired machine is one people use for other work. Logged in as root, every command the
+  agent ran there would run as root with nobody asked. Make an account for Dispatch instead. A box Dispatch is given
+  for one chat (a container another plugin provisions) is another matter, and may be logged in as root.
+- **A root login** (such a box) gets no `sudo` shim: the shell is root already, and the agent is told so. Browsers
+  there run with Chrome's sandbox off (`--no-sandbox`), since Chrome won't start as root with it. Their first use
+  installs the system libraries the browser needs (`playwright install-deps`, which uses apt). Logged in as anyone
+  else, a machine lacking them fails that first use and names them.
+- **Homebrew** is mentioned to the agent on Linux only when the login can install with it, and never for root, which
+  brew refuses.
+
 ## Root, with your approval
 
 The account Dispatch logs in as has no sudo password, and never gets one. Instead, `sudo <command>` (or `dispatch-elevate <command>`) in a chat's terminal there asks **you**:
@@ -190,7 +214,8 @@ Each machine reports one of three states to Dispatch, re-checked every 30 s:
 - **online**, sometimes with a note that isn't a fault: Homebrew builds nothing from source because the Command Line
   Tools are older than it needs on that macOS (brew's own `check_clt_minimum_version`). Bottled formulae still
   install. The agent is told so, and not to update them itself;
-- **degraded**, with the reason: low disk, an unreadable login environment, or git that sync can't run. The reason
+- **degraded**, with the reason: low disk, an unreadable login environment, no `bash`, no way to read the ports
+  servers listen on, a git older than 2.26, or git that sync can't run. The reason
   names that git and says why: none on the PATH, no developer tools, or (exit 69) Xcode's license not accepted,
   with the fix. On a Mac with the Command Line Tools installed, sync's git runs with
   `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, and so does a chat's shell by default. An Xcode update then
@@ -198,6 +223,7 @@ Each machine reports one of three states to Dispatch, re-checked every 30 s:
   step 5). Also a Homebrew that won't run there: brew ignores `DEVELOPER_DIR`, so it stops at an Xcode whose license
   isn't accepted until `xcode-select` points at the Command Line Tools (step 6). When brew runs, the agent is told to
   install missing tools with `brew install`, without `sudo`;
-- **offline**, with the reason: no answer, refused, the key refused, a different host key.
+- **offline**, with the reason: no answer, refused (is Remote Login on? is sshd running?), the key refused, a
+  different host key, or a machine dispatch-host can't run on.
 
 The pane shows it on each machine's row, and refreshes every 5 s while it is open. `GET /hosts` lists the machines with their status and their last probe (OS, architecture, tools, free disk, who is logged in at the screen). **Check now** (`POST /hosts/<name>/check`) reconnects at once.

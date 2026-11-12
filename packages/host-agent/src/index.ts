@@ -33,6 +33,7 @@ export { checkProvisionSpec, prefixFor, type ProvisionResult, type ProvisionSpec
 export { NODE_RUNTIME, compareVersions, nodeTarball, runtimeAction, type NodeDist, type NodeTarball } from "./runtime.js";
 export { INSTALL_EXIT, agentBuildId, agentPath, installAgentScript, installRuntimeScript, nodePath, shCommand, sq } from "./install.js";
 export { attribute, parseLsof, parsePs, type Attribution, type Listener, type ProcRow } from "./procs.js";
+export type { ElevationMode, PortsVia } from "./platform.js";
 export type { BrewCheck, GitCheck, ProbeResult } from "./probe.js";
 export { CLT_DEVELOPER_DIR, GIT_SH_ENV, XCODE_DEVELOPER_DIR, gitEnv, hasCommandLineTools } from "./git-env.js";
 export type { ChatDir, ForgetResult, GcResult, InstanceInfo } from "./lifecycle.js";

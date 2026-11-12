@@ -24,6 +24,7 @@ import { keyBlobOf, removeKeyScript } from "./authorized-keys.js";
 import { HELPER_VERSION, MANUAL_UNINSTALL, removeElevation, verifyElevation, type ElevationSetups, type RemovedThere } from "./elevation-setup.js";
 import { elevateSecretName, keySecretName, validAddress, type HostConfig } from "./hosts.js";
 import { UserError, type Pairing } from "./pairing.js";
+import { elevationSetupPossible, rootLogin } from "./remote-platform.js";
 import type { HostRegistry } from "./registry.js";
 
 export interface RoutesDeps {
@@ -101,7 +102,13 @@ export function defineRoutes(deps: RoutesDeps): (r: PluginRouter<PluginRequest, 
 
     r.post("/hosts/:slug/elevation/setup", h(async (req) => {
       const host = find(req);
-      if (!registry.get(host.slug)) throw new UserError(`${host.slug} is not registered in this instance`, 409);
+      const entry = registry.get(host.slug);
+      if (!entry) throw new UserError(`${host.slug} is not registered in this instance`, 409);
+      // The setup script makes a hidden macOS account; a root login has nothing to elevate to.
+      if (rootLogin(entry.link.probe, host.user)) throw new UserError(`${host.label}'s login is root already: there is nothing to set up`);
+      if (!elevationSetupPossible(entry.link.probe, host.user)) {
+        throw new UserError(`root with approval can only be set up on a Mac so far, and ${host.label} isn't one`);
+      }
       // On already (the setup run again, to update the helper): the same key,
       // so the login that works keeps working whether or not Verify follows.
       // As stored, so verifying stores back exactly the same secret.

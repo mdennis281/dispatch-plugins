@@ -325,6 +325,52 @@ describe("the agent's note", () => {
     await connected();
     expect(r.get("studio")!.backend.agentNote({ chatId: "chat-1" })).not.toContain("DEVELOPER_DIR");
   });
+
+  const DEBIAN = { name: "Debian GNU/Linux", version: "12", id: "debian" };
+
+  it("names Debian as Debian GNU/Linux, and says a root login runs everything as root, with no sudo and no Homebrew", async () => {
+    const approvals: Approvals = { request: async () => ({ decision: "denied", at: 0 }) };
+    const { m, r, connected } = setup({ approvals });
+    m.probe = {
+      ...PROBE,
+      platform: "linux",
+      arch: "x64",
+      os: DEBIAN,
+      uid: 0,
+      elevation: "root",
+      brew: { path: "/home/linuxbrew/.linuxbrew/bin/brew", version: "Homebrew 7.0.12", writable: true },
+    };
+    await connected();
+    await r.get("studio")!.backend.elevation.refresh();
+    const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
+    expect(note).toContain("This terminal runs on Studio (Debian GNU/Linux 12, x64)");
+    expect(note).toContain("- Root: the login on Studio is root, so everything you run there runs as root already: no sudo");
+    expect(note).not.toContain("dispatch-elevate");
+    expect(note).not.toMatch(/brew/i);
+    expect(r.get("studio")!.backend.elevation.state).toBe("root");
+  });
+
+  it("on Linux as someone else, says root with approval isn't there yet, and keeps Homebrew only when it can install", async () => {
+    const approvals: Approvals = { request: async () => ({ decision: "denied", at: 0 }) };
+    const { m, r, connected } = setup({ approvals });
+    m.probe = {
+      ...PROBE,
+      platform: "linux",
+      os: DEBIAN,
+      uid: 1000,
+      elevation: "approval-helper",
+      brew: { path: "/home/linuxbrew/.linuxbrew/bin/brew", version: "Homebrew 7.0.12", writable: true },
+    };
+    await connected();
+    await r.get("studio")!.backend.elevation.refresh();
+    const note = r.get("studio")!.backend.agentNote({ chatId: "chat-1" });
+    expect(note).toMatch(/nothing can run as root on Studio: root with approval can only be set up on a Mac so far/);
+    expect(note).not.toContain("Homebrew never needs it");
+    expect(note).toContain("brew install <formula>");
+    m.probe = { ...m.probe, brew: { ...m.probe.brew!, writable: false } };
+    await r.get("studio")!.link.checkNow();
+    expect(r.get("studio")!.backend.agentNote({ chatId: "chat-1" })).not.toMatch(/brew/i);
+  });
 });
 
 describe("the previous instance id", () => {

@@ -14,6 +14,9 @@
  *   one, those are refused with that reason, never quietly run otherwise.
  * - **Configured servers** (`info.command`): run as written, in the chat's
  *   directory there. Their paths are the project's to get right.
+ * - **A root login** (a Linux box): Chrome won't start as root with its
+ *   sandbox on, so both browser servers get it turned off (`--no-sandbox`;
+ *   chrome-devtools-mcp passes it on with `--chrome-arg`).
  */
 import type { TerminalProcessSpawnInfo } from "@dispatch/plugin-sdk";
 import type { ProvisionSpec } from "@dispatch-plugins/host-agent";
@@ -56,6 +59,8 @@ export interface PlanContext {
   label: string;
   /** Whether the machine has a desktop session a headed browser could use (Tier B). */
   desktop: boolean;
+  /** The login there is root: the browser runs without Chrome's sandbox, which refuses root. */
+  root?: boolean;
 }
 
 /** Refused before anything is installed: the agent's call fails with this. */
@@ -97,9 +102,23 @@ function planPlaywright(b: Bundled, ctx: PlanContext): McpPlan {
     browser = "chromium";
     if (engine !== "chromium") notes.push(`${engine} → Playwright's Chromium (Chrome for Testing); no system ${engine} is installed for it there`);
   }
+  if (ctx.root) {
+    takeFlag(args, "--no-sandbox");
+    notes.push("root: the browser's sandbox is off (--no-sandbox)");
+  }
   return {
     provision: { packages: [{ name: b.package, version: b.version }], entry: { name: b.package, bin: b.bin }, browser },
-    argv: (p) => [p.node, need(p.entry, "entry"), ...args, "--browser", browser, "--output-dir", p.out, "--headless"],
+    argv: (p) => [
+      p.node,
+      need(p.entry, "entry"),
+      ...args,
+      "--browser",
+      browser,
+      "--output-dir",
+      p.out,
+      "--headless",
+      ...(ctx.root ? ["--no-sandbox"] : []),
+    ],
     env: (p) => ({ ...(b.env ?? {}), PLAYWRIGHT_BROWSERS_PATH: need(p.browsersPath, "browsersPath"), TMPDIR: p.tmp }),
     ownRoots: true,
     notes,
@@ -124,10 +143,18 @@ function planChromeDevtools(b: Bundled, ctx: PlanContext): McpPlan {
       browser: "chromium",
       executable: true,
     },
-    argv: (p) => [p.node, need(p.entry, "entry"), ...args, "--executablePath", need(p.executablePath, "executablePath"), "--headless"],
+    argv: (p) => [
+      p.node,
+      need(p.entry, "entry"),
+      ...args,
+      "--executablePath",
+      need(p.executablePath, "executablePath"),
+      "--headless",
+      ...(ctx.root ? ["--chrome-arg=--no-sandbox"] : []),
+    ],
     env: (p) => ({ ...(b.env ?? {}), TMPDIR: p.tmp }),
     ownRoots: true,
-    notes: ["Chrome → Playwright's Chromium (Chrome for Testing) there"],
+    notes: ["Chrome → Playwright's Chromium (Chrome for Testing) there", ...(ctx.root ? ["root: the browser's sandbox is off (--chrome-arg=--no-sandbox)"] : [])],
   };
 }
 
