@@ -179,7 +179,7 @@ describe.skipIf(!posix)("legacy rescue (real git)", () => {
     expect(res.notice).toContain("`a.ts` (modified)");
     expect(res.notice).toContain("`new.txt` (new)");
     expect(res.notice).toContain("`c.txt` (deleted)");
-    expect(res.notice).toContain(`git diff ${base} ${ref} --stat`);
+    expect(res.notice).toContain(`git diff ${base.slice(0, 12)} ${ref} --stat`);
     expect(kvNow()["rescue:chat1"]).toMatchObject({ phase: "done", failures: 0, vmid: 9003 });
   });
 
@@ -198,7 +198,7 @@ describe.skipIf(!posix)("legacy rescue (real git)", () => {
     expect(g(local, "rev-parse", `${ref}^`)).toBe(containerHead);
     expect(g(local, "log", "--format=%s", `${base}..${ref}`)).toContain("container work");
     expect(g(local, "show", `${ref}:later.txt`)).toBe("uncommitted after it");
-    expect(res.notice).toContain("1 commit made in the container");
+    expect(res.notice).toContain("1 commit made there");
     fsckClean(local);
   });
 
@@ -329,7 +329,7 @@ describe.skipIf(!posix)("legacy rescue (real git)", () => {
   it("an empty or missing workDir is done at once", async () => {
     const { root, local } = fixture();
     const res = await rescuer().r.run(job(`${root}/ct/nowhere`, [local]));
-    expect(res).toEqual({ entries: [], notice: undefined });
+    expect(res).toEqual({ entries: [], notice: undefined, notices: [] });
   });
 
   it("concurrent spawns share one run", async () => {

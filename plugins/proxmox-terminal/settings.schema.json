@@ -44,7 +44,17 @@
       "title": "SSH private key file",
       "description": "Path on the Dispatch host, e.g. ~/.ssh/dispatch_proxmox_terminal. Used when the PROXMOX_TERMINAL_SSH_KEY secret is not set. PROXMOX_TERMINAL_SSH_PASSWORD works instead of (or as well as) a key."
     },
-    "workDir": { "type": "string", "title": "Checkout directory on the container", "default": "/root/work" },
+    "workDir": {
+      "type": "string",
+      "title": "Pre-0.2 checkout directory on the container",
+      "description": "Only used to rescue checkouts made before 0.2 into your local repository. Since 0.2 the checkout is remote-host's.",
+      "default": "/root/work"
+    },
+    "templateHostKey": {
+      "type": "string",
+      "title": "Template SSH host key",
+      "description": "The template's ed25519 host key fingerprint (SHA256:…, from `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on it), which every linked clone shares; remote-host pins it. Moving to a new template with its own key? List both, separated by a space, until the old template's clones are gone. Password logins need it. Leave empty to trust whatever answers at the address the Proxmox API gives (Settings → Proxmox containers warns)."
+    },
     "spawnTimeoutSeconds": {
       "type": "integer",
       "title": "Provisioning timeout (seconds)",

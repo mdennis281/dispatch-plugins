@@ -1,11 +1,14 @@
 /**
  * proxmox-terminal — run a Dispatch chat's managed terminals in a per-chat
- * Proxmox LXC. See README.md for what it does and how to set it up, and
- * Dispatch's docs/plugins.md → "Terminal backends" for the contract.
+ * Proxmox LXC, through remote-host. See README.md for what it does and how to
+ * set it up, and Dispatch's docs/plugins.md → "Terminal backends" and
+ * "Dependencies" for the contracts.
  */
-import { definePlugin } from "@dispatch/plugin-sdk";
+import { definePlugin, type PluginContext } from "@dispatch/plugin-sdk";
 import { sshAuthFrom } from "@dispatch-plugins/remote-core";
-import { ProxmoxTerminalBackend, type ShutdownReason } from "./backend.js";
+import { BACKEND_ID, ProxmoxTerminal, type ShutdownReason } from "./backend.js";
+import type { PluginDependencies } from "./remote-host-link.js";
+import { defineRoutes } from "./routes.js";
 import { readSettings } from "./settings.js";
 
 const TOKEN = "PROXMOX_TERMINAL_API_TOKEN";
@@ -24,20 +27,31 @@ interface CleanupHooks {
   reconcile(e: { chats: Array<{ id: string }>; deadline: number; signal: AbortSignal }): Promise<void>;
 }
 
-/** The live backend, for the module-level hooks. One per activation. */
-let backend: ProxmoxTerminalBackend | undefined;
+/** The live plugin, for the module-level hooks. One per activation. */
+let terminal: ProxmoxTerminal | undefined;
+/** Unsubscribes this activation's settings listener. */
+let offSettings: (() => void) | undefined;
+
+/** `ctx.dependencies`, on a core that has plugin dependencies (C2). Feature-detected, never assumed. */
+function dependenciesOf(ctx: PluginContext): PluginDependencies | undefined {
+  const d = ctx.dependencies;
+  return d && typeof d.get === "function" ? d : undefined;
+}
 
 const plugin = definePlugin({
   deactivate() {
-    backend = undefined;
+    offSettings?.();
+    offSettings = undefined;
+    terminal = undefined;
   },
   activate(ctx) {
     if (!ctx.terminals) {
       ctx.log.error("this Dispatch has no `terminals` capability — it predates terminal backends (#414); update Dispatch");
       return;
     }
+    const terminals = ctx.terminals;
     const settings = () => readSettings(ctx.settings.get());
-    backend = new ProxmoxTerminalBackend({
+    const t = new ProxmoxTerminal({
       ctx,
       kv: ctx.kv,
       settings,
@@ -48,21 +62,47 @@ const plugin = definePlugin({
         passwordSecret: PASSWORD,
         keyPath: () => settings().sshKeyPath,
       }),
+      dependencies: () => dependenciesOf(ctx),
+      statusChanged: () => pushStatus(),
     });
-    ctx.terminals.registerBackend(backend);
-    ctx.log.info("registered terminal backend \"proxmox\"");
+    // Only a change is pushed: core broadcasts every one to every client.
+    let pushed = "";
+    const pushStatus = () => {
+      const s = t.status();
+      const key = JSON.stringify(s);
+      if (key === pushed) return;
+      pushed = key;
+      terminals.setStatus?.(BACKEND_ID, s);
+    };
+    terminal = t;
+    // Registered before anything that could fail: with `fallback: "refuse"`,
+    // a terminal is refused rather than run locally whatever happens next.
+    terminals.registerBackend(t.forwarder);
+    // The Settings pane's (client.tsx): pre-0.2 containers and their actions.
+    ctx.routes?.(defineRoutes(ctx, () => terminal));
+    t.link.connect();
+    pushStatus();
+    // A saved API URL, token or CA: say so now, and ask the API again (while
+    // offline, core calls nothing that would find out).
+    offSettings = ctx.settings.onChange?.(() => {
+      pushStatus();
+      void t.probe().then(pushStatus);
+    });
+    const why = t.link.reason();
+    if (why) ctx.log.warn(`terminals are refused: ${why}. Containers are still managed.`);
+    else ctx.log.info('registered terminal backend "proxmox" (through remote-host)');
     // Not awaited: activation must not hang on a Proxmox that is down. The
-    // sweep logs and retries every minute on its own.
-    void backend.start();
+    // sweep logs and retries every minute on its own, in refusing mode too.
+    void t.start();
   },
 });
 
 const hooks: CleanupHooks = {
   async onShutdown(e) {
-    await backend?.onShutdown(e);
+    await terminal?.onShutdown(e);
   },
   async reconcile(e) {
-    await backend?.reconcile({ chats: e.chats });
+    await terminal?.reconcile({ chats: e.chats });
   },
 };
 
