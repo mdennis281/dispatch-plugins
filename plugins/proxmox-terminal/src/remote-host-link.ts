@@ -8,26 +8,30 @@
  * remote-host is there. Without it, terminals are refused with the reason
  * ("refusing mode") — never run locally.
  */
-import type { PluginContext } from "@dispatch/plugin-sdk";
+import type { PluginContext, PluginDependencyStatus } from "@dispatch/plugin-sdk";
 import { errText } from "@dispatch-plugins/remote-core";
-import {
-  MACHINES,
-  type DependencyState,
-  type MachinesV1,
-  type PluginDependencies,
-  type ProvisionedBackend,
-  type ProvisionedBackendOptions,
-} from "./machines-api.js";
+import type { MachinesV1, ProvisionedBackend, ProvisionedBackendOptions } from "@dispatch-plugins/remote-host-api";
+
+/** `ctx.dependencies`: absent on a core without plugin dependencies (before Dispatch ed2ac93). */
+export type PluginDependencies = NonNullable<PluginContext["dependencies"]>;
+
+/**
+ * remote-host's `machines@1`. A literal, not the API package's `MACHINES`:
+ * that package is types-only at run time, so nothing of it is bundled here.
+ */
+const MACHINES = { plugin: "remote-host", name: "machines", major: 1 } as const;
 
 export const NEEDS_NEWER_DISPATCH =
   "proxmox-terminal 0.2 needs a newer Dispatch (one with plugin dependencies) to run terminals; until then they are refused";
 
 /** Why terminals are refused, for a dependency in `state`. */
-export function reasonFor(s: { state: DependencyState; detail?: string } | undefined): string {
+export function reasonFor(s: Pick<PluginDependencyStatus, "state" | "detail"> | undefined): string {
   const detail = s?.detail ? ` (${s.detail})` : "";
   switch (s?.state) {
     case "missing":
       return "Remote host is not installed. proxmox-terminal needs it to run terminals: install it from the same collection";
+    case "invalid":
+      return `Remote host's install is not usable${detail}. proxmox-terminal needs it to run terminals`;
     case "disabled":
       return "Remote host is switched off. proxmox-terminal needs it to run terminals";
     case "incompatible":
@@ -114,7 +118,7 @@ export class RemoteHostLink {
   }
 }
 
-function safeState(deps: PluginDependencies): { state: DependencyState; detail?: string } | undefined {
+function safeState(deps: PluginDependencies): PluginDependencyStatus | undefined {
   try {
     return deps.state(MACHINES.plugin);
   } catch {

@@ -21719,6 +21719,8 @@ function reasonFor(s) {
   switch (s?.state) {
     case "missing":
       return "Remote host is not installed. proxmox-terminal needs it to run terminals: install it from the same collection";
+    case "invalid":
+      return `Remote host's install is not usable${detail}. proxmox-terminal needs it to run terminals`;
     case "disabled":
       return "Remote host is switched off. proxmox-terminal needs it to run terminals";
     case "incompatible":
@@ -21928,7 +21930,9 @@ class ProxmoxTerminal {
       host: ip,
       username: s.sshUser,
       ...auth,
-      hostVerifier: s.templateHostKey ? pinnedHostKey([s.templateHostKey]) : trustProvisioner()
+      hostVerifier: s.templateHostKey ? pinnedHostKey([s.templateHostKey]) : trustProvisioner(),
+      // A host offers one key per type: ask for the type the pin is (the template's ed25519 key).
+      ...s.templateHostKey ? { algorithms: { serverHostKey: ["ssh-ed25519"] } } : {}
     });
     await conn.connect(6e4);
     return { ...sshRescueRemote(conn), close: () => conn.close() };

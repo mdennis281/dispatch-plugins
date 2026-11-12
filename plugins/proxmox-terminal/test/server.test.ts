@@ -206,24 +206,21 @@ describe("refusing mode", () => {
 
   it("lost mid-run: refuses from then on, says so, and keeps managing containers", async () => {
     const f = fakeProxmox();
-    const rh = fakeRemoteHost();
-    const d = fakeDependencies(rh);
-    const { b, changes } = terminal(f, undefined, { idleStopMinutes: 0 }, { rh, deps: d.deps });
+    const { b, t, changes } = terminal(f, undefined, { idleStopMinutes: 0 });
     await b.forwarder.spawn(spawnInfo());
-    d.lose("disabled");
-    rh.revoke();
+    await t.lose("remote-host"); // onLost, then the link is revoked — as the host does
     expect(changes()).toBe(1);
-    expect(b.status()).toMatchObject({ state: "offline", detail: expect.stringContaining("switched off") });
-    await expect(b.forwarder.spawn(spawnInfo())).rejects.toThrow(/switched off/);
+    expect(b.status()).toMatchObject({ state: "offline" });
+    expect(b.link.reason()).not.toBe("");
+    await expect(b.forwarder.spawn(spawnInfo())).rejects.toThrow(b.link.reason());
     await b.forwarder.onChatIdle({ chatId: "c1" });
     await new Promise((r) => setTimeout(r, 50));
     expect(f.cts.get(9001)?.status).toBe("stopped"); // the Proxmox lifecycle never stops
   });
 
   it("a call that went inert under us (revoked, not yet lost) is refused, never handed back as a shell", async () => {
-    const rh = fakeRemoteHost();
-    const { b } = terminal(fakeProxmox(), undefined, {}, { rh });
-    rh.revoke();
+    const { b, t } = terminal(fakeProxmox());
+    t.revoke("remote-host"); // what came across before is inert now
     await expect(b.forwarder.spawn(spawnInfo())).rejects.toThrow(/went away/);
   });
 });
@@ -243,8 +240,9 @@ describe("activate", () => {
       id: "proxmox-terminal",
       capabilities: ["terminals", "secrets", "kv"],
       settings: { apiUrl: "https://pve:8006", node: "g" },
+      dependencies: { "remote-host": { machines: { 1: fakeRemoteHost().api } } },
+      optionalDependencies: ["remote-host"],
     });
-    Object.assign(t.ctx, { dependencies: fakeDependencies(fakeRemoteHost()).deps });
     await plugin.activate(t.ctx);
     expect(t.terminalStatus.get("proxmox")).toMatchObject({ state: "online" });
     await plugin.deactivate?.();

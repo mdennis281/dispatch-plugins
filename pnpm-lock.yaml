@@ -66,6 +66,9 @@ importers:
         specifier: workspace:*
         version: link:../../packages/remote-core
     devDependencies:
+      '@dispatch-plugins/remote-host-api':
+        specifier: workspace:*
+        version: link:../../packages/remote-host-api
       '@dispatch/plugin-sdk':
         specifier: link:../../.dispatch-sdk
         version: link:../../.dispatch-sdk

@@ -26,9 +26,9 @@ import {
 } from "@dispatch-plugins/remote-core";
 import { BACKEND_ID, LABEL, ProxmoxForwarder } from "./forwarder.js";
 import { LegacyRescue, sshRescueRemote, type RescueJob, type RescueRemote, type RescueResult } from "./legacy-rescue.js";
-import type { MachineLease, PluginDependencies, ProvisionedBackendOptions, ProvisionRequest } from "./machines-api.js";
+import type { MachineLease, ProvisionedBackendOptions, ProvisionRequest } from "@dispatch-plugins/remote-host-api";
 import { Proxmox, ProxmoxError, sleep } from "./proxmox.js";
-import { RemoteHostLink } from "./remote-host-link.js";
+import { RemoteHostLink, type PluginDependencies } from "./remote-host-link.js";
 import type { Settings } from "./settings.js";
 
 export type { ShutdownReason };
@@ -199,6 +199,8 @@ export class ProxmoxTerminal {
       username: s.sshUser,
       ...auth,
       hostVerifier: s.templateHostKey ? pinnedHostKey([s.templateHostKey]) : trustProvisioner(),
+      // A host offers one key per type: ask for the type the pin is (the template's ed25519 key).
+      ...(s.templateHostKey ? { algorithms: { serverHostKey: ["ssh-ed25519"] } } : {}),
     });
     await conn.connect(60_000);
     return { ...sshRescueRemote(conn), close: () => conn.close() };

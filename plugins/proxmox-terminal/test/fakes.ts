@@ -9,14 +9,9 @@ import { createTestContext } from "@dispatch/plugin-sdk/testing";
 import type { TerminalBackend, TerminalBackendHandle } from "@dispatch/plugin-sdk";
 import { ProxmoxTerminal, describe as describeClone } from "../src/backend.js";
 import type { RescueRemote } from "../src/legacy-rescue.js";
-import type {
-  DependencyState,
-  MachineLease,
-  MachinesV1,
-  PluginDependencies,
-  ProvisionedBackend,
-  ProvisionedBackendOptions,
-} from "../src/machines-api.js";
+import type { PluginDependencyState } from "@dispatch/plugin-sdk";
+import type { MachineLease, MachinesV1, ProvisionedBackend, ProvisionedBackendOptions } from "@dispatch-plugins/remote-host-api";
+import type { PluginDependencies } from "../src/remote-host-link.js";
 import { ProxmoxError, type Proxmox } from "../src/proxmox.js";
 import { readSettings } from "../src/settings.js";
 
@@ -169,8 +164,12 @@ export function fakeRemoteHost() {
   };
 }
 
-/** `ctx.dependencies` with remote-host in `state`. `lose(next)` fires onLost. */
-export function fakeDependencies(rh: ReturnType<typeof fakeRemoteHost>, initial: DependencyState = "ok", detail?: string) {
+/**
+ * A hand-made `ctx.dependencies` with remote-host in a given state — for the
+ * states the SDK's test context can't express (disabled, incompatible…). The
+ * default in {@link terminal} is the SDK's own, over the host's real link.
+ */
+export function fakeDependencies(rh: ReturnType<typeof fakeRemoteHost>, initial: PluginDependencyState = "ok", detail = "") {
   const s = { state: initial, detail };
   const lost: Array<() => void> = [];
   const deps: PluginDependencies = {
@@ -178,12 +177,15 @@ export function fakeDependencies(rh: ReturnType<typeof fakeRemoteHost>, initial:
       if (id !== "remote-host" || name !== "machines" || major !== 1) throw new Error(`not declared: ${id} ${name}@${major}`);
       return (s.state === "ok" ? rh.api : undefined) as T | undefined;
     },
-    state: () => ({ ...s }),
-    onLost: (_id, fn) => void lost.push(fn),
+    state: () => ({ id: "remote-host", uses: ["machines@1"], optional: true, ...s }),
+    onLost: (_id, fn) => {
+      lost.push(fn);
+      return () => {};
+    },
   };
   return {
     deps,
-    lose: (next: DependencyState = "disabled", why?: string) => {
+    lose: (next: PluginDependencyState = "disabled", why = "") => {
       s.state = next;
       s.detail = why;
       for (const fn of lost) fn();
@@ -209,8 +211,10 @@ export const rec = (vmid: number, extra: Record<string, unknown> = {}) => ({ vmi
 
 /**
  * The plugin over `kv` — pass the previous run's kv to simulate a Dispatch
- * restart. remote-host is there unless `opts.deps` says otherwise
- * (`null`: a core without plugin dependencies).
+ * restart. By default remote-host is there through the SDK's own
+ * `ctx.dependencies` (the host's real link: `t.revoke` / `t.lose` behave as in
+ * production). `opts.deps`: a hand-made one instead; `null`: a core without
+ * plugin dependencies.
  */
 export function terminal(
   f: ReturnType<typeof fakeProxmox>,
@@ -218,9 +222,15 @@ export function terminal(
   settings: Record<string, unknown> = {},
   opts: { deps?: PluginDependencies | null; rh?: ReturnType<typeof fakeRemoteHost>; rescueRemote?: () => Promise<RescueRemote> } = {},
 ) {
-  const t = createTestContext({ id: "proxmox-terminal", kv, capabilities: ["terminals", "secrets", "kv"] });
   const rh = opts.rh ?? fakeRemoteHost();
-  const deps = opts.deps === null ? undefined : (opts.deps ?? fakeDependencies(rh).deps);
+  const real = opts.deps === undefined;
+  const t = createTestContext({
+    id: "proxmox-terminal",
+    kv,
+    capabilities: ["terminals", "secrets", "kv"],
+    ...(real ? { dependencies: { "remote-host": { machines: { 1: rh.api } } }, optionalDependencies: ["remote-host"] } : {}),
+  });
+  const deps = opts.deps === null ? undefined : real ? t.ctx.dependencies : opts.deps;
   let changed = 0;
   const b = new ProxmoxTerminal({
     ctx: t.ctx,

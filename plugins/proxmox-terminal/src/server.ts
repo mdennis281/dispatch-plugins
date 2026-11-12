@@ -7,7 +7,7 @@
 import { definePlugin, type PluginContext } from "@dispatch/plugin-sdk";
 import { sshAuthFrom } from "@dispatch-plugins/remote-core";
 import { BACKEND_ID, ProxmoxTerminal, type ShutdownReason } from "./backend.js";
-import type { PluginDependencies } from "./machines-api.js";
+import type { PluginDependencies } from "./remote-host-link.js";
 import { readSettings } from "./settings.js";
 
 const TOKEN = "PROXMOX_TERMINAL_API_TOKEN";
@@ -31,7 +31,7 @@ let terminal: ProxmoxTerminal | undefined;
 
 /** `ctx.dependencies`, on a core that has plugin dependencies (C2). Feature-detected, never assumed. */
 function dependenciesOf(ctx: PluginContext): PluginDependencies | undefined {
-  const d = (ctx as { dependencies?: PluginDependencies }).dependencies;
+  const d = ctx.dependencies;
   return d && typeof d.get === "function" ? d : undefined;
 }
 
