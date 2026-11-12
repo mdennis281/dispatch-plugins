@@ -22303,14 +22303,21 @@ class ProxmoxProvider {
       status = "stopped";
       created = true;
     }
-    if (status !== "running") {
-      this.log.info(`starting container ${vmid} for chat ${chat.chatId}`);
-      const upid = await api.call("POST", `/nodes/${s.node}/lxc/${vmid}/status/start`);
-      await api.waitTask(s.node, upid, 6e4, signal);
+    for (let attempt = 0; ; attempt++) {
+      if (status !== "running") {
+        this.log.info(`starting container ${vmid} for chat ${chat.chatId}`);
+        const upid = await api.call("POST", `/nodes/${s.node}/lxc/${vmid}/status/start`);
+        await api.waitTask(s.node, upid, 6e4, signal);
+      }
+      const ip = await this.waitForIp(api, s.node, vmid, signal);
+      const ssh = await this.waitForSsh(api, s.node, ip, vmid, signal);
+      if (ssh === "stopped" && attempt === 0) {
+        this.log.warn(`container ${vmid} stopped while it was being handed over; starting it again`);
+        status = await api.status(s.node, vmid);
+        continue;
+      }
+      return { vmid, hostname, ip, created };
     }
-    const ip = await this.waitForIp(api, s.node, vmid, signal);
-    await this.waitForSsh(ip, vmid, signal);
-    return { vmid, hostname, ip, created };
   }
   /** Linked-clone the template into a free vmid, size it, and remember it. */
   async cloneFor(api, s, chat, hostname, signal) {
@@ -22353,15 +22360,17 @@ class ProxmoxProvider {
    * and the command failed). Retrying a TCP connect here rides both out.
    * Still not answering: go on, and remote-host says why.
    */
-  async waitForSsh(ip, vmid, signal) {
+  async waitForSsh(api, node, ip, vmid, signal) {
     const ready = this.deps.sshReady ?? tcpReady;
     const until = Date.now() + SSH_WAIT_MS;
     while (Date.now() < until && !signal.aborted) {
-      if (await ready(ip, signal)) return;
+      if (await ready(ip, signal)) return "ready";
+      if (await api.status(node, vmid).catch(() => "running") !== "running") return "stopped";
       await sleep(1e3, signal).catch(() => {
       });
     }
     this.log.warn(`container ${vmid}: nothing answers on ${ip}:22 after ${SSH_WAIT_MS / 1e3}s; handing it over anyway`);
+    return "timeout";
   }
   async waitForIp(api, node, vmid, signal) {
     const until = Date.now() + 6e4;

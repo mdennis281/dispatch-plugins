@@ -192,6 +192,23 @@ describe("a started container's sshd", () => {
     expect(asks).toBe(2);
     expect(rh.leases).toHaveLength(1);
   });
+
+  it("a container that goes down while it is handed over (shut down from outside) is started again", async () => {
+    const f = fakeProxmox({ 9002: ours("c1", "running") });
+    const { b, rh } = terminal(f, { instance: INSTANCE, "chat:c1": rec(9002, { layout: 2 }) });
+    let asks = 0;
+    (b.provider as unknown as { deps: { sshReady: () => Promise<boolean> } }).deps.sshReady = async () => {
+      if (++asks === 1) {
+        f.cts.get(9002)!.status = "stopped"; // the outside shutdown lands
+        return false;
+      }
+      return true;
+    };
+    await b.forwarder.spawn({ chatId: "c1", name: "main", cwd: "/w", worktreePath: "/w", repoPath: "/w", signal: new AbortController().signal });
+    expect(f.calls.filter((c) => c.endsWith("/status/start"))).toHaveLength(1);
+    expect(f.cts.get(9002)!.status).toBe("running");
+    expect(rh.leases).toHaveLength(1);
+  });
 });
 
 describe("Destroy without rescue", () => {
