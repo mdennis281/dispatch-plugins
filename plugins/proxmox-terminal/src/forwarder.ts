@@ -46,8 +46,14 @@ export class ProxmoxForwarder implements TerminalBackend {
       life: MachineLifecycle<ContainerRef>;
       settings: () => Settings;
       log: PluginContext["log"];
+      /** Core unregistered the backend: let go of the lifecycle (timers, sessions). */
+      dispose?: () => Promise<void>;
     },
   ) {}
+
+  async dispose(): Promise<void> {
+    await this.o.dispose?.();
+  }
 
   get spawnTimeoutMs(): number {
     return Math.max(30, this.o.settings().spawnTimeoutSeconds) * 1_000;

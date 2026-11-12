@@ -273,9 +273,10 @@ describe("the committed bundle", () => {
     const mod = (await import("../server/index.js")) as {
       default: { activate(ctx: unknown): unknown; onShutdown?: unknown; reconcile?: unknown };
     };
-    const t = createTestContext({ id: "proxmox-terminal", capabilities: ["terminals", "secrets", "kv"] });
+    const t = createTestContext({ id: "proxmox-terminal", capabilities: ["terminals", "secrets", "kv", "routes", "ui"] });
     await mod.default.activate(t.ctx);
     expect([...t.terminalBackends.keys()]).toEqual(["proxmox"]);
+    expect(t.routes.list()).toContain("GET /overview");
     expect(typeof mod.default.onShutdown).toBe("function");
     expect(typeof mod.default.reconcile).toBe("function");
   });
@@ -285,5 +286,15 @@ describe("the committed bundle", () => {
     const src = readFileSync(new URL("../server/index.js", import.meta.url), "utf8");
     expect(src).not.toContain("dispatch-host session");
     expect(src).toContain("dependencies");
+  });
+
+  // The client bundle is served to the browser as one module: react and
+  // lucide come from the host (window.__dispatch.deps), nothing is imported.
+  it("the Settings pane's bundle imports nothing", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../client/index.js", import.meta.url), "utf8");
+    expect(src).not.toMatch(/^\s*import\s/m);
+    expect(src).not.toMatch(/\bimport\(/);
+    expect(src).toContain("window.__dispatch.deps");
   });
 });

@@ -20886,6 +20886,14 @@ class MachineLifecycle {
     for (const p of pending) await this.attemptDestroy(p);
   }
   /**
+   * Destroy the chat's machine now, though the chat goes on (a human asked
+   * for it): queued and retried like any destroy, after any lease or stop in
+   * flight. The chat's next lease makes a new machine.
+   */
+  async destroyMachine(chatId, why) {
+    await this.enqueueDestroy(await this.stateFor(chatId), why);
+  }
+  /**
    * Forget the chat's machine and destroy it: pending in kv first, then one
    * attempt now. The forgetting runs on the chat's op chain, after any lease
    * or stop in flight, so neither can write the record back afterwards; the
@@ -21107,6 +21115,9 @@ class ProxmoxForwarder {
   shell = "bash";
   /** A Proxmox chat's command must never run in a local Windows shell against a different tree. */
   fallback = "refuse";
+  async dispose() {
+    await this.o.dispose?.();
+  }
   get spawnTimeoutMs() {
     return Math.max(30, this.o.settings().spawnTimeoutSeconds) * 1e3;
   }
@@ -21802,6 +21813,16 @@ function safeState(deps) {
 }
 const LAYOUT = 2;
 const DESTROY_WAIT_MS = 45e3;
+const PROBE_MS = 3e4;
+const PROBE_MISSES = 2;
+const SKIP_AFTER_FAILURES = 3;
+const RANGE_WARN = 0.8;
+class ActionError extends Error {
+  constructor(message, status = 409) {
+    super(message);
+    this.status = status;
+  }
+}
 class ProxmoxTerminal {
   constructor(deps) {
     this.deps = deps;
@@ -21831,7 +21852,13 @@ class ProxmoxTerminal {
       log,
       changed: () => deps.statusChanged?.()
     });
-    this.forwarder = new ProxmoxForwarder({ link: this.link, life: this.life, settings: deps.settings, log });
+    this.forwarder = new ProxmoxForwarder({
+      link: this.link,
+      life: this.life,
+      settings: deps.settings,
+      log,
+      dispose: () => this.dispose()
+    });
   }
   provider;
   life;
@@ -21843,7 +21870,144 @@ class ProxmoxTerminal {
   status() {
     if (!this.deps.settings().apiUrl) return { state: "offline", detail: "not set up: no Proxmox API URL (Settings → Plugins → Proxmox terminal)" };
     const why = this.link.reason();
-    return why ? { state: "offline", detail: why } : { state: "online" };
+    if (why) return { state: "offline", detail: why };
+    if (this.apiDown) return { state: "offline", detail: this.apiDown };
+    return { state: "online" };
+  }
+  /* ------------------------------------------------- is Proxmox there? */
+  apiDown;
+  misses = 0;
+  probeTimer;
+  probing;
+  /**
+   * Ask the Proxmox API whether it is there. Offline after {@link PROBE_MISSES}
+   * misses in a row (one slow answer is not an outage), online at the first
+   * answer. While offline core never calls spawn, so only this brings it back.
+   */
+  probe() {
+    this.probing ??= (async () => {
+      try {
+        if (!this.provider.configured()) return this.setApiDown(void 0);
+        await this.provider.ping();
+        this.misses = 0;
+        this.setApiDown(void 0);
+      } catch (err) {
+        this.misses++;
+        if (this.apiDown || this.misses >= PROBE_MISSES) this.setApiDown(`can't reach the Proxmox API: ${errText(err)}`);
+      }
+    })().finally(() => this.probing = void 0);
+    return this.probing;
+  }
+  setApiDown(why) {
+    if (why === this.apiDown) return;
+    if (why) this.deps.ctx.log.warn(`terminals are refused: ${why}`);
+    else if (this.apiDown) this.deps.ctx.log.info("the Proxmox API answers again");
+    this.apiDown = why;
+    this.deps.statusChanged?.();
+  }
+  /* ------------------------------------------------------------ Settings */
+  /** What the Settings pane shows: status, the host-key trust, the vmid range's use, and pre-0.2 containers. */
+  async overview() {
+    const s = this.deps.settings();
+    const size = s.vmidEnd - s.vmidStart + 1 - (s.templateVmid >= s.vmidStart && s.templateVmid <= s.vmidEnd ? 1 : 0);
+    let apiError;
+    const statuses = /* @__PURE__ */ new Map();
+    let used;
+    if (this.provider.configured()) {
+      try {
+        const cts = await this.provider.containers();
+        for (const c of cts) statuses.set(c.vmid, c.status);
+        used = cts.filter((c) => inRange(s, c.vmid)).length;
+      } catch (err) {
+        apiError = errText(err);
+      }
+    }
+    const legacy = [];
+    for (const { chatId, rec } of await this.records()) {
+      if (rec.layout === LAYOUT) continue;
+      const vmid = Number(rec.vmid);
+      const r = await this.rescue.state(chatId);
+      const mine = r?.vmid === vmid ? r : void 0;
+      const failures = mine?.failures ?? 0;
+      legacy.push({
+        chatId,
+        vmid,
+        hostname: String(rec.hostname ?? ""),
+        ...apiError || !this.provider.configured() ? {} : { status: statuses.get(vmid) ?? "gone" },
+        rescuing: this.rescue.running(chatId),
+        ...mine?.phase ? { phase: mine.phase } : {},
+        failures,
+        ...mine?.lastError ? { lastError: mine.lastError } : {},
+        canSkip: failures >= SKIP_AFTER_FAILURES
+      });
+    }
+    legacy.sort((a, b) => a.vmid - b.vmid);
+    return {
+      status: this.status(),
+      hostKeyPinned: !!s.templateHostKey,
+      templateVmid: s.templateVmid,
+      range: {
+        start: s.vmidStart,
+        end: s.vmidEnd,
+        size,
+        ...used !== void 0 ? { used } : {},
+        warn: used !== void 0 && size > 0 && used / size > RANGE_WARN
+      },
+      legacy,
+      ...apiError ? { apiError } : {}
+    };
+  }
+  /** Every `chat:<id>` record in kv. */
+  async records() {
+    const kv = this.deps.kv;
+    if (!kv) return [];
+    const out = [];
+    for (const key of await kv.list("chat:")) {
+      const rec = await kv.get(key);
+      if (rec && Number(rec.vmid) > 0) out.push({ chatId: key.slice("chat:".length), rec });
+    }
+    return out;
+  }
+  /** A pre-0.2 container of the chat's, for a Settings action; refused while its rescue runs. */
+  async legacyRecord(chatId) {
+    const rec = await this.life.record(chatId);
+    if (!rec || !(Number(rec.vmid) > 0)) throw new ActionError(`chat ${chatId} has no container`, 404);
+    if (rec.layout === LAYOUT) throw new ActionError(`chat ${chatId}'s container ${rec.vmid} has nothing left to rescue`);
+    if (this.rescue.running(chatId)) throw new ActionError(`${this.rescue.describe(chatId)}: wait for it to finish`);
+    return { vmid: Number(rec.vmid), hostname: String(rec.hostname ?? "") };
+  }
+  /**
+   * "Skip rescue": the chat's next command goes ahead on the old container
+   * without saving its pre-0.2 checkouts. They stay where they are on the
+   * container (remote-host works elsewhere on it) until it is destroyed, and
+   * from now on it can be destroyed for being unused, like any other.
+   */
+  async skipRescue(chatId) {
+    const ref = await this.legacyRecord(chatId);
+    const r = await this.rescue.state(chatId);
+    const failures = r?.vmid === ref.vmid ? r.failures ?? 0 : 0;
+    if (failures < SKIP_AFTER_FAILURES) {
+      throw new ActionError(`the rescue of container ${ref.vmid} has failed ${failures} time(s); Skip is offered after ${SKIP_AFTER_FAILURES}`);
+    }
+    if (!await this.life.patch(chatId, { layout: LAYOUT, rescueSkippedAt: Date.now() }, ref)) {
+      throw new ActionError(`chat ${chatId}'s container changed meanwhile; look again`);
+    }
+    await this.deps.kv?.delete(`rescue:${chatId}`);
+    this.deps.ctx.log.info(`chat ${chatId}: rescue of container ${ref.vmid} skipped (Settings); its old checkouts stay on it`);
+  }
+  /**
+   * "Destroy without rescue": the container and whatever it holds go now; the
+   * chat's next command gets a new one.
+   */
+  async destroyWithoutRescue(chatId) {
+    const ref = await this.legacyRecord(chatId);
+    if (this.busy(chatId)) throw new ActionError(`chat ${chatId} is using container ${ref.vmid} right now`);
+    await this.deps.kv?.delete(`rescue:${chatId}`);
+    try {
+      await this.life.destroyMachine(chatId, "destroyed without rescue (Settings)");
+    } catch (err) {
+      throw new ActionError(`container ${ref.vmid} is queued to be destroyed, and retried in the background; this attempt failed: ${errText(err)}`, 502);
+    }
   }
   /* ------------------------------------------------------- remote-host */
   provisionOptions() {
@@ -21918,7 +22082,8 @@ class ProxmoxTerminal {
     const waitMs = Math.max(1e4, this.forwarder.spawnTimeoutMs - 9e4);
     const done = await settleWithin(run, waitMs, req.signal).catch(async (err) => {
       const n = (await this.rescue.state(req.chatId))?.failures ?? 1;
-      throw new Error(`${errText(err)} (attempt ${n}; the next command tries again, and the container is left as it is)`);
+      const next = n >= SKIP_AFTER_FAILURES ? `Settings → Proxmox containers now offers "Skip rescue" and "Destroy without rescue" for container ${up.vmid}, or the next command tries again` : "the next command tries again";
+      throw new Error(`${errText(err)} (attempt ${n}; the container is left as it is, and ${next})`);
     });
     if (done === PENDING) throw new Error(`${this.rescue.describe(req.chatId)}. It keeps going on its own: run the command again in a minute`);
     return done;
@@ -21973,9 +22138,18 @@ class ProxmoxTerminal {
   instanceId() {
     return this.life.instanceId();
   }
-  /** Called once from activate: the boot sweep, then one a minute. Never throws. */
+  /** Called once from activate: the boot sweep, then one a minute, and the API probe. Never throws. */
   start() {
+    if (!this.probeTimer) {
+      this.probeTimer = setInterval(() => void this.probe(), PROBE_MS);
+      this.probeTimer.unref?.();
+      void this.probe();
+    }
     return this.life.start();
+  }
+  stopProbe() {
+    if (this.probeTimer) clearInterval(this.probeTimer);
+    this.probeTimer = void 0;
   }
   sweep(opts) {
     return this.life.sweep(opts);
@@ -21986,10 +22160,13 @@ class ProxmoxTerminal {
   }
   /** Timed shutdown (core's module hook). Uninstall: remote-host forgets this plugin's machines first. */
   async onShutdown(e) {
+    this.stopProbe();
     if (e.reason === "uninstall") await this.link.quietly("forgetting this plugin's machines", (p) => p.forgetAll());
     return this.life.onShutdown(e);
   }
+  /** The backend was unregistered (the plugin switched off, or Dispatch stopping). */
   dispose() {
+    this.stopProbe();
     return this.life.dispose();
   }
 }
@@ -22040,6 +22217,15 @@ class ProxmoxProvider {
   }
   async preflight() {
     await this.api();
+  }
+  /** One cheap call: is the API there, and does it take the token? */
+  async ping() {
+    await (await this.api()).call("GET", "/version");
+  }
+  /** The pool's containers with their status, from `/cluster/resources`. */
+  async containers() {
+    const s = this.deps.settings();
+    return (await this.poolResources(await this.api(), s)).map((m) => ({ vmid: m.vmid, status: m.status ?? "unknown" }));
   }
   /**
    * Make sure the chat's container exists and runs, and return its address.
@@ -22195,8 +22381,15 @@ class ProxmoxProvider {
    * a token holding VM.Audit on the pool.
    */
   async poolVmids(api, s) {
-    const all = await api.call("GET", "/cluster/resources", { type: "vm" });
-    return (all ?? []).filter((m) => m.pool === s.pool && m.type === "lxc").map((m) => m.vmid).filter((v) => typeof v === "number");
+    return (await this.poolResources(api, s)).map((m) => m.vmid);
+  }
+  async poolResources(api, s) {
+    const all = await api.call("GET", "/cluster/resources", {
+      type: "vm"
+    });
+    return (all ?? []).filter(
+      (m) => m.pool === s.pool && m.type === "lxc" && typeof m.vmid === "number"
+    );
   }
 }
 const GONE = /does not exist|no such|not found/i;
@@ -22216,6 +22409,42 @@ function parseDescription(text) {
 function hostnameFor(chatId) {
   const slug = chatId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) || "chat";
   return `dt-${slug}`;
+}
+function wrap(log, fn) {
+  return async (req, reply) => {
+    try {
+      return await fn(req);
+    } catch (err) {
+      const status = err instanceof ActionError ? err.status : 500;
+      if (status >= 500) log.warn(`proxmox-terminal ${req.method} ${req.url}: ${errText(err)}`);
+      reply.code(status);
+      return { error: errText(err) };
+    }
+  };
+}
+const chatOf = (req) => {
+  const id = String(req.params?.chatId ?? "");
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new ActionError("not a chat id", 400);
+  return id;
+};
+function defineRoutes(ctx, t) {
+  const live = () => {
+    const it = t();
+    if (!it) throw new ActionError("the plugin is not running", 503);
+    return it;
+  };
+  const h = (fn) => wrap(ctx.log, fn);
+  return (r) => {
+    r.get("/overview", h(() => live().overview()));
+    r.post("/legacy/:chatId/skip-rescue", h(async (req) => {
+      await live().skipRescue(chatOf(req));
+      return { ok: true };
+    }));
+    r.post("/legacy/:chatId/destroy", h(async (req) => {
+      await live().destroyWithoutRescue(chatOf(req));
+      return { ok: true };
+    }));
+  };
 }
 const DEFAULTS = {
   apiUrl: "",
@@ -22275,6 +22504,7 @@ const plugin = definePlugin({
     });
     terminal = t;
     terminals.registerBackend(t.forwarder);
+    ctx.routes?.(defineRoutes(ctx, () => terminal));
     t.link.connect();
     terminals.setStatus?.(BACKEND_ID, t.status());
     const why = t.link.reason();

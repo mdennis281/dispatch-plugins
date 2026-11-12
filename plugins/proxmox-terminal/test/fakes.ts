@@ -33,7 +33,7 @@ export function fakeProxmox(initial: Record<number, Ct> = {}) {
     if (path.startsWith("/pools/")) throw new ProxmoxError("Permission check failed (/pool/dispatch-terminals, Pool.Audit)", 403);
     if (path === "/cluster/resources") {
       return [
-        ...[...cts.keys()].map((vmid) => ({ vmid, type: "lxc", pool: "dispatch-terminals" })),
+        ...[...cts.entries()].map(([vmid, ct]) => ({ vmid, type: "lxc", pool: "dispatch-terminals", status: ct.status })),
         { vmid: 9050, type: "lxc" }, // outside the pool: never listed as ours
         { vmid: 115, type: "qemu", pool: "dispatch-terminals" },
       ];

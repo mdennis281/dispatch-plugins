@@ -590,6 +590,15 @@ export class MachineLifecycle<R extends MachineRef> {
   }
 
   /**
+   * Destroy the chat's machine now, though the chat goes on (a human asked
+   * for it): queued and retried like any destroy, after any lease or stop in
+   * flight. The chat's next lease makes a new machine.
+   */
+  async destroyMachine(chatId: string, why: string): Promise<void> {
+    await this.enqueueDestroy(await this.stateFor(chatId), why);
+  }
+
+  /**
    * Forget the chat's machine and destroy it: pending in kv first, then one
    * attempt now. The forgetting runs on the chat's op chain, after any lease
    * or stop in flight, so neither can write the record back afterwards; the

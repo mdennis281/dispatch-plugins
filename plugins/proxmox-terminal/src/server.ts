@@ -8,6 +8,7 @@ import { definePlugin, type PluginContext } from "@dispatch/plugin-sdk";
 import { sshAuthFrom } from "@dispatch-plugins/remote-core";
 import { BACKEND_ID, ProxmoxTerminal, type ShutdownReason } from "./backend.js";
 import type { PluginDependencies } from "./remote-host-link.js";
+import { defineRoutes } from "./routes.js";
 import { readSettings } from "./settings.js";
 
 const TOKEN = "PROXMOX_TERMINAL_API_TOKEN";
@@ -64,6 +65,8 @@ const plugin = definePlugin({
     // Registered before anything that could fail: with `fallback: "refuse"`,
     // a terminal is refused rather than run locally whatever happens next.
     terminals.registerBackend(t.forwarder);
+    // The Settings pane's (client.tsx): pre-0.2 containers and their actions.
+    ctx.routes?.(defineRoutes(ctx, () => terminal));
     t.link.connect();
     terminals.setStatus?.(BACKEND_ID, t.status());
     const why = t.link.reason();

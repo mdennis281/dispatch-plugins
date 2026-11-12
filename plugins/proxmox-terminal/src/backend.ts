@@ -43,6 +43,55 @@ export const LAYOUT = 2;
 /** Under core's 60 s onChatDeleted timeout, so a slow destroy is ours to report, not a timeout. */
 const DESTROY_WAIT_MS = 45_000;
 
+/** How often the Proxmox API is checked, and how many misses in a row make the backend offline. */
+const PROBE_MS = 30_000;
+const PROBE_MISSES = 2;
+
+/** Failed rescues of one container before Settings offers "Skip rescue". */
+export const SKIP_AFTER_FAILURES = 3;
+
+/** The vmid range's use past which Settings warns. */
+const RANGE_WARN = 0.8;
+
+/** A Settings action the human can't take right now: a 4xx with this reason. */
+export class ActionError extends Error {
+  constructor(
+    message: string,
+    readonly status = 409,
+  ) {
+    super(message);
+  }
+}
+
+/** One pre-0.2 container waiting for its chat, as Settings shows it. */
+export interface LegacyView {
+  chatId: string;
+  vmid: number;
+  hostname: string;
+  /** Proxmox's view: running, stopped, or gone (undefined when the API couldn't be asked). */
+  status?: string;
+  /** The rescue is running now. */
+  rescuing: boolean;
+  /** The rescue's last phase and failures, when one was tried. */
+  phase?: string;
+  failures: number;
+  lastError?: string;
+  /** "Skip rescue" is offered (after {@link SKIP_AFTER_FAILURES} failures). */
+  canSkip: boolean;
+}
+
+/** Everything the Settings pane shows. */
+export interface Overview {
+  status: { state: "online" | "offline"; detail?: string };
+  /** The template's host key is pinned; when false, clones are trusted on the Proxmox API's word. */
+  hostKeyPinned: boolean;
+  templateVmid: number;
+  range: { start: number; end: number; size: number; used?: number; warn: boolean };
+  legacy: LegacyView[];
+  /** Why parts of this couldn't be read (the API is down, say). */
+  apiError?: string;
+}
+
 export interface BackendDeps {
   ctx: PluginContext;
   /** Where each chat's vmid is remembered across restarts (`ctx.kv`). */
@@ -98,14 +147,167 @@ export class ProxmoxTerminal {
       log,
       changed: () => deps.statusChanged?.(),
     });
-    this.forwarder = new ProxmoxForwarder({ link: this.link, life: this.life, settings: deps.settings, log });
+    this.forwarder = new ProxmoxForwarder({
+      link: this.link,
+      life: this.life,
+      settings: deps.settings,
+      log,
+      dispose: () => this.dispose(),
+    });
   }
 
   /** For `ctx.terminals.setStatus("proxmox", …)`. */
   status(): { state: "online" | "offline"; detail?: string } {
     if (!this.deps.settings().apiUrl) return { state: "offline", detail: "not set up: no Proxmox API URL (Settings → Plugins → Proxmox terminal)" };
     const why = this.link.reason();
-    return why ? { state: "offline", detail: why } : { state: "online" };
+    if (why) return { state: "offline", detail: why };
+    if (this.apiDown) return { state: "offline", detail: this.apiDown };
+    return { state: "online" };
+  }
+
+  /* ------------------------------------------------- is Proxmox there? */
+
+  private apiDown?: string;
+  private misses = 0;
+  private probeTimer?: ReturnType<typeof setInterval>;
+  private probing?: Promise<void>;
+
+  /**
+   * Ask the Proxmox API whether it is there. Offline after {@link PROBE_MISSES}
+   * misses in a row (one slow answer is not an outage), online at the first
+   * answer. While offline core never calls spawn, so only this brings it back.
+   */
+  probe(): Promise<void> {
+    this.probing ??= (async () => {
+      try {
+        if (!this.provider.configured()) return this.setApiDown(undefined);
+        await this.provider.ping();
+        this.misses = 0;
+        this.setApiDown(undefined);
+      } catch (err) {
+        this.misses++;
+        if (this.apiDown || this.misses >= PROBE_MISSES) this.setApiDown(`can't reach the Proxmox API: ${errText(err)}`);
+      }
+    })().finally(() => (this.probing = undefined));
+    return this.probing;
+  }
+
+  private setApiDown(why: string | undefined): void {
+    if (why === this.apiDown) return;
+    if (why) this.deps.ctx.log.warn(`terminals are refused: ${why}`);
+    else if (this.apiDown) this.deps.ctx.log.info("the Proxmox API answers again");
+    this.apiDown = why;
+    this.deps.statusChanged?.();
+  }
+
+  /* ------------------------------------------------------------ Settings */
+
+  /** What the Settings pane shows: status, the host-key trust, the vmid range's use, and pre-0.2 containers. */
+  async overview(): Promise<Overview> {
+    const s = this.deps.settings();
+    const size = s.vmidEnd - s.vmidStart + 1 - (s.templateVmid >= s.vmidStart && s.templateVmid <= s.vmidEnd ? 1 : 0);
+    let apiError: string | undefined;
+    const statuses = new Map<number, string>();
+    let used: number | undefined;
+    if (this.provider.configured()) {
+      try {
+        const cts = await this.provider.containers();
+        for (const c of cts) statuses.set(c.vmid, c.status);
+        used = cts.filter((c) => inRange(s, c.vmid)).length;
+      } catch (err) {
+        apiError = errText(err);
+      }
+    }
+    const legacy: LegacyView[] = [];
+    for (const { chatId, rec } of await this.records()) {
+      if (rec.layout === LAYOUT) continue;
+      const vmid = Number(rec.vmid);
+      const r = await this.rescue.state(chatId);
+      const mine = r?.vmid === vmid ? r : undefined;
+      const failures = mine?.failures ?? 0;
+      legacy.push({
+        chatId,
+        vmid,
+        hostname: String(rec.hostname ?? ""),
+        ...(apiError || !this.provider.configured() ? {} : { status: statuses.get(vmid) ?? "gone" }),
+        rescuing: this.rescue.running(chatId),
+        ...(mine?.phase ? { phase: mine.phase } : {}),
+        failures,
+        ...(mine?.lastError ? { lastError: mine.lastError } : {}),
+        canSkip: failures >= SKIP_AFTER_FAILURES,
+      });
+    }
+    legacy.sort((a, b) => a.vmid - b.vmid);
+    return {
+      status: this.status(),
+      hostKeyPinned: !!s.templateHostKey,
+      templateVmid: s.templateVmid,
+      range: {
+        start: s.vmidStart,
+        end: s.vmidEnd,
+        size,
+        ...(used !== undefined ? { used } : {}),
+        warn: used !== undefined && size > 0 && used / size > RANGE_WARN,
+      },
+      legacy,
+      ...(apiError ? { apiError } : {}),
+    };
+  }
+
+  /** Every `chat:<id>` record in kv. */
+  private async records(): Promise<Array<{ chatId: string; rec: Record<string, unknown> }>> {
+    const kv = this.deps.kv;
+    if (!kv) return [];
+    const out: Array<{ chatId: string; rec: Record<string, unknown> }> = [];
+    for (const key of await kv.list("chat:")) {
+      const rec = await kv.get<Record<string, unknown>>(key);
+      if (rec && Number(rec.vmid) > 0) out.push({ chatId: key.slice("chat:".length), rec });
+    }
+    return out;
+  }
+
+  /** A pre-0.2 container of the chat's, for a Settings action; refused while its rescue runs. */
+  private async legacyRecord(chatId: string): Promise<ContainerRef> {
+    const rec = await this.life.record(chatId);
+    if (!rec || !(Number(rec.vmid) > 0)) throw new ActionError(`chat ${chatId} has no container`, 404);
+    if (rec.layout === LAYOUT) throw new ActionError(`chat ${chatId}'s container ${rec.vmid} has nothing left to rescue`);
+    if (this.rescue.running(chatId)) throw new ActionError(`${this.rescue.describe(chatId)}: wait for it to finish`);
+    return { vmid: Number(rec.vmid), hostname: String(rec.hostname ?? "") };
+  }
+
+  /**
+   * "Skip rescue": the chat's next command goes ahead on the old container
+   * without saving its pre-0.2 checkouts. They stay where they are on the
+   * container (remote-host works elsewhere on it) until it is destroyed, and
+   * from now on it can be destroyed for being unused, like any other.
+   */
+  async skipRescue(chatId: string): Promise<void> {
+    const ref = await this.legacyRecord(chatId);
+    const r = await this.rescue.state(chatId);
+    const failures = r?.vmid === ref.vmid ? (r.failures ?? 0) : 0;
+    if (failures < SKIP_AFTER_FAILURES) {
+      throw new ActionError(`the rescue of container ${ref.vmid} has failed ${failures} time(s); Skip is offered after ${SKIP_AFTER_FAILURES}`);
+    }
+    if (!(await this.life.patch(chatId, { layout: LAYOUT, rescueSkippedAt: Date.now() }, ref))) {
+      throw new ActionError(`chat ${chatId}'s container changed meanwhile; look again`);
+    }
+    await this.deps.kv?.delete(`rescue:${chatId}`);
+    this.deps.ctx.log.info(`chat ${chatId}: rescue of container ${ref.vmid} skipped (Settings); its old checkouts stay on it`);
+  }
+
+  /**
+   * "Destroy without rescue": the container and whatever it holds go now; the
+   * chat's next command gets a new one.
+   */
+  async destroyWithoutRescue(chatId: string): Promise<void> {
+    const ref = await this.legacyRecord(chatId);
+    if (this.busy(chatId)) throw new ActionError(`chat ${chatId} is using container ${ref.vmid} right now`);
+    await this.deps.kv?.delete(`rescue:${chatId}`);
+    try {
+      await this.life.destroyMachine(chatId, "destroyed without rescue (Settings)");
+    } catch (err) {
+      throw new ActionError(`container ${ref.vmid} is queued to be destroyed, and retried in the background; this attempt failed: ${errText(err)}`, 502);
+    }
   }
 
   /* ------------------------------------------------------- remote-host */
@@ -185,7 +387,11 @@ export class ProxmoxTerminal {
     const waitMs = Math.max(10_000, this.forwarder.spawnTimeoutMs - 90_000);
     const done = await settleWithin(run, waitMs, req.signal).catch(async (err: unknown) => {
       const n = (await this.rescue.state(req.chatId))?.failures ?? 1;
-      throw new Error(`${errText(err)} (attempt ${n}; the next command tries again, and the container is left as it is)`);
+      const next =
+        n >= SKIP_AFTER_FAILURES
+          ? `Settings → Proxmox containers now offers "Skip rescue" and "Destroy without rescue" for container ${up.vmid}, or the next command tries again`
+          : "the next command tries again";
+      throw new Error(`${errText(err)} (attempt ${n}; the container is left as it is, and ${next})`);
     });
     if (done === PENDING) throw new Error(`${this.rescue.describe(req.chatId)}. It keeps going on its own: run the command again in a minute`);
     return done;
@@ -249,9 +455,19 @@ export class ProxmoxTerminal {
     return this.life.instanceId();
   }
 
-  /** Called once from activate: the boot sweep, then one a minute. Never throws. */
+  /** Called once from activate: the boot sweep, then one a minute, and the API probe. Never throws. */
   start(): Promise<void> {
+    if (!this.probeTimer) {
+      this.probeTimer = setInterval(() => void this.probe(), PROBE_MS);
+      this.probeTimer.unref?.();
+      void this.probe();
+    }
     return this.life.start();
+  }
+
+  private stopProbe(): void {
+    if (this.probeTimer) clearInterval(this.probeTimer);
+    this.probeTimer = undefined;
   }
 
   sweep(opts?: { adopt?: boolean; boot?: boolean; liveChats?: ReadonlySet<string> }): Promise<void> {
@@ -265,11 +481,14 @@ export class ProxmoxTerminal {
 
   /** Timed shutdown (core's module hook). Uninstall: remote-host forgets this plugin's machines first. */
   async onShutdown(e: { reason: ShutdownReason; deadline?: number; signal?: AbortSignal }): Promise<void> {
+    this.stopProbe();
     if (e.reason === "uninstall") await this.link.quietly("forgetting this plugin's machines", (p) => p.forgetAll());
     return this.life.onShutdown(e);
   }
 
+  /** The backend was unregistered (the plugin switched off, or Dispatch stopping). */
   dispose(): Promise<void> {
+    this.stopProbe();
     return this.life.dispose();
   }
 }
@@ -339,6 +558,17 @@ export class ProxmoxProvider implements MachineProvider<ContainerRef> {
 
   async preflight(): Promise<void> {
     await this.api();
+  }
+
+  /** One cheap call: is the API there, and does it take the token? */
+  async ping(): Promise<void> {
+    await (await this.api()).call("GET", "/version");
+  }
+
+  /** The pool's containers with their status, from `/cluster/resources`. */
+  async containers(): Promise<Array<{ vmid: number; status: string }>> {
+    const s = this.deps.settings();
+    return (await this.poolResources(await this.api(), s)).map((m) => ({ vmid: m.vmid, status: m.status ?? "unknown" }));
   }
 
   /**
@@ -523,11 +753,16 @@ export class ProxmoxProvider implements MachineProvider<ContainerRef> {
    * a token holding VM.Audit on the pool.
    */
   private async poolVmids(api: Proxmox, s: Settings): Promise<number[]> {
-    const all = await api.call<Array<{ vmid?: number; type?: string; pool?: string }>>("GET", "/cluster/resources", { type: "vm" });
-    return (all ?? [])
-      .filter((m) => m.pool === s.pool && m.type === "lxc")
-      .map((m) => m.vmid)
-      .filter((v): v is number => typeof v === "number");
+    return (await this.poolResources(api, s)).map((m) => m.vmid);
+  }
+
+  private async poolResources(api: Proxmox, s: Settings): Promise<Array<{ vmid: number; status?: string }>> {
+    const all = await api.call<Array<{ vmid?: number; type?: string; pool?: string; status?: string }>>("GET", "/cluster/resources", {
+      type: "vm",
+    });
+    return (all ?? []).filter(
+      (m): m is { vmid: number; status?: string } => m.pool === s.pool && m.type === "lxc" && typeof m.vmid === "number",
+    );
   }
 }
 

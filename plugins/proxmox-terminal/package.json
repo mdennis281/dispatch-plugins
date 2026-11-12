@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "description": "Run Dispatch chat terminals in a per-chat Proxmox LXC.",
   "scripts": {
-    "build": "vite build -c vite.server.config.mjs",
+    "build": "vite build -c vite.server.config.mjs && vite build -c vite.client.config.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -13,6 +13,9 @@
     "@dispatch-plugins/remote-host-api": "workspace:*",
     "@dispatch/plugin-sdk": "link:../../.dispatch-sdk",
     "@types/node": "^26.1.0",
+    "@types/react": "^18.3.18",
+    "lucide-react": "^0.469.0",
+    "react": "^18.3.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
     "vitest": "^4.1.11"

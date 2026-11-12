@@ -340,3 +340,36 @@ describe("reviving destroys an older version queued for live chats", () => {
     expect(f.machines.has(2)).toBe(false);
   });
 });
+
+describe("destroyMachine", () => {
+  it("destroys the chat's machine while the chat goes on; its next lease makes a new one", async () => {
+    const f = fakeProvider({ 2: ours("c1", "stopped") });
+    const { l, kvNow, detached } = life(f, { instance: INSTANCE, "chat:c1": rec(2, { layout: 1 }) });
+    await l.destroyMachine("c1", "a human asked");
+    expect(f.machines.has(2)).toBe(false);
+    expect(kvNow()["chat:c1"]).toBeUndefined();
+    expect(kvNow()["destroy:2"]).toBeUndefined();
+    expect(detached).toContainEqual(["c1", "destroy"]);
+    await l.lease("c1", up(f));
+    const now = kvNow()["chat:c1"] as ChatRecord<Ref>;
+    expect(now.id).not.toBe(2);
+    expect(now).not.toHaveProperty("layout");
+  });
+
+  it("waits for a lease in flight, then destroys", async () => {
+    const f = fakeProvider({ 2: ours("c1", "stopped") });
+    const { l } = life(f, { instance: INSTANCE, "chat:c1": rec(2) });
+    const g = gate();
+    const leased = l.lease("c1", async (chat) => {
+      await g.p;
+      await up(f)(chat);
+    });
+    const destroyed = l.destroyMachine("c1", "a human asked");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(f.machines.has(2)).toBe(true);
+    g.open();
+    await leased;
+    await destroyed;
+    expect(f.machines.has(2)).toBe(false);
+  });
+});

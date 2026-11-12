@@ -11,6 +11,7 @@ description: >-
   it is deleted.
 homepage: https://github.com/mdennis281/dispatch-plugins/tree/main/plugins/proxmox-terminal
 server: ./server/index.js
+client: ./client/index.js
 settings: ./settings.schema.json
 secrets:
   - PROXMOX_TERMINAL_API_TOKEN
@@ -28,3 +29,7 @@ capabilities:
   - terminals
   - secrets
   - kv
+  # The Settings pane (Proxmox containers): pre-0.2 containers waiting for
+  # their chats, and Skip rescue / Destroy without rescue for one.
+  - routes
+  - ui
