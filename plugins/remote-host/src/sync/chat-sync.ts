@@ -154,9 +154,13 @@ export interface ChatSyncDeps {
   chatId: string;
   /** The chat's local worktree root (a repository's top level). */
   root: string;
-  /** The machine's label and slug, for messages and the conflict copy's name. */
+  /** The machine's label and key (a paired machine's slug), for messages and the conflict copy's name. */
   label: string;
   slug: string;
+  /** Where the record goes: `sync:<kvPrefix>:<chat>`. Default: `slug`. */
+  kvPrefix?: string;
+  /** Adopt the chat's record from before records were per machine (`sync:<chat>`). Default: yes; a provisioned machine's engine says no. */
+  adoptLegacy?: boolean;
   instanceId: string;
   /** The machine's dispatch-host root (`~/.dispatch-host`), once connected. */
   hostRoot: () => Promise<string>;
@@ -326,7 +330,7 @@ export class ChatSync {
   private async prepare(): Promise<RemotePaths> {
     if (!this.loaded) {
       let saved = await this.d.kv?.get<SyncRecord>(this.key()).catch(() => undefined);
-      if (!saved) {
+      if (!saved && this.d.adoptLegacy !== false) {
         // Up to 0.5.9 the record was the chat's, whatever the machine: the
         // first machine to load it takes it over, as before.
         const legacy = legacySyncKey(this.d.chatId);
@@ -885,7 +889,7 @@ export class ChatSync {
   }
 
   private key(): string {
-    return syncKey(this.d.slug, this.d.chatId);
+    return syncKey(this.d.kvPrefix ?? this.d.slug, this.d.chatId);
   }
 
   private async save(): Promise<void> {

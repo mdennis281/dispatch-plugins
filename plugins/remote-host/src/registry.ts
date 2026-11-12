@@ -8,9 +8,10 @@ import type { PluginContext, TerminalBackendStatusInput } from "@dispatch/plugin
 import { errText, type SshTarget } from "@dispatch-plugins/remote-core";
 import type { InstanceInfo, ProbeResult } from "@dispatch-plugins/host-agent";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
-import { HostBackend } from "./backend.js";
+import { PairedBackend } from "./backend.js";
 import { HELPER_PATH, approvalsOf, type Approvals, type ElevationDeps } from "./elevation.js";
 import { removeElevation } from "./elevation-setup.js";
+import { MachineEngine } from "./engine.js";
 import { backendId, connectionChanged, elevateSecretName, keySecretName, type HostConfig } from "./hosts.js";
 import { HostLink, type LinkConnection, type LinkTiming } from "./link.js";
 import { reservedPortsOf } from "./ports.js";
@@ -41,7 +42,10 @@ export interface RegistryDeps {
 export interface Entry {
   host: HostConfig;
   link: HostLink;
-  backend: HostBackend;
+  /** The machine and its chats. */
+  engine: MachineEngine;
+  /** Core's face of it, `remote-host/<slug>`. */
+  backend: PairedBackend;
 }
 
 /** One machine as the routes report it. */
@@ -78,8 +82,8 @@ export class HostRegistry {
       // Shells first, while their connections are up to carry the KILL; then
       // the backend; the link last.
       void (async () => {
-        await e.backend.killAll().catch(() => {});
-        e.backend.dispose();
+        await e.engine.killAll().catch(() => {});
+        e.engine.dispose();
         await terminals.unregisterBackend(backendId(slug)).catch((err: unknown) => {
           ctx.log.warn(`remote-host ${slug}: unregistering failed: ${errText(err)}`);
         });
@@ -118,7 +122,7 @@ export class HostRegistry {
       agent: this.deps.agent,
       runtime: this.deps.runtime,
       setStatus: (s) => terminals.setStatus(id, s),
-      onConnected: () => entry.backend?.onConnected(),
+      onConnected: () => entry.engine?.onConnected(),
       log: ctx.log,
       ...(ctx.kv ? { kv: ctx.kv } : {}),
       ...(this.deps.connect ? { connect: this.deps.connect } : {}),
@@ -127,8 +131,8 @@ export class HostRegistry {
     const approvals = this.deps.approvals ?? approvalsOf(ctx);
     const reservedPorts = reservedPortsOf(ctx);
     const runs = runsOf(ctx);
-    entry.backend = new HostBackend(id, {
-      host: () => entry.host,
+    const spec = { backendId: id, key: host.slug, kvPrefix: host.slug, adoptLegacySync: true, host: () => entry.host };
+    entry.engine = new MachineEngine(spec, {
       link: entry.link,
       instanceId: this.deps.instanceId,
       log: ctx.log,
@@ -144,6 +148,7 @@ export class HostRegistry {
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || undefined,
       ...(this.deps.elevationConnect ? { elevationConnect: this.deps.elevationConnect } : {}),
     });
+    entry.backend = new PairedBackend(id, entry.engine);
     try {
       terminals.registerBackend(entry.backend);
     } catch (err) {
@@ -174,7 +179,7 @@ export class HostRegistry {
 
   list(): HostView[] {
     const prev = this.deps.previousInstanceId;
-    return [...this.entries.values()].map(({ host, link, backend }) => {
+    return [...this.entries.values()].map(({ host, link, engine }) => {
       const abandoned = prev && prev !== this.deps.instanceId ? link.probe?.instances?.find((i) => i.id === prev) : undefined;
       return {
         ...host,
@@ -183,19 +188,19 @@ export class HostRegistry {
         ...(link.address ? { address: link.address } : {}),
         ...(link.probe ? { probe: link.probe } : {}),
         ...(abandoned ? { abandoned } : {}),
-        elevation: { on: backend.elevation.configured, canAsk: backend.elevation.canAsk },
+        elevation: { on: engine.elevation.configured, canAsk: engine.elevation.canAsk },
       };
     });
   }
 
   /** Look again at which machines have elevation on (the pane, the other instance, may have changed it). */
   async refreshElevation(): Promise<void> {
-    await Promise.all([...this.entries.values()].map((e) => e.backend.elevation.refresh().catch(() => undefined)));
+    await Promise.all([...this.entries.values()].map((e) => e.engine.elevation.refresh().catch(() => undefined)));
   }
 
   /** Dispatch listed the chats that exist: each machine drops what it holds for any other. */
   reconcile(live: ReadonlySet<string>, at = Date.now()): void {
-    for (const e of this.entries.values()) e.backend.reconcile(live, at);
+    for (const e of this.entries.values()) e.engine.reconcile(live, at);
   }
 
   /**
@@ -207,7 +212,7 @@ export class HostRegistry {
     const { ctx } = this.deps;
     await Promise.all(
       [...this.entries.values()].flatMap((e) => [
-        e.backend.forgetAll(timeoutMs).catch((err: unknown) => {
+        e.engine.forgetAll(timeoutMs).catch((err: unknown) => {
           ctx.log.warn(`remote-host ${e.host.slug}: could not remove this Dispatch's files there: ${errText(err)}`);
         }),
         this.elevationOff(e, timeoutMs),
@@ -223,7 +228,7 @@ export class HostRegistry {
     const late = new Promise<{ there: "unreachable"; detail: string }>((resolve) => {
       timer = setTimeout(() => resolve({ there: "unreachable", detail: "no answer in time" }), timeoutMs);
     });
-    const res = await Promise.race([removeElevation(e.backend.elevation), late]);
+    const res = await Promise.race([removeElevation(e.engine.elevation), late]);
     clearTimeout(timer);
     if (res.there === "removed") {
       // Kept otherwise: installed again, the plugin can still take it out with it.
@@ -241,9 +246,9 @@ export class HostRegistry {
   async dispose(): Promise<void> {
     const entries = [...this.entries.values()];
     this.entries.clear();
-    await Promise.all(entries.map((e) => e.backend.killAll().catch(() => {})));
+    await Promise.all(entries.map((e) => e.engine.killAll().catch(() => {})));
     for (const e of entries) {
-      e.backend.dispose();
+      e.engine.dispose();
       e.link.dispose();
     }
   }

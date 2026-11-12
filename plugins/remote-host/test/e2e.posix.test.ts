@@ -502,7 +502,7 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
   it.skipIf(!asRoot)("on a root login: no sudo shim, nothing asked, and the note and the pane say it is root", { timeout: 60_000 }, async () => {
     const e = registry.get("e2e")!;
     expect(e.link.probe).toMatchObject({ uid: 0, elevation: "root" });
-    expect(e.backend.elevation.state).toBe("root");
+    expect(e.engine.elevation.state).toBe("root");
     expect(e.backend.agentNote({ chatId: "chat-root" })).toContain("- Root: the login on E2E is root");
     const h = await t.terminals.spawn(ID, { chatId: "chat-root", name: "main" });
     const w = watch(h);
@@ -602,7 +602,7 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
   });
 
   it("verify proves the helper answers as root; turning it off uninstalls it there", { timeout: 60_000 }, async () => {
-    const el = registry.get("e2e")!.backend.elevation;
+    const el = registry.get("e2e")!.engine.elevation;
     await expect(verifyElevation(el, elevateKey, "E2E", helper.rootUid)).resolves.toEqual({ version: HELPER_VERSION });
     if (helper.rootUid !== 0) {
       await expect(verifyElevation(el, elevateKey, "E2E", 0)).rejects.toThrow(/ran as uid \d+, not as root/);
