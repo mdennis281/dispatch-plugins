@@ -33,8 +33,9 @@ export function fakeProxmox(initial: Record<number, Ct> = {}) {
     if (path.startsWith("/pools/")) throw new ProxmoxError("Permission check failed (/pool/dispatch-terminals, Pool.Audit)", 403);
     if (path === "/cluster/resources") {
       return [
-        ...[...cts.entries()].map(([vmid, ct]) => ({ vmid, type: "lxc", pool: "dispatch-terminals", status: ct.status })),
-        { vmid: 9050, type: "lxc" }, // outside the pool: never listed as ours
+        // As the real token sees them (no Pool.Audit): the pool's members, WITHOUT their `pool` field.
+        ...[...cts.entries()].map(([vmid, ct]) => ({ vmid, type: "lxc", status: ct.status })),
+        { vmid: 9050, type: "lxc", pool: "other" }, // another pool's, as a broader token would see it: never ours
         { vmid: 115, type: "qemu", pool: "dispatch-terminals" },
       ];
     }

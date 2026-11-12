@@ -22424,7 +22424,7 @@ class ProxmoxProvider {
       type: "vm"
     });
     return (all ?? []).filter(
-      (m) => m.pool === s.pool && m.type === "lxc" && typeof m.vmid === "number"
+      (m) => (m.pool === s.pool || m.pool === void 0) && m.type === "lxc" && typeof m.vmid === "number"
     );
   }
 }

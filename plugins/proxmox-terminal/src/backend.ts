@@ -769,8 +769,13 @@ export class ProxmoxProvider implements MachineProvider<ContainerRef> {
     const all = await api.call<Array<{ vmid?: number; type?: string; pool?: string; status?: string }>>("GET", "/cluster/resources", {
       type: "vm",
     });
+    // A token without Pool.Audit (the setup's DispatchTerminal role) is shown
+    // only the pool's members, but WITHOUT their `pool` field (seen live on
+    // node g). So "no pool field" counts as the pool's; everything that acts on
+    // a vmid still checks its range and its description.
     return (all ?? []).filter(
-      (m): m is { vmid: number; status?: string } => m.pool === s.pool && m.type === "lxc" && typeof m.vmid === "number",
+      (m): m is { vmid: number; status?: string } =>
+        (m.pool === s.pool || m.pool === undefined) && m.type === "lxc" && typeof m.vmid === "number",
     );
   }
 }
