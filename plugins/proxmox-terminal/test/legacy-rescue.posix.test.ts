@@ -72,11 +72,20 @@ async function legacySync(from: string, workDir: string, d: string): Promise<str
 }
 
 /** The container's shell: the commands run under a real sh, as they would over SSH. */
-function shRemote(counter = { connects: 0, execs: 0 }): RescueRemote {
+interface Counter {
+  connects: number;
+  execs: number;
+  pipes?: number;
+  aborted?: number;
+  timeouts?: number[];
+}
+
+function shRemote(counter: Counter = { connects: 0, execs: 0 }): RescueRemote {
   return {
     exec: (cmd, opts = {}) =>
       new Promise((resolve, reject) => {
         counter.execs++;
+        if (opts.timeoutMs !== undefined) (counter.timeouts ??= []).push(opts.timeoutMs);
         const child = spawn("sh", ["-c", cmd], { stdio: ["pipe", "pipe", "pipe"] });
         const out: Buffer[] = [];
         const err: Buffer[] = [];
@@ -90,7 +99,16 @@ function shRemote(counter = { connects: 0, execs: 0 }): RescueRemote {
       }),
     pipe: (cmd, sink, opts) =>
       new Promise((resolve, reject) => {
-        const child = spawn("sh", ["-c", cmd], { stdio: ["ignore", "pipe", "pipe"] });
+        counter.pipes = (counter.pipes ?? 0) + 1;
+        const child = spawn("sh", ["-c", cmd], { stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+        opts.signal?.addEventListener("abort", () => {
+          counter.aborted = (counter.aborted ?? 0) + 1;
+          try {
+            process.kill(-child.pid!, "SIGKILL"); // the whole pipeline, as sshd hanging up would
+          } catch {
+            child.kill("SIGKILL");
+          }
+        });
         let bytes = 0;
         let stderr = "";
         child.stdout.on("data", (c: Buffer) => {
@@ -111,7 +129,7 @@ function rescuer(kv: Record<string, unknown> = {}, opts: { afterStep?: (s: Rescu
   return { r, t, kvNow: () => Object.fromEntries(t.kv) as Record<string, unknown> };
 }
 
-const job = (workDir: string, candidates: string[], counter?: { connects: number; execs: number }) => ({
+const job = (workDir: string, candidates: string[], counter?: Counter) => ({
   chatId: "chat1",
   vmid: 9003,
   workDir,
@@ -340,17 +358,43 @@ describe.skipIf(!posix)("legacy rescue (real git)", () => {
     expect(again).toEqual(first);
   });
 
-  it("a pack over the cap is cut off without taking the process down, and leaves no ref", async () => {
+  it("a pack over the cap is cut off at both ends without taking the process down, and leaves no ref", async () => {
     const { local, workDir } = fixture();
     await legacySync(local, workDir, "repo");
     writeFileSync(`${workDir}/repo/big.txt`, "x".repeat(200_000) + Math.random()); // incompressible enough
     const one = rescuer({}, { caps: { packBytes: 1 } });
-    await expect(one.r.run(job(workDir, [local]))).rejects.toThrow(/is over/);
+    const counter: Counter = { connects: 0, execs: 0 };
+    await expect(one.r.run(job(workDir, [local], counter))).rejects.toThrow(/is over/);
+    expect(counter.aborted).toBe(1); // the remote pack-objects was stopped too
     expect(g(local, "for-each-ref", "refs/dispatch")).toBe("");
     expect(existsSync(`${workDir}/repo`)).toBe(true); // not moved
     const two = rescuer(one.kvNow());
     const res = await two.r.run(job(workDir, [local]));
     expect(res.entries[0]).toMatchObject({ state: "moved", ref: rescueRef("chat1", 9003, "repo") });
+  });
+
+  it("a run resumed long after the first one started gets a full budget of its own", async () => {
+    const { local, workDir } = fixture();
+    await legacySync(local, workDir, "repo");
+    writeFileSync(`${workDir}/repo/a.ts`, "x\n");
+    const hourAgo = Date.now() - 3_600_000;
+    const stale = { vmid: 9003, phase: "failed", startedAt: hourAgo, updatedAt: hourAgo, entries: {}, failures: 2, lastError: "budget" };
+    const counter: Counter = { connects: 0, execs: 0 };
+    const res = await rescuer({ "rescue:chat1": stale }).r.run(job(workDir, [local], counter));
+    expect(res.entries[0]!.state).toBe("moved");
+    // Every command was allowed its own time, not the 1 s floor a spent clock gives.
+    expect(Math.min(...counter.timeouts!)).toBeGreaterThan(60_000);
+  });
+
+  it("says so when the only unsaved files there were left out by the caps", async () => {
+    const { local, workDir } = fixture();
+    await legacySync(local, workDir, "repo");
+    execFileSync("sh", ["-c", `truncate -s 60M ${JSON.stringify(`${workDir}/repo/huge.bin`)}`]);
+    const res = await rescuer().r.run(job(workDir, [local]));
+    expect(res.entries[0]).toMatchObject({ state: "moved", excludedCount: 1 });
+    expect(res.entries[0]!.ref).toBeUndefined();
+    expect(res.notice).toContain("`huge.bin` (60 MB)");
+    expect(res.notice).toContain(`${workDir}.pre-0.2/repo`);
   });
 
   it("a failure is recorded and counted; the next run finishes", async () => {

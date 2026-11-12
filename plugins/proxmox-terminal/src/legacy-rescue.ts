@@ -47,7 +47,11 @@ export interface RescueRemote {
   /** Run a POSIX `sh` command to completion, optionally feeding it stdin. */
   exec(cmd: string, opts?: { input?: string | Buffer; timeoutMs?: number }): Promise<{ code: number | null; stdout: string; stderr: string }>;
   /** Run a command, piping its stdout bytes into `sink` as they come; `sink` is ended after. */
-  pipe(cmd: string, sink: Writable, opts: { timeoutMs: number; onBytes?: (total: number) => void }): Promise<{ code: number | null; stderr: string }>;
+  pipe(
+    cmd: string,
+    sink: Writable,
+    opts: { timeoutMs: number; onBytes?: (total: number) => void; signal?: AbortSignal },
+  ): Promise<{ code: number | null; stderr: string }>;
   close?(): void;
 }
 
@@ -207,14 +211,18 @@ export class LegacyRescue {
       await kv?.set(key, state);
     };
     await save();
+    const budgetMs = this.opts.budgetMs ?? RESCUE_BUDGET_MS;
+    // This run's own clock. `state.startedAt` is the FIRST run's, and a run
+    // resumed after a failure must get a full budget of its own.
+    const deadline = Date.now() + budgetMs;
     const budget = new AbortController();
-    const timer = setTimeout(() => budget.abort(), this.opts.budgetMs ?? RESCUE_BUDGET_MS);
+    const timer = setTimeout(() => budget.abort(), budgetMs);
     timer.unref?.();
     let remote: RescueRemote | undefined;
     try {
       this.live.set(job.chatId, { step: "connecting" });
       remote = await job.connect();
-      const ctx: RunCtx = { job, remote, state, save, signal: budget.signal };
+      const ctx: RunCtx = { job, remote, state, save, signal: budget.signal, deadline };
       const present = await this.listCheckouts(ctx);
       for (const d of present) {
         this.checkBudget(ctx);
@@ -253,7 +261,7 @@ export class LegacyRescue {
 
   private timeout(ctx: RunCtx, ms = 120_000): number {
     // Never past the budget; a command cut off there fails the run.
-    return Math.max(1_000, Math.min(ms, ctx.state.startedAt + (this.opts.budgetMs ?? RESCUE_BUDGET_MS) - Date.now() + 1_000));
+    return Math.max(1_000, Math.min(ms, ctx.deadline - Date.now() + 1_000));
   }
 
   /** The git checkouts directly under workDir, by directory name. */
@@ -482,14 +490,19 @@ export class LegacyRescue {
       local.on("close", res);
     });
     let tooBig = false;
+    // Over the cap, or over the budget: stop the far end too, not just this one.
+    const stop = new AbortController();
+    const signal = AbortSignal.any([stop.signal, ctx.signal]);
     const revs = [commit, ...exclude.map((x) => `^${x}`)].join(" ");
     const r = await ctx.remote
       .pipe(`cd ${dir} && printf '%s\\n' ${revs} | git pack-objects --revs --stdout --thin -q`, local.stdin, {
         timeoutMs: this.timeout(ctx, 3_600_000),
+        signal,
         onBytes: (total) => {
           onBytes(total);
           if (total > this.caps.packBytes && !tooBig) {
             tooBig = true;
+            stop.abort();
             local.kill();
           }
         },
@@ -510,7 +523,10 @@ interface RunCtx {
   remote: RescueRemote;
   state: RescueState;
   save(): Promise<void>;
+  /** Aborts when this run's budget is spent. */
   signal: AbortSignal;
+  /** When this run's budget is spent (epoch ms). */
+  deadline: number;
 }
 
 interface Info {
@@ -594,19 +610,22 @@ export function noticeFor(job: Pick<RescueJob, "workDir">, entries: RescueEntry[
       );
       continue;
     }
-    if (!e.ref) continue;
+    if (!e.ref) {
+      if (e.excludedCount) {
+        parts.push(
+          `Before moving this chat's container to the new sync, nothing in checkout \`${e.d}\` differed from your last sync ` +
+            `except untracked files the size caps leave out:${leftOut(job, e)}`,
+        );
+      }
+      continue;
+    }
     const shown = (e.paths ?? []).slice(0, 10).map((p) => `\`${p.path}\` (${STATUS[p.status] ?? p.status})`);
     const more = (e.pathCount ?? 0) - shown.length;
     const changed = e.pathCount
       ? `${e.pathCount} path${e.pathCount === 1 ? "" : "s"} there differed from your last sync: ${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}`
       : "nothing there differed from your last sync";
     const commits = e.commits ? ` It also holds ${e.commits} commit${e.commits === 1 ? "" : "s"} made in the container.` : "";
-    const left = e.excludedCount
-      ? ` Left out by the size caps: ${(e.excluded ?? [])
-          .slice(0, 5)
-          .map((f) => `\`${f.path}\` (${Math.max(1, Math.round(f.bytes / MB))} MB)`)
-          .join(", ")}${e.excludedCount > 5 ? `, and ${e.excludedCount - 5} more` : ""}; they stay in the container's \`${job.workDir}.pre-0.2/${e.d}\` until it is destroyed.`
-      : "";
+    const left = e.excludedCount ? ` Left out by the size caps:${leftOut(job, e)}` : "";
     parts.push(
       `Before moving this chat's container to the new sync, ${changed} (checkout \`${e.d}\`).${commits} Nothing here was changed. ` +
         `They are saved as \`${e.ref}\`. Use \`git diff ${e.diffFrom ?? "HEAD"} ${e.ref} --stat\` to look, ` +
@@ -614,6 +633,18 @@ export function noticeFor(job: Pick<RescueJob, "workDir">, entries: RescueEntry[
     );
   }
   return parts.length ? parts.join("\n\n") : undefined;
+}
+
+/** " `big.bin` (51 MB), …. They stay in …" for an entry's left-out files. */
+function leftOut(job: Pick<RescueJob, "workDir">, e: RescueEntry): string {
+  const shown = (e.excluded ?? [])
+    .slice(0, 5)
+    .map((f) => (f.path.endsWith("/") ? `\`${f.path}\` (a nested repository)` : `\`${f.path}\` (${Math.max(1, Math.round(f.bytes / MB))} MB)`));
+  const more = (e.excludedCount ?? 0) - shown.length;
+  return (
+    ` ${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}. ` +
+    `They stay in the container's \`${job.workDir}.pre-0.2/${e.d}\` until the container is destroyed.`
+  );
 }
 
 /** {@link RescueRemote} over remote-core's SSH connection. */
@@ -630,8 +661,11 @@ export function sshRescueRemote(conn: SshConnection): RescueRemote {
               },
       }),
     pipe: async (cmd, sink, opts) => {
+      if (opts.signal?.aborted) throw new Error("aborted");
       const ch = await conn.channel(cmd);
       return new Promise((resolve, reject) => {
+        // Closing the channel ends the remote command (sshd hangs it up).
+        opts.signal?.addEventListener("abort", () => ch.close(), { once: true });
         let bytes = 0;
         let stderr = "";
         const timer = setTimeout(() => {
