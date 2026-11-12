@@ -45,6 +45,21 @@ importers:
         specifier: ^4.1.11
         version: 4.1.12(@types/node@26.6.5)(vite@6.4.5(@types/node@26.6.5))
 
+  packages/remote-host-api:
+    devDependencies:
+      '@dispatch/plugin-sdk':
+        specifier: link:../../.dispatch-sdk
+        version: link:../../.dispatch-sdk
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.6.5
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.12(@types/node@26.6.5)(vite@6.4.5(@types/node@26.6.5))
+
   plugins/proxmox-terminal:
     dependencies:
       '@dispatch-plugins/remote-core':
@@ -76,6 +91,9 @@ importers:
         specifier: workspace:*
         version: link:../../packages/remote-core
     devDependencies:
+      '@dispatch-plugins/remote-host-api':
+        specifier: workspace:*
+        version: link:../../packages/remote-host-api
       '@dispatch/plugin-sdk':
         specifier: link:../../.dispatch-sdk
         version: link:../../.dispatch-sdk

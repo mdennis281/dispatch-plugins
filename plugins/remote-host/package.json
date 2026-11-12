@@ -2,7 +2,7 @@
   "name": "@dispatch-plugins/remote-host",
   "private": true,
   "type": "module",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "Run Dispatch chat terminals on your own machines over SSH, under dispatch-host.",
   "scripts": {
     "build": "vite build -c vite.server.config.mjs && vite build -c vite.client.config.mjs",
@@ -14,6 +14,7 @@
     "@dispatch-plugins/remote-core": "workspace:*"
   },
   "devDependencies": {
+    "@dispatch-plugins/remote-host-api": "workspace:*",
     "@dispatch/plugin-sdk": "link:../../.dispatch-sdk",
     "@types/node": "^26.1.0",
     "@types/react": "^18.3.18",

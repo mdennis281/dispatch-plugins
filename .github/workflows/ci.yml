@@ -33,10 +33,11 @@ env:
   # The Dispatch commit the SDK is built from. Pinned, so a change on Dispatch's
   # main can't turn this repository red on its own. Move it when a plugin needs
   # newer SDK types or hooks, and commit the rebuilt bundles in the same PR.
-  # f26890d (#519): has `ctx.tools`, remote-host's agent tools, and the test
-  # context's `t.tools`. After #518 (`optionalCapabilities`), where tools,
-  # approvals and runner are listed.
-  DISPATCH_REF: f26890d6080ab1c2dfed37ddc1134881fef84455
+  # ed2ac93 (#533, C2): `ctx.provides` / `ctx.dependencies` over the revocable
+  # membrane, and the test context's `provides`, `callAs` and `revoke`, which
+  # remote-host's machines@1 is built and tested on. After #532 (C1, the
+  # manifest's `dependencies`/`provides`) and #519 (`ctx.tools`).
+  DISPATCH_REF: ed2ac93553861597b679996637e9f8c829624fbc
 
 jobs:
   plugins:

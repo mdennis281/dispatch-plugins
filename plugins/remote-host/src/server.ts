@@ -9,13 +9,16 @@ import { bundledAgent, nodejsOrgRuntime } from "./agent.js";
 import { approvalsOf } from "./elevation.js";
 import { ElevationSetups } from "./elevation-setup.js";
 import { readHosts, type HostConfig } from "./hosts.js";
+import { MachinesService } from "./machines.js";
 import { Pairing } from "./pairing.js";
+import { reservedPortsOf } from "./ports.js";
 import { HostRegistry } from "./registry.js";
 import { defineRoutes } from "./routes.js";
-import { registerTools, toolsOf } from "./tools/index.js";
+import { runsOf } from "./sync/run-lock.js";
+import { provisionedMachine, registerTools, toolsOf } from "./tools/index.js";
 
 /** What one activation holds, for `deactivate`. */
-let live: { registry: HostRegistry; pairing: Pairing; setups: ElevationSetups; off: () => void } | undefined;
+let live: { registry: HostRegistry; machines: MachinesService; pairing: Pairing; setups: ElevationSetups; off: () => void } | undefined;
 
 export default definePlugin({
   activate(ctx) {
@@ -36,13 +39,38 @@ export default definePlugin({
       if (!ctx.settings.set) throw new Error("this Dispatch cannot store plugin settings (ctx.settings.set); update Dispatch");
       await ctx.settings.set({ hosts: next });
     };
+    const agent = bundledAgent();
+    const runtime = nodejsOrgRuntime();
+    // Machines other plugins provision (`machines@1`), and the paired ones: one
+    // lock across them, since a chat's runs on either sync its files.
+    let machines: MachinesService | undefined = undefined;
     const registry = new HostRegistry({
       ctx,
       instanceId,
       ...(ctx.instance?.previousId ? { previousInstanceId: ctx.instance.previousId } : {}),
-      agent: bundledAgent(),
-      runtime: nodejsOrgRuntime(),
+      agent,
+      runtime,
+      mine: (backend) => machines!.mine(backend),
+      otherLabel: (backend) => (machines!.serves(backend) ? machines!.where(backend) : undefined),
     });
+    const runs = runsOf(ctx);
+    const reservedPorts = reservedPortsOf(ctx);
+    const provides = (ctx as { provides?: { dependents?: () => Array<{ id: string }> } }).provides;
+    machines = new MachinesService({
+      instanceId,
+      log: ctx.log,
+      ...(ctx.kv ? { kv: ctx.kv } : {}),
+      agent,
+      runtime,
+      ...(runs ? { runs } : {}),
+      ...(reservedPorts ? { reservedPorts } : {}),
+      ...(toolsOf(ctx) ? { agentTools: true } : {}),
+      where: (backend) => registry.label(backend),
+      paired: (backend) => registry.isPaired(backend),
+      ...(typeof provides?.dependents === "function" ? { dependents: () => provides.dependents!() } : {}),
+    });
+    // Only while activate runs: core seals the exports when it returns.
+    machines.serve(ctx);
     const pairing = new Pairing({
       hosts,
       saveHosts,
@@ -71,9 +99,15 @@ export default definePlugin({
     ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, setups, hosts, saveHosts }));
     // The agent's tools (remote_fetch, machine_status), where this Dispatch has `ctx.tools` (#519).
     const approvals = approvalsOf(ctx);
-    const offTools = registerTools(toolsOf(ctx), { registry, log: ctx.log, ...(approvals ? { approvals } : {}) });
+    const offTools = registerTools(toolsOf(ctx), {
+      registry,
+      log: ctx.log,
+      ...(approvals ? { approvals } : {}),
+      provisioned: (chatId) => machines!.forChat(chatId).map((pm) => provisionedMachine(pm, chatId)),
+    });
     live = {
       registry,
+      machines,
       pairing,
       setups,
       off: () => {
@@ -90,7 +124,10 @@ export default definePlugin({
    * next reachable, so this returns at once.
    */
   reconcile(e) {
-    live?.registry.reconcile(new Set(e.chats.map((c) => c.id)));
+    const chats = new Set(e.chats.map((c) => c.id));
+    live?.registry.reconcile(chats);
+    // Records only, here: in the background, like the machines'.
+    void live?.machines.reconcile(chats);
   },
 
   /**
@@ -111,6 +148,7 @@ export default definePlugin({
     l?.off();
     l?.pairing.clear();
     l?.setups.clear();
+    await l?.machines.dispose();
     await l?.registry.dispose();
   },
 });

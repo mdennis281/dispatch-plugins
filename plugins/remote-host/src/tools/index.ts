@@ -14,11 +14,13 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve } from "node:path";
 import { posix } from "node:path";
-import type { PluginContext, PluginToolCall, PluginToolResult } from "@dispatch/plugin-sdk";
+import type { PluginContext, PluginToolCall, PluginToolResult, TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
+import type { ProbeResult } from "@dispatch-plugins/host-agent";
 import { errText } from "@dispatch-plugins/remote-core";
 import type { Approvals } from "../elevation.js";
+import type { MachineEngine } from "../engine.js";
 import { backendId } from "../hosts.js";
-import type { Entry, HostRegistry, HostView } from "../registry.js";
+import type { HostRegistry } from "../registry.js";
 import { DROPPED } from "../mcp/files.js";
 import { ReplaceFailed, look, localName, mb, pull, type Pulled } from "./pull.js";
 
@@ -34,6 +36,69 @@ export interface ToolDeps {
   registry: HostRegistry;
   approvals?: Approvals;
   log: PluginContext["log"];
+  /** The machines other plugins provisioned for this chat (`machines@1`): only this chat's, never another's. */
+  provisioned?: (chatId: string) => ToolMachine[];
+}
+
+/** What the tools use of a machine's engine. */
+export type ToolEngine = Pick<MachineEngine, "whereThere" | "remoteSide" | "fetchedDir" | "chatActivity" | "knowsChat">;
+
+/** One machine as the tools see it: a paired one, or one provisioned for the chat. */
+export interface ToolMachine {
+  slug: string;
+  label: string;
+  /** Its terminal location (backend id). */
+  id: string;
+  /** Present while a tool can use it. A provisioned machine that is stopped has none: {@link stopped} says why. */
+  engine?: ToolEngine;
+  stopped?: string;
+  /** Provisioned for this chat: it is the chat's machine without asking. */
+  ownChat?: boolean;
+  view(): {
+    status: TerminalBackendStatusInput;
+    address?: string;
+    probe?: ProbeResult;
+    elevation: { on: boolean; canAsk: boolean };
+  };
+}
+
+/** A provisioned machine (`machines@1`) as the tools see it. The tools never start one: a stopped one is refused with why. */
+export function provisionedMachine(
+  pm: { id: string; label: string; key: string; slot(chatId: string): { engine: ToolEngine; link: { connected: boolean; address?: string; probe?: ProbeResult } } | undefined; lastSeen(chatId: string): ProbeResult | undefined },
+  chatId: string,
+): ToolMachine {
+  const slot = pm.slot(chatId);
+  const up = !!slot?.link.connected;
+  const probe = pm.lastSeen(chatId);
+  const address = slot?.link.address;
+  return {
+    slug: pm.key,
+    label: pm.label,
+    id: pm.id,
+    ownChat: true,
+    ...(up ? { engine: slot!.engine } : { stopped: `${pm.label} for this chat is stopped. A terminal command starts it; the tools never do.` }),
+    view: () => ({
+      status: up ? { state: "online" } : { state: "offline", detail: "stopped (a terminal command starts it)" },
+      ...(address ? { address } : {}),
+      ...(probe ? { probe } : {}),
+      elevation: { on: false, canAsk: false },
+    }),
+  };
+}
+
+/** Every machine a call may mean: this chat's provisioned ones, then the paired ones. */
+function machinesFor(deps: ToolDeps, chatId: string): ToolMachine[] {
+  const views = new Map(deps.registry.list().map((v) => [v.slug, v]));
+  const paired = deps.registry.all().map(
+    (e): ToolMachine => ({
+      slug: e.host.slug,
+      label: e.host.label,
+      id: backendId(e.host.slug),
+      engine: e.engine,
+      view: () => views.get(e.host.slug) ?? { status: { state: "offline" }, elevation: { on: false, canAsk: false } },
+    }),
+  );
+  return [...(deps.provisioned?.(chatId) ?? []), ...paired];
 }
 
 /** Register the tools; returns their unregister. Nothing happens on a Dispatch without `ctx.tools`. */
@@ -119,12 +184,14 @@ async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall
     const path = text(args.path, "path");
     if (!path) throw new ToolRefusal("`path` is required: the file or folder on the machine to copy.");
     const to = args.to === undefined ? undefined : text(args.to, "to");
-    const e = await pickOne(deps.registry, call.chatId, args.host === undefined ? undefined : text(args.host, "host"));
-    label = e.host.label;
+    const m = await pickOne(machinesFor(deps, call.chatId), call.chatId, args.host === undefined ? undefined : text(args.host, "host"));
+    label = m.label;
+    const e = m.engine;
+    if (!e) throw new ToolRefusal(`${m.stopped ?? `${label} can't be used right now.`} Nothing was copied.`);
     const signal = call.signal as unknown as AbortSignal;
-    const there = await e.engine.whereThere(call.chatId, call.cwd, signal);
+    const there = await e.whereThere(call.chatId, call.cwd, signal);
     from = remotePath(path, there);
-    const remote = e.engine.remoteSide();
+    const remote = e.remoteSide();
     const found = await look(remote, from);
     if (found.kind === "missing") {
       const rel = path.startsWith("/") || path.startsWith("~") ? "" : ` (a relative path is taken in ${there.cwd})`;
@@ -140,11 +207,11 @@ async function remoteFetch(deps: ToolDeps, args: FetchArgs, call: PluginToolCall
         replacing = true;
       }
     } else {
-      dest = resolve(e.engine.fetchedDir(call.chatId), localName(from));
+      dest = resolve(e.fetchedDir(call.chatId), localName(from));
     }
 
     const got = await pull(remote, from, found, dest, { signal });
-    deps.log.info(`remote-host ${e.host.slug}: remote_fetch for ${call.chatId}: ${from} → ${dest} (${mb(got.bytes)})`);
+    deps.log.info(`remote-host ${m.slug}: remote_fetch for ${call.chatId}: ${from} → ${dest} (${mb(got.bytes)})`);
     return await answer(got, from, dest, label, call, args.show === true);
   } catch (err) {
     if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
@@ -251,20 +318,16 @@ export function remotePath(path: string, there: { cwd: string; home?: string }):
 async function machineStatus(deps: ToolDeps, args: StatusArgs, call: PluginToolCall): Promise<PluginToolResult> {
   try {
     const name = args.host === undefined ? undefined : text(args.host, "host");
-    const all = deps.registry.all();
+    const all = machinesFor(deps, call.chatId);
     if (!all.length) return "No machines are paired. The user pairs one in Settings → Remote hosts.";
-    let chosen: Entry[];
+    let chosen: ToolMachine[];
     if (name) chosen = [byName(all, name)];
     else {
       const mine = await chatsMachines(all, call.chatId);
-      chosen = mine.length ? mine : all;
+      chosen = mine.length ? mine : all.filter((m) => !m.ownChat);
     }
-    const views = new Map(deps.registry.list().map((v) => [v.slug, v]));
     const blocks: string[] = [];
-    for (const e of chosen) {
-      const v = views.get(e.host.slug);
-      if (v) blocks.push(await describe(e, v, call));
-    }
+    for (const m of chosen) blocks.push(await describe(m, call));
     return blocks.join("\n\n");
   } catch (err) {
     if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
@@ -272,9 +335,10 @@ async function machineStatus(deps: ToolDeps, args: StatusArgs, call: PluginToolC
   }
 }
 
-async function describe(e: Entry, v: HostView, call: PluginToolCall): Promise<string> {
+async function describe(m: ToolMachine, call: PluginToolCall): Promise<string> {
+  const v = m.view();
   const p = v.probe;
-  const lines = [`${v.label} (terminal location ${v.id}): ${v.status.state}${v.status.detail ? `, ${v.status.detail}` : ""}`];
+  const lines = [`${m.label} (terminal location ${m.id}): ${v.status.state}${v.status.detail ? `, ${v.status.detail}` : ""}`];
   const facts: string[] = [];
   if (v.address) facts.push(v.status.state === "offline" ? `last reached at ${v.address}` : `at ${v.address}`);
   if (p) {
@@ -299,16 +363,20 @@ async function describe(e: Entry, v: HostView, call: PluginToolCall): Promise<st
     lines.push(`  tools: ${tools.join(", ")}`);
     if (p.consoleUser === "root") lines.push("  nobody is logged in at its screen (no desktop session)");
   }
-  lines.push(`  root with approval: ${v.elevation.on ? (v.elevation.canAsk ? "on (sudo asks the user)" : "set up, but this Dispatch can't ask the user") : "off (sudo is refused)"}`);
-  const act = e.engine.chatActivity(call.chatId);
+  if (m.ownChat) {
+    lines.push(`  root: ${p?.uid === 0 ? "the login is root" : p ? "none (root with approval is only for paired machines)" : "not known until it runs"}`);
+  } else {
+    lines.push(`  root with approval: ${v.elevation.on ? (v.elevation.canAsk ? "on (sudo asks the user)" : "set up, but this Dispatch can't ask the user") : "off (sudo is refused)"}`);
+  }
+  const act = m.engine?.chatActivity(call.chatId) ?? { shells: [], servers: [], ports: [] };
   const mine: string[] = [];
   if (act.shells.length) mine.push(`terminals ${act.shells.join(", ")}`);
   if (act.servers.length) mine.push(`MCP servers ${act.servers.join(", ")}`);
   if (act.ports.length) mine.push(`forwarded ports ${act.ports.map((f) => `${f.remotePort} → ${f.url}`).join(", ")}`);
   lines.push(`  this chat there: ${mine.length ? mine.join("; ") : "nothing running"}`);
-  if (v.status.state !== "offline") {
+  if (v.status.state !== "offline" && m.engine) {
     try {
-      const there = await withTimeout(e.engine.whereThere(call.chatId, call.cwd, call.signal as unknown as AbortSignal), 5_000);
+      const there = await withTimeout(m.engine.whereThere(call.chatId, call.cwd, call.signal as unknown as AbortSignal), 5_000);
       lines.push(`  this chat's ${there.checkout ? `checkout there: ${there.checkout} (your working directory is ${there.cwd})` : `directory there: ${there.cwd}`}`);
     } catch {
       /* not reachable right now: the status line says so */
@@ -318,14 +386,13 @@ async function describe(e: Entry, v: HostView, call: PluginToolCall): Promise<st
 }
 
 /** The one machine a call means: `name`, else the one this chat uses, else the only one paired. */
-async function pickOne(registry: HostRegistry, chatId: string, name: string | undefined): Promise<Entry> {
-  const all = registry.all();
+async function pickOne(all: ToolMachine[], chatId: string, name: string | undefined): Promise<ToolMachine> {
   if (!all.length) throw new ToolRefusal("No machines are paired. The user pairs one in Settings → Remote hosts.");
   if (name) return byName(all, name);
   const mine = await chatsMachines(all, chatId);
   if (mine.length === 1) return mine[0]!;
   if (!mine.length && all.length === 1) return all[0]!;
-  const among = (mine.length ? mine : all).map((e) => e.host.label).join(", ");
+  const among = (mine.length ? mine : all).map((e) => e.label).join(", ");
   throw new ToolRefusal(
     mine.length
       ? `This chat uses more than one machine (${among}); say which with \`host\`.`
@@ -333,16 +400,21 @@ async function pickOne(registry: HostRegistry, chatId: string, name: string | un
   );
 }
 
-async function chatsMachines(all: Entry[], chatId: string): Promise<Entry[]> {
-  const known = await Promise.all(all.map((e) => e.engine.knowsChat(chatId).catch(() => false)));
+async function chatsMachines(all: ToolMachine[], chatId: string): Promise<ToolMachine[]> {
+  const known = await Promise.all(all.map((m) => (m.ownChat ? true : (m.engine?.knowsChat(chatId).catch(() => false) ?? false))));
   return all.filter((_, i) => known[i]);
 }
 
-function byName(all: Entry[], name: string): Entry {
+function byName(all: ToolMachine[], name: string): ToolMachine {
   const n = name.trim().toLowerCase();
-  const e = all.find((x) => x.host.slug === n || x.host.label.toLowerCase() === n || backendId(x.host.slug) === n);
-  if (!e) throw new ToolRefusal(`No paired machine is called ${name}. Paired: ${all.map((x) => x.host.label).join(", ")}.`);
-  return e;
+  const m = all.find((x) => x.slug === n || x.label.toLowerCase() === n || x.id === n);
+  if (!m) {
+    const names = all.map((x) => x.label).join(", ");
+    throw new ToolRefusal(
+      all.some((x) => x.ownChat) ? `No machine is called ${name}. This chat can use: ${names}.` : `No paired machine is called ${name}. Paired: ${names}.`,
+    );
+  }
+  return m;
 }
 
 function text(v: unknown, field: string): string {

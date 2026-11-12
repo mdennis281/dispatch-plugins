@@ -95,7 +95,7 @@ export const SESSIONS_PER_CONNECTION = 8;
 export const CONTROL_EXECS = 6;
 
 /** A keepalive every 5 s, three missed: a dead link (Wi-Fi gone, the Mac asleep) is noticed in about 15 s. */
-const KEEPALIVE = { intervalMs: 5_000, countMax: 3 };
+export const KEEPALIVE = { intervalMs: 5_000, countMax: 3 };
 
 export interface HostLinkDeps {
   instanceId: string;
@@ -132,25 +132,177 @@ interface PoolEntry {
 const LOW_DISK_BYTES = 5 * 1024 ** 3;
 
 /**
+ * What every link shares, however it finds and verifies its machine: the
+ * verified control connection, extra connections for shells, and commands on
+ * the control connection taking turns. A paired machine's {@link HostLink}
+ * and a provisioned one's (provisioned-link.ts) differ only in how they dial.
+ */
+export abstract class LinkBase {
+  protected linked?: Linked;
+  protected pool: PoolEntry[] = [];
+  private adding?: Promise<PoolEntry>;
+  private execs = 0;
+  private execWaiting: Array<() => void> = [];
+  protected disposed = false;
+  protected readonly now: () => number;
+
+  protected constructor(now?: () => number) {
+    this.now = now ?? Date.now;
+  }
+
+  /** What the machine is, from its last probe. */
+  abstract get probe(): ProbeResult | undefined;
+  /** Where it answered last. */
+  abstract get address(): string | undefined;
+  /** A live, verified connection: the current one, or a new one. */
+  abstract ready(signal?: AbortSignal, opts?: { patient?: boolean }): Promise<Linked>;
+  /** Bumped whenever how to reach the machine changes: a connection opened for an older one is thrown away. */
+  protected abstract generation(): number;
+  /** One more connection to where `linked` answered, for shells: connected, nothing run on it yet. */
+  protected abstract dialAgain(linked: Linked): Promise<LinkConnection>;
+  /** The machine, for messages. */
+  protected abstract name(): string;
+
+  get paths(): HostPaths | undefined {
+    return this.linked?.paths;
+  }
+
+  /** Whether a verified connection is up right now. */
+  get connected(): boolean {
+    return !!this.linked?.conn.isOpen;
+  }
+
+  /** How many connections carry shells right now (for tests and the log). */
+  get sessionConnections(): number {
+    return this.pool.length;
+  }
+
+  /**
+   * A channel running `command` for a shell, on a connection with room for it
+   * (opened if none has). The channel stays open for the shell's life.
+   */
+  async openSession(command: string, signal?: AbortSignal): Promise<ClientChannel> {
+    await this.ready(signal);
+    const gen = this.generation();
+    for (;;) {
+      if (signal?.aborted) throw new Error("cancelled");
+      const slot = this.pool.find((p) => p.conn.isOpen && p.open < SESSIONS_PER_CONNECTION);
+      if (!slot) {
+        this.adding ??= this.addSessionConnection().finally(() => {
+          this.adding = undefined;
+        });
+        await withAbort(this.adding, signal);
+        continue;
+      }
+      if (gen !== this.generation()) throw new Error("the machine's settings changed; try again");
+      slot.open++;
+      slot.idleSince = undefined;
+      let ch: ClientChannel;
+      try {
+        ch = await slot.conn.channel(command);
+      } catch (err) {
+        this.release(slot);
+        throw err;
+      }
+      ch.on("close", () => this.release(slot));
+      return ch;
+    }
+  }
+
+  /**
+   * Run a command on the control connection. At most {@link CONTROL_EXECS} run
+   * at once, the rest wait their turn: a burst (a dozen spawns each making
+   * its directory, kills after a drop) must not hit sshd's `MaxSessions`.
+   */
+  async exec(command: string, opts: { timeoutMs?: number; stdin?: (ch: ClientChannel) => Promise<void> } = {}): Promise<ExecResult> {
+    await this.takeExecSlot();
+    try {
+      const { conn } = await this.ready();
+      return await conn.exec(command, opts);
+    } finally {
+      this.execs--;
+      this.execWaiting.shift()?.();
+    }
+  }
+
+  /**
+   * A TCP connection to `host:port` as the machine sees it, over the control
+   * connection as it is NOW: a forward made before a reconnect keeps working
+   * after it. Rejects AT ONCE while the machine is offline: it never starts a
+   * connect, so a browser retrying a forwarded port can't skip the backoff
+   * (the link's own timer reconnects).
+   */
+  async tcp(host: string, port: number): Promise<ClientChannel> {
+    const l = this.linked;
+    if (!l?.conn.isOpen) throw new Error(`${this.name()} is not connected`);
+    return l.conn.tcp(host, port);
+  }
+
+  /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
+  async agent<T>(args: readonly string[], timeoutMs = 30_000): Promise<T> {
+    const { paths } = await this.ready();
+    const r = await this.exec(agentCommand(paths, args), { timeoutMs });
+    if (r.code !== 0) throw new Error(`dispatch-host ${args[0]} exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
+    return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "null") as T;
+  }
+
+  private async takeExecSlot(): Promise<void> {
+    while (this.execs >= CONTROL_EXECS) await new Promise<void>((r) => this.execWaiting.push(r));
+    this.execs++;
+  }
+
+  private async addSessionConnection(): Promise<PoolEntry> {
+    const linked = await this.ready();
+    const gen = this.generation();
+    const conn = await this.dialAgain(linked);
+    const entry: PoolEntry = { conn, open: 0, idleSince: this.now() };
+    conn.on("close", () => {
+      this.pool = this.pool.filter((p) => p !== entry);
+    });
+    // Opened for an address the settings have since moved away from.
+    if (this.disposed || gen !== this.generation()) {
+      conn.close();
+      throw new Error(this.disposed ? "the plugin is shutting down" : "the machine's settings changed; try again");
+    }
+    this.pool.push(entry);
+    return entry;
+  }
+
+  private release(slot: PoolEntry): void {
+    slot.open = Math.max(0, slot.open - 1);
+    if (slot.open === 0) slot.idleSince = this.now();
+  }
+
+  /** Close the extra connections that have carried no shell for `idleMs`. */
+  protected closeIdle(idleMs: number): void {
+    const now = this.now();
+    for (const p of this.pool) {
+      if (p.open === 0 && p.idleSince !== undefined && now - p.idleSince >= idleMs) p.conn.close();
+    }
+  }
+
+  protected closePool(): void {
+    const pool = this.pool;
+    this.pool = [];
+    for (const p of pool) p.conn.close();
+  }
+}
+
+/**
  * What a {@link MachineEngine} and the sync use of a link: reaching the
  * machine and running things on it. Watching it, the status line and the
  * reconnect timer stay with whoever owns the link (the registry, for a
  * paired machine), so an engine can sit on a link it doesn't manage.
  */
 export type MachineLink = Pick<
-  HostLink,
+  LinkBase,
   "ready" | "connected" | "probe" | "paths" | "address" | "exec" | "agent" | "openSession" | "tcp"
 >;
 
-export class HostLink {
-  private linked?: Linked;
+export class HostLink extends LinkBase {
   private connecting?: { gen: number; p: Promise<Linked> };
   /** Bumped whenever how to reach the machine changes. A connect from an older generation is thrown away. */
   private gen = 0;
-  private pool: PoolEntry[] = [];
-  private adding?: Promise<PoolEntry>;
-  private execs = 0;
-  private execWaiting: Array<() => void> = [];
   private timer?: NodeJS.Timeout;
   private failures = 0;
   private nextAttemptAt = 0;
@@ -161,18 +313,16 @@ export class HostLink {
   private lastSweepAt = 0;
   private busy = false;
   private gcRunning = false;
-  private disposed = false;
   private memory: LinkMemory = {};
   private current: TerminalBackendStatusInput = { state: "degraded", detail: CONNECTING };
   private readonly t: LinkTiming;
-  private readonly now: () => number;
 
   constructor(
     private host: HostConfig,
     private readonly deps: HostLinkDeps,
   ) {
+    super(deps.now);
     this.t = { ...DEFAULT_TIMING, ...deps.timing };
-    this.now = deps.now ?? Date.now;
   }
 
   get status(): TerminalBackendStatusInput {
@@ -188,22 +338,8 @@ export class HostLink {
     return this.linked?.address ?? this.memory.lastAddress;
   }
 
-  get paths(): HostPaths | undefined {
-    return this.linked?.paths;
-  }
-
-  /** Whether a verified connection is up right now. */
-  get connected(): boolean {
-    return !!this.linked?.conn.isOpen;
-  }
-
   get config(): HostConfig {
     return this.host;
-  }
-
-  /** How many connections carry shells right now (for tests and the log). */
-  get sessionConnections(): number {
-    return this.pool.length;
   }
 
   /** Report "connecting", then connect in the background and keep the link up. */
@@ -259,80 +395,6 @@ export class HostLink {
     if (now - lastContact <= this.t.recentContactMs) return undefined;
     this.nextAttemptAt = Math.min(this.nextAttemptAt, now + this.t.nudgeMs);
     return new Error(`it is offline (${this.current.detail ?? "no answer"}); Dispatch keeps trying to reach it`);
-  }
-
-  /**
-   * A channel running `command` for a shell, on a connection with room for it
-   * (opened if none has). The channel stays open for the shell's life.
-   */
-  async openSession(command: string, signal?: AbortSignal): Promise<ClientChannel> {
-    await this.ready(signal);
-    const gen = this.gen;
-    for (;;) {
-      if (signal?.aborted) throw new Error("cancelled");
-      const slot = this.pool.find((p) => p.conn.isOpen && p.open < SESSIONS_PER_CONNECTION);
-      if (!slot) {
-        this.adding ??= this.addSessionConnection().finally(() => {
-          this.adding = undefined;
-        });
-        await withAbort(this.adding, signal);
-        continue;
-      }
-      if (gen !== this.gen) throw new Error("the machine's settings changed; try again");
-      slot.open++;
-      slot.idleSince = undefined;
-      let ch: ClientChannel;
-      try {
-        ch = await slot.conn.channel(command);
-      } catch (err) {
-        this.release(slot);
-        throw err;
-      }
-      ch.on("close", () => this.release(slot));
-      return ch;
-    }
-  }
-
-  /**
-   * Run a command on the control connection. At most {@link CONTROL_EXECS} run
-   * at once, the rest wait their turn: a burst (a dozen spawns each making
-   * its directory, kills after a drop) must not hit sshd's `MaxSessions`.
-   */
-  async exec(command: string, opts: { timeoutMs?: number; stdin?: (ch: ClientChannel) => Promise<void> } = {}): Promise<ExecResult> {
-    await this.takeExecSlot();
-    try {
-      const { conn } = await this.ready();
-      return await conn.exec(command, opts);
-    } finally {
-      this.execs--;
-      this.execWaiting.shift()?.();
-    }
-  }
-
-  /**
-   * A TCP connection to `host:port` as the machine sees it, over the control
-   * connection as it is NOW: a forward made before a reconnect keeps working
-   * after it. Rejects AT ONCE while the machine is offline: it never starts a
-   * connect, so a browser retrying a forwarded port can't skip the backoff
-   * (the link's own timer reconnects).
-   */
-  async tcp(host: string, port: number): Promise<ClientChannel> {
-    const l = this.linked;
-    if (!l?.conn.isOpen) throw new Error(`${this.host.label} is not connected`);
-    return l.conn.tcp(host, port);
-  }
-
-  /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
-  async agent<T>(args: readonly string[], timeoutMs = 30_000): Promise<T> {
-    const { paths } = await this.ready();
-    const r = await this.exec(agentCommand(paths, args), { timeoutMs });
-    if (r.code !== 0) throw new Error(`dispatch-host ${args[0]} exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
-    return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "null") as T;
-  }
-
-  private async takeExecSlot(): Promise<void> {
-    while (this.execs >= CONTROL_EXECS) await new Promise<void>((r) => this.execWaiting.push(r));
-    this.execs++;
   }
 
   /**
@@ -490,9 +552,15 @@ export class HostLink {
     if (reaped.length) this.deps.log.info(`remote-host ${this.host.slug}: swept ${reaped.length} orphaned session(s)`);
   }
 
-  private async addSessionConnection(): Promise<PoolEntry> {
-    const linked = await this.ready();
-    const gen = this.gen;
+  protected generation(): number {
+    return this.gen;
+  }
+
+  protected name(): string {
+    return this.host.label;
+  }
+
+  protected async dialAgain(linked: Linked): Promise<LinkConnection> {
     const key = await this.deps.privateKey();
     if (!key) throw new Error(`no key: the ${keySecretName(this.host.slug)} secret is missing`);
     const conn = this.make(this.target(linked.address, key));
@@ -502,28 +570,7 @@ export class HostLink {
       conn.close();
       throw new Error(`could not open another connection for shells: ${describeConnectError(err, this.memory.probe?.platform)}`);
     }
-    const entry: PoolEntry = { conn, open: 0, idleSince: this.now() };
-    conn.on("close", () => {
-      this.pool = this.pool.filter((p) => p !== entry);
-    });
-    // Opened for an address the settings have since moved away from.
-    if (this.disposed || gen !== this.gen) {
-      conn.close();
-      throw new Error(this.disposed ? "the plugin is shutting down" : "the machine's settings changed; try again");
-    }
-    this.pool.push(entry);
-    return entry;
-  }
-
-  private release(slot: PoolEntry): void {
-    slot.open = Math.max(0, slot.open - 1);
-    if (slot.open === 0) slot.idleSince = this.now();
-  }
-
-  private closePool(): void {
-    const pool = this.pool;
-    this.pool = [];
-    for (const p of pool) p.conn.close();
+    return conn;
   }
 
   private closed(conn: LinkConnection): void {
@@ -574,9 +621,7 @@ export class HostLink {
     this.busy = true;
     try {
       const now = this.now();
-      for (const p of this.pool) {
-        if (p.open === 0 && p.idleSince !== undefined && now - p.idleSince >= this.t.idleSessionConnectionMs) p.conn.close();
-      }
+      this.closeIdle(this.t.idleSessionConnectionMs);
       if (!this.linked?.conn.isOpen) {
         if (!this.connecting && now >= this.nextAttemptAt) await this.attempt().catch(() => {});
         return;

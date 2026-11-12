@@ -77,3 +77,22 @@ describe("the lock across locations", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
+
+describe("which runs are remote-host's own", () => {
+  it("takes every backend remote-host serves for its own: a provisioned machine's run in the chat isn't waited for, another plugin's is", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "rh-lock-")));
+    dirs.push(root);
+    const t = createTestContext({ id: "remote-host", capabilities: ["terminals"] });
+    const runs = runsOf(t.ctx)!;
+    const where = (b: string) => b;
+    const mine = (b: string) => b.startsWith("remote-host/") || b === "proxmox";
+    const q = { chatId: "chat-1", root, runId: "mine" };
+    t.terminals.startRun({ chatId: "chat-1", backend: "proxmox", cwd: "/root/work", terminal: "lxc" });
+    t.terminals.startRun({ chatId: "chat-1", backend: "other-plugin/box", cwd: "/w", terminal: "box" });
+    const withMine = new CheckoutLock({ runs, self: "remote-host/studio", where, mine });
+    expect((await withMine.others(q, "after")).map((r) => r.terminal)).toEqual(["box"]);
+    // Without being told, only paired machines are remote-host's: the provisioned run would be waited on.
+    const paired = new CheckoutLock({ runs, self: "remote-host/studio", where });
+    expect((await paired.others(q, "after")).map((r) => r.terminal).sort()).toEqual(["box", "lxc"]);
+  });
+});

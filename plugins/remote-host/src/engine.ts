@@ -81,6 +81,12 @@ export interface MachineSpec {
   adoptLegacySync: boolean;
   /** Its label, login and, paired, how elevation logs in. Read each time: a rename changes it. */
   host: () => HostConfig;
+  /**
+   * A machine another plugin provisioned for one chat (`machines@1`): no
+   * approval-gated root (a root login is root; any other has none), and its
+   * lifecycle is the provisioner's, so the agent note leaves that to it.
+   */
+  provisioned?: boolean;
 }
 
 export interface EngineDeps {
@@ -114,6 +120,8 @@ export interface EngineDeps {
   elevationConnect?: ElevationDeps["connect"];
   /** Where copies of what MCP servers there write go here. Default: the OS temp directory's `dispatch-remote-host`. */
   mcpLocalRoot?: string;
+  /** Whether a backend is one remote-host serves, for the lock across locations (run-lock.ts). Default: paired ones. */
+  mine?: (backend: string) => boolean;
 }
 
 export class MachineEngine {
@@ -155,6 +163,8 @@ export class MachineEngine {
    * timeout, and the agent's next call then waits for the same one.
    */
   private readonly provisions = new Map<string, Promise<ProvisionResult>>();
+  /** Foreground runs each shell has in flight (runBegin until its runEnd), by shell: for {@link running}. */
+  private readonly runsInFlight = new Map<string, Set<string>>();
 
   constructor(
     readonly spec: MachineSpec,
@@ -215,6 +225,7 @@ export class MachineEngine {
     sh.on("elevate", (req: ElevateRequestMsg) => void this.elevation.handle(req, { chatId, terminal: info.name }, sh));
     sh.on("elevateCancel", (id: string) => this.elevation.cancel(id));
     sh.on("exit", () => {
+      this.runsInFlight.delete(key);
       this.elevation.cancelShell(sh);
       if (this.shells.get(key) === sh) this.shells.delete(key);
       // Whatever it was running is over, so it no longer holds the checkout.
@@ -224,7 +235,10 @@ export class MachineEngine {
     });
     this.ports.wake();
     // A run is over there, even one core stopped waiting for.
-    sh.on("runEnd", (m: { runId: string }) => this.syncs.get(chatId)?.runEnded(m.runId));
+    sh.on("runEnd", (m: { runId: string }) => {
+      this.runsInFlight.get(key)?.delete(m.runId);
+      this.syncs.get(chatId)?.runEnded(m.runId);
+    });
     return sh;
   }
 
@@ -444,7 +458,7 @@ export class MachineEngine {
   }
 
   private mcpLocalHostDir(): string {
-    return join(this.deps.mcpLocalRoot ?? join(tmpdir(), "dispatch-remote-host"), this.deps.instanceId, this.spec.key);
+    return mcpLocalHostDir(this.deps.mcpLocalRoot, this.deps.instanceId, this.spec.key);
   }
 
   /**
@@ -656,13 +670,46 @@ export class MachineEngine {
   async beforeRun(info: TerminalRunInfo): Promise<TerminalBeforeRunResult> {
     const sync = this.syncs.get(info.chatId);
     const r = sync ? await sync.beforeRun(info) : {};
-    if (!r.refuse) this.shells.get(shellKey(info.chatId, info.terminal))?.runBegin(info.runId, info.background);
+    if (!r.refuse) {
+      const key = shellKey(info.chatId, info.terminal);
+      const sh = this.shells.get(key);
+      sh?.runBegin(info.runId, info.background);
+      if (sh && !info.background) {
+        let runs = this.runsInFlight.get(key);
+        if (!runs) this.runsInFlight.set(key, (runs = new Set()));
+        runs.add(info.runId);
+      }
+    }
     return r;
   }
 
   /** Bring back what the command changed there. */
   async afterRun(info: TerminalAfterRunInfo): Promise<TerminalAfterRunResult> {
     return (await this.syncs.get(info.chatId)?.afterRun(info)) ?? {};
+  }
+
+  /** Whether a command runs in one of the chat's shells here, or one of its MCP servers is up. */
+  running(chatId: string): boolean {
+    for (const [k, runs] of this.runsInFlight) if (runs.size && k.slice(0, k.indexOf("\u0000")) === chatId) return true;
+    for (const k of this.processes.keys()) if (k.slice(0, k.indexOf("\u0000")) === chatId) return true;
+    return false;
+  }
+
+  /**
+   * Forget a chat HERE only, never contacting the machine: its shells and
+   * servers end (their channels close), and its records, sync state and
+   * local copies go. For a provisioned machine, whose provisioner destroys
+   * the machine itself.
+   */
+  async forgetLocal(chatId: string): Promise<void> {
+    if (!ID.test(chatId)) return;
+    this.endShells(chatId);
+    this.syncs.delete(chatId);
+    this.served.delete(chatId);
+    this.live?.delete(chatId);
+    await rm(this.mcpLocalDir(chatId), { recursive: true, force: true }).catch(() => {});
+    await this.deps.kv?.delete(this.servedKey(chatId));
+    await this.deps.kv?.delete(syncKey(this.spec.kvPrefix, chatId));
   }
 
   private chatSync(chatId: string, root: string): ChatSync {
@@ -688,6 +735,7 @@ export class MachineEngine {
     return new CheckoutLock({
       runs,
       self: this.spec.backendId,
+      ...(this.deps.mine ? { mine: this.deps.mine } : {}),
       where: (backend) => (backend === "local" ? "this computer" : (this.deps.where?.(backend) ?? backend)),
       ...(this.deps.lockWaitMs !== undefined ? { afterWaitMs: this.deps.lockWaitMs } : {}),
     });
@@ -695,48 +743,100 @@ export class MachineEngine {
 
   agentNote(info: { chatId: string }): string {
     const host = this.spec.host();
-    const probe = this.deps.link.probe;
     const paths = this.deps.link.paths;
-    const where = paths ? chatDir(paths, this.deps.instanceId, info.chatId) : `~/.dispatch-host/…/chats/${info.chatId}`;
-    return [
-      `- This terminal runs on ${host.label}${describe(probe)}, over SSH as \`${host.user}\`, under dispatch-host. A dropped ` +
-        `connection pauses the command and picks it up again; it is not restarted.`,
-      `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, ` +
-        `with PATH and locale from the login shell. On it: ${tools(probe)}.`,
-      ...(probe?.platform === "darwin" ? [xcodeNote(probe)] : []),
-      ...(probe?.brew && brewUsable(probe, host.user) ? [brewNote(probe.brew)] : []),
-      rootNote(host.label, this.elevation.state, probe?.platform === "darwin"),
-      `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked ` +
-        `files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts ` +
-        `at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, ` +
-        `build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB ` +
-        `aren't sent.`,
-      `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is ` +
-        `saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others ` +
-        `are refused, so files never change under a running command; one that timed out holds every terminal until it ends ` +
-        `(Ctrl-C it). Likewise while a terminal on this computer (or this chat's terminal on another machine) runs a ` +
-        `command in the same files: a command in this terminal is refused, so run them one after the other, not side by ` +
-        `side. Outside a git repository nothing is synced.`,
-      `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: ` +
-        `on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on ` +
-        `another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never ` +
-        `the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started ` +
-        `from this chat's terminals; nothing else on the machine is.`,
-      mcpNote(host.label, this.mcpLocalDir(info.chatId)),
-      ...(this.deps.agentTools
-        ? [
-            `- To bring here what the sync doesn't (build output, an .xcresult, a screenshot, a test report, a file outside ` +
-              `the checkout), call remote-host's \`remote_fetch\` tool with its path there; it says where the copy is. Its ` +
-              `\`machine_status\` tool says what ${host.label} is and what this chat has there, without running a command.`,
-          ]
-        : []),
-      `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its ` +
-        `checkout there.`,
-      `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
-      `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you ` +
-        `started (Ctrl-C the terminal, \`kill %1\`).`,
-    ].join("\n");
+    return machineNote({
+      label: host.label,
+      user: host.user,
+      key: this.spec.key,
+      probe: this.deps.link.probe,
+      where: paths ? chatDir(paths, this.deps.instanceId, info.chatId) : `~/.dispatch-host/…/chats/${info.chatId}`,
+      elevation: this.elevation.state,
+      mcpLocalDir: this.mcpLocalDir(info.chatId),
+      agentTools: !!this.deps.agentTools,
+      provisioned: !!this.spec.provisioned,
+    });
   }
+}
+
+/** Where copies of what one machine's MCP servers write go here: `<root>/<instance>/<machine key>`. */
+export function mcpLocalHostDir(root: string | undefined, instanceId: string, key: string): string {
+  return join(root ?? join(tmpdir(), "dispatch-remote-host"), instanceId, key);
+}
+
+export interface MachineNoteInput {
+  label: string;
+  /** The login there; absent for a provisioned machine not reached yet. */
+  user?: string;
+  /** The machine's key: conflict copies are `<file>.from-<key>`. */
+  key: string;
+  probe: ProbeResult | undefined;
+  /** The chat's directory there, as the agent should read it. */
+  where: string;
+  elevation: ElevationState | undefined;
+  mcpLocalDir: string;
+  agentTools: boolean;
+  /** Provisioned for this chat by another plugin, which adds its own lifecycle lines. */
+  provisioned: boolean;
+}
+
+/** The agent note's machine part: what the machine is, how files sync, ports, MCP servers, tools. */
+export function machineNote(n: MachineNoteInput): string {
+  const { label, probe } = n;
+  const root = !n.provisioned
+    ? rootNote(label, n.elevation, probe?.platform === "darwin")
+    : n.elevation === "root" || n.user === "root"
+      ? rootNote(label, "root", false)
+      : n.user
+        ? `- Root: nothing runs as root on ${label}: the login isn't root, and root with approval is only for paired ` +
+          `machines. If something truly needs root, tell the user what and why.`
+        : `- Root: if the login on ${label} is root, everything you run there already runs as root (no sudo needed); ` +
+          `otherwise nothing can, as root with approval is only for paired machines.`;
+  return [
+    `- This terminal runs on ${label}${describe(probe)}, over SSH${n.user ? ` as \`${n.user}\`` : ""}, under dispatch-host. A dropped ` +
+      `connection pauses the command and picks it up again; it is not restarted.`,
+    `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, ` +
+      `with PATH and locale from the login shell. On it: ${tools(probe)}.`,
+    ...(probe?.platform === "darwin" ? [xcodeNote(probe)] : []),
+    ...(probe?.brew && n.user && brewUsable(probe, n.user) ? [brewNote(probe.brew)] : []),
+    root,
+    `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked ` +
+      `files too, but not ignored ones) is copied to this chat's own checkout there, under ${n.where}, and the shell starts ` +
+      `at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, ` +
+      `build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB ` +
+      `aren't sent.`,
+    `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is ` +
+      `saved beside yours as \`<file>.from-${n.key}\`. While one terminal of this chat runs a command there, the others ` +
+      `are refused, so files never change under a running command; one that timed out holds every terminal until it ends ` +
+      `(Ctrl-C it). Likewise while a terminal on this computer (or this chat's terminal on another machine) runs a ` +
+      `command in the same files: a command in this terminal is refused, so run them one after the other, not side by ` +
+      `side. Outside a git repository nothing is synced.`,
+    `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: ` +
+      `on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on ` +
+      `another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never ` +
+      `the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started ` +
+      `from this chat's terminals; nothing else on the machine is.`,
+    mcpNote(label, n.mcpLocalDir),
+    ...(n.agentTools
+      ? [
+          `- To bring here what the sync doesn't (build output, an .xcresult, a screenshot, a test report, a file outside ` +
+            `the checkout), call remote-host's \`remote_fetch\` tool with its path there; it says where the copy is. Its ` +
+            `\`machine_status\` tool says what ${label} is and what this chat has there, without running a command.`,
+        ]
+      : []),
+    ...(n.provisioned
+      ? []
+      : [
+          `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its ` +
+            `checkout there.`,
+        ]),
+    `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
+    ...(n.provisioned
+      ? []
+      : [
+          `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you ` +
+            `started (Ctrl-C the terminal, \`kill %1\`).`,
+        ]),
+  ].join("\n");
 }
 
 /** Chat ids that are safe as a path component there (dispatch-host's own check). */
