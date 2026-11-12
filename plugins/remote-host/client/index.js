@@ -160,7 +160,7 @@ const TONE = {
   offline: "bg-danger"
 };
 function HostRow(props) {
-  var _a;
+  var _a, _b;
   const { host, view } = props;
   const { Button, IconButton, Tooltip } = host.ui;
   const [checking, setChecking] = useState(false);
@@ -218,7 +218,7 @@ function HostRow(props) {
       /* @__PURE__ */ jsx("div", { className: "cm-mono truncate text-2xs text-faint", title: "The machine's host key, pinned at pairing", children: view.hostKey }),
       /* @__PURE__ */ jsxs("div", { className: "flex flex-wrap items-center gap-x-2 text-xs text-muted", children: [
         /* @__PURE__ */ jsx("span", { children: elevationLine(view) }),
-        /* @__PURE__ */ jsx(Button, { size: "sm", variant: "ghost", leftIcon: /* @__PURE__ */ jsx(ShieldCheck, {}), onClick: props.onElevation, children: ((_a = view.elevation) == null ? void 0 : _a.on) ? "Manage" : "Set up" })
+        (((_a = view.elevation) == null ? void 0 : _a.on) || elevationOffered(view)) && /* @__PURE__ */ jsx(Button, { size: "sm", variant: "ghost", leftIcon: /* @__PURE__ */ jsx(ShieldCheck, {}), onClick: props.onElevation, children: ((_b = view.elevation) == null ? void 0 : _b.on) ? "Manage" : "Set up" })
       ] })
     ] }),
     /* @__PURE__ */ jsxs("div", { className: "flex shrink-0 items-center gap-0.5", children: [
@@ -246,8 +246,17 @@ function statusLine(v) {
   if (s.state === "online") return ["Online", s.detail, seen].filter(Boolean).join(" · ");
   return [statusWords(v), seen].filter(Boolean).join(" · ");
 }
+function rootLogin(v) {
+  var _a;
+  return ((_a = v.probe) == null ? void 0 : _a.uid) !== void 0 ? v.probe.uid === 0 : v.user === "root";
+}
+function elevationOffered(v) {
+  return !rootLogin(v) && (!v.probe || v.probe.platform === "darwin");
+}
 function elevationLine(v) {
   const e = v.elevation;
+  if (rootLogin(v)) return "Root: the login is root, so everything runs as root, with no approval asked";
+  if (!(e == null ? void 0 : e.on) && !elevationOffered(v)) return "Root: off (root with approval can only be set up on a Mac so far)";
   if (!(e == null ? void 0 : e.on)) return e && !e.canAsk ? "Root: off (needs a newer Dispatch)" : "Root: off";
   return e.canAsk ? "Root: with your approval, each time" : "Root: set up, but refused: asking for approval needs a newer Dispatch";
 }

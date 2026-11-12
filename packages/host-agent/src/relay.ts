@@ -21,7 +21,7 @@ import { sessionPaths, type SessionRecord } from "./layout.js";
 import { SESSION_ENV_VAR, decodeEnvArg, decodeExecArg } from "./env.js";
 import { NO_CWD_EXIT } from "./owner.js";
 import { F, PROTOCOL_VERSION, encodeFrame, type ErrorCode, type ExitMsg, type ReadyMsg } from "./protocol.js";
-import { listProcs } from "./procs.js";
+import { hostPlatform } from "./platform.js";
 import { claimRecord, ownerLive, readRecord, touchContact } from "./records.js";
 import { replay } from "./session.js";
 import { AGENT_VERSION } from "./version.js";
@@ -80,7 +80,7 @@ export async function runRelay(a: RelayArgs): Promise<number> {
 
   let sock = await tryConnect(paths.socket);
   if (!sock) {
-    const rows = await listProcs().catch(() => []);
+    const rows = await hostPlatform().procs().catch(() => []);
     if (rec) {
       const starting = rec.state === "starting" && Date.now() - Date.parse(rec.startedAt) < STARTING_STALE_MS;
       if (starting || ownerLive(rows, rec)) {

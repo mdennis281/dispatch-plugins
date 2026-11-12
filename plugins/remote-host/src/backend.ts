@@ -52,6 +52,7 @@ import { McpBridge } from "./mcp/bridge.js";
 import { remoteFiles } from "./mcp/files.js";
 import { planProcess, type PlanPaths } from "./mcp/plan.js";
 import { PortForwards, type ReservedPort } from "./ports.js";
+import { elevationSetupPossible, rootLogin } from "./remote-platform.js";
 import { Elevation, type Approvals, type ElevationDeps, type ElevationState } from "./elevation.js";
 import { HostShell, type HostShellOptions, type SessionOpener } from "./session.js";
 import { ChatSync, DEFAULT_CAP_BYTES, legacySyncKey, syncKey, type ChatSyncDeps } from "./sync/chat-sync.js";
@@ -149,6 +150,10 @@ export class HostBackend implements TerminalBackend {
     this.elevation = new Elevation({
       host: deps.host,
       address: () => link.address,
+      machine: () => {
+        const user = deps.host().user;
+        return { root: rootLogin(link.probe, user), setup: elevationSetupPossible(link.probe, user) };
+      },
       key: deps.elevateKey ?? (async () => undefined),
       ...(deps.approvals ? { approvals: deps.approvals } : {}),
       log: deps.log,
@@ -301,7 +306,7 @@ export class HostBackend implements TerminalBackend {
   async spawnProcess(info: TerminalProcessSpawnInfo): Promise<TerminalProcessHandle> {
     const chatId = assertId("chat", info.chatId);
     // Refused before anything is installed or started: a headed browser, WebKit.
-    const plan = planProcess(info, { label: this.label, desktop: false });
+    const plan = planProcess(info, { label: this.label, desktop: false, root: rootLogin(this.deps.link.probe, this.deps.host().user) });
     const linked = await this.deps.link.ready(info.signal);
     await this.markServed(chatId);
     const paths = linked.paths;
@@ -685,8 +690,8 @@ export class HostBackend implements TerminalBackend {
       `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, ` +
         `with PATH and locale from the login shell. On it: ${tools(probe)}.`,
       ...(probe?.platform === "darwin" ? [xcodeNote(probe)] : []),
-      ...(probe?.brew ? [brewNote(probe.brew)] : []),
-      rootNote(host.label, this.elevation.state),
+      ...(probe?.brew && brewUsable(probe, host.user) ? [brewNote(probe.brew)] : []),
+      rootNote(host.label, this.elevation.state, probe?.platform === "darwin"),
       `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked ` +
         `files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts ` +
         `at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, ` +
@@ -819,7 +824,8 @@ export function token(v: string | null | undefined, max = 32): string | undefine
 
 function describe(probe: ProbeResult | undefined): string {
   if (!probe) return "";
-  const name = (probe.os.name ?? "").match(/^[A-Za-z][A-Za-z ]{0,20}$/)?.[0];
+  // "macOS", "Debian GNU/Linux", "Ubuntu": words, and the few signs an OS's name has.
+  const name = (probe.os.name ?? "").match(/^[A-Za-z][A-Za-z /().]{0,31}$/)?.[0];
   const os = [name, token(probe.os.version, 16)].filter(Boolean).join(" ") || token(probe.platform, 16) || "unknown OS";
   return ` (${os}, ${token(probe.arch, 16) ?? "?"})`;
 }
@@ -848,13 +854,26 @@ function xcodeNote(probe: ProbeResult): string {
  * command. What it says depends on whether elevation is set up there; before
  * the first look, it says both.
  */
-function rootNote(label: string, state: ElevationState | undefined): string {
+function rootNote(label: string, state: ElevationState | undefined, mac: boolean): string {
+  if (state === "root") {
+    return (
+      `- Root: the login on ${label} is root, so everything you run there runs as root already: no sudo, and nothing ` +
+      `asks for approval. Nothing stops a mistake either: keep to this chat's files and what you installed, and never ` +
+      `change the machine's own setup (sshd, users, the network) unless the user asked.`
+    );
+  }
+  if (state === "unavailable") {
+    return (
+      `- Root: nothing can run as root on ${label}: root with approval can only be set up on a Mac so far, and \`sudo\` ` +
+      `there says so and fails. If something truly needs root, tell the user what and why.`
+    );
+  }
   const how =
     `\`sudo <command>\` (or \`dispatch-elevate <command>\`) there asks the user to approve running that one command as ` +
     `root. It waits for their answer (your command's timeout is paused meanwhile), then runs it once, as root, in the ` +
     `current directory, with root's own environment (system PATH only: give full paths to anything else) and no input, so ` +
     `it can't prompt. Ask only for what truly needs root, one command at a time, and say why first. A denial is final: ` +
-    `don't retry it or work around it. Homebrew never needs it.`;
+    `don't retry it or work around it.${mac ? " Homebrew never needs it." : ""}`;
   if (state === "on") return `- Root: ${how}`;
   if (state === "off") {
     return (
@@ -887,6 +906,16 @@ function mcpNote(label: string, localDir: string): string {
     `as of the last terminal command's sync. Headed browsers and WebKit need a desktop session on ${label}, which isn't set ` +
     `up yet: they fail and say so. Their first use there installs the browser, which takes a minute or two.`
   );
+}
+
+/**
+ * Whether to tell the agent about the Homebrew there: always on a Mac. On
+ * Linux only for a login that isn't root and can install with it: Homebrew
+ * refuses to run as root, and a Linux machine has its own package manager.
+ */
+function brewUsable(probe: ProbeResult, user: string): boolean {
+  if (probe.platform === "darwin") return true;
+  return !rootLogin(probe, user) && probe.brew?.writable === true;
 }
 
 /**

@@ -282,9 +282,11 @@ function HostRow(props: {
           </div>
           <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted">
             <span>{elevationLine(view)}</span>
-            <Button size="sm" variant="ghost" leftIcon={<ShieldCheck />} onClick={props.onElevation}>
-              {view.elevation?.on ? "Manage" : "Set up"}
-            </Button>
+            {(view.elevation?.on || elevationOffered(view)) && (
+              <Button size="sm" variant="ghost" leftIcon={<ShieldCheck />} onClick={props.onElevation}>
+                {view.elevation?.on ? "Manage" : "Set up"}
+              </Button>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
@@ -332,8 +334,20 @@ function statusLine(v: HostView): string {
   return [statusWords(v), seen].filter(Boolean).join(" · ");
 }
 
+/** The login there is root. An agent before 0.5.0 doesn't report its uid; then only the account's name can say. */
+function rootLogin(v: HostView): boolean {
+  return v.probe?.uid !== undefined ? v.probe.uid === 0 : v.user === "root";
+}
+
+/** Root with approval can be set up there: a Mac (its setup makes a macOS account), logged in as someone else. Before the first probe, as before. */
+function elevationOffered(v: HostView): boolean {
+  return !rootLogin(v) && (!v.probe || v.probe.platform === "darwin");
+}
+
 function elevationLine(v: HostView): string {
   const e = v.elevation;
+  if (rootLogin(v)) return "Root: the login is root, so everything runs as root, with no approval asked";
+  if (!e?.on && !elevationOffered(v)) return "Root: off (root with approval can only be set up on a Mac so far)";
   if (!e?.on) return e && !e.canAsk ? "Root: off (needs a newer Dispatch)" : "Root: off";
   return e.canAsk ? "Root: with your approval, each time" : "Root: set up, but refused: asking for approval needs a newer Dispatch";
 }

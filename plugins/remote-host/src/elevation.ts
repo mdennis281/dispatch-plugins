@@ -112,6 +112,8 @@ export interface ElevationDeps {
   approvalTimeoutSeconds?: number;
   /** How long logging in as the helper's account may take. */
   connectTimeoutMs?: number;
+  /** The machine as last probed. Absent: treated as a Mac logged in as someone else. */
+  machine?: () => ElevationMachine;
 }
 
 /** Where a request came from, for the approval card and the log. */
@@ -128,8 +130,18 @@ interface Job {
   abort: AbortController;
 }
 
-/** Whether this machine can elevate now, for the agent note. */
-export type ElevationState = "on" | "off" | "unsupported";
+/**
+ * Whether this machine can elevate now, for the agent note. `root`: the login
+ * is root, so there is nothing to elevate to. `unavailable`: root with
+ * approval can't be set up on this machine (only a Mac's can, so far).
+ */
+export type ElevationState = "on" | "off" | "unsupported" | "root" | "unavailable";
+
+/** What the machine is, for elevation: the login is root; root with approval can be set up there (remote-platform.ts). */
+export interface ElevationMachine {
+  root: boolean;
+  setup: boolean;
+}
 
 /** Logging in as the helper's account failed; `kind` says how, for the message. */
 export class ElevationLoginError extends Error {
@@ -169,6 +181,11 @@ export class Elevation {
 
   /** Whether elevation is set up here (as last seen), for the agent note. Undefined until {@link refresh} ran. */
   get state(): ElevationState | undefined {
+    const m = this.deps.machine?.();
+    if (m?.root) return "root";
+    if (this.stateNow === undefined) return undefined;
+    // A key stored before is still honoured; without one there is no way to set it up.
+    if (m && !m.setup && !this.keyNow) return "unavailable";
     return this.stateNow;
   }
 
@@ -335,6 +352,19 @@ export class Elevation {
       };
     }
     if (!(await this.deps.key())) {
+      const m = this.deps.machine?.();
+      if (m?.root) {
+        // A shell an agent before 0.5.0 started still has the shim; anything newer has the machine's own sudo.
+        return { code: null, error: `this shell is root on ${label} already (the login is root): run the command without sudo.` };
+      }
+      if (m && !m.setup) {
+        return {
+          code: null,
+          error:
+            `nothing can run as root on ${label}: root with approval can only be set up on a Mac so far. Don't try to work ` +
+            `around it; tell the user what needs root, and why.`,
+        };
+      }
       return {
         code: null,
         error:

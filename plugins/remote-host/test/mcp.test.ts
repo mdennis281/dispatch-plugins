@@ -84,6 +84,19 @@ describe("planProcess", () => {
     expect(p.env(paths)).toEqual({ CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: "1", TMPDIR: paths.tmp });
   });
 
+  it("turns Chrome's sandbox off for a root login, which it refuses to start as otherwise", () => {
+    const root = { ...ctx, root: true };
+    const pw = planProcess(playwright(["--isolated", "--headless", "--no-sandbox"]), root);
+    expect(pw.argv(paths).filter((a) => a.includes("sandbox"))).toEqual(["--no-sandbox"]);
+    expect(pw.argv(paths).at(-1)).toBe("--no-sandbox");
+    expect(pw.notes.join()).toMatch(/sandbox is off/);
+    const dt = planProcess(devtools(["--isolated", "--headless"]), root);
+    expect(dt.argv(paths).at(-1)).toBe("--chrome-arg=--no-sandbox");
+    // Not for anyone else.
+    expect(planProcess(playwright(["--headless"]), ctx).argv(paths).join(" ")).not.toMatch(/sandbox/);
+    expect(planProcess(devtools(["--headless"]), ctx).argv(paths).join(" ")).not.toMatch(/sandbox/);
+  });
+
   it("runs a configured server as written, and refuses an unknown bundled one", () => {
     const p = planProcess({ name: "x", command: "npx", args: ["-y", "some-mcp"], env: { A: "1" } }, ctx);
     expect(p.provision).toBeUndefined();

@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 /** A machine whose authorized_keys is `keys`, edited by the plugin's own scripts. */
-async function machine(opts: { password?: string } = {}) {
+async function machine(opts: { password?: string; uid?: number } = {}) {
   const keys: string[] = [];
   const s = await startTestSshServer({
     ...(opts.password ? { password: opts.password } : {}),
@@ -35,7 +35,7 @@ async function machine(opts: { password?: string } = {}) {
         if (at >= 0) keys.splice(at, 1);
         out = at >= 0 ? "removed\n" : "absent\n";
       } else if (command.includes("SSH_CLIENT")) {
-        out = "127.0.0.1 50123 22";
+        out = `127.0.0.1 50123 22\n${opts.uid ?? 501}`;
       }
       channel.write(out);
       channel.exit(0);
@@ -167,6 +167,25 @@ describe("finish", () => {
       keyLine: 2,
     });
     // The pairing is spent.
+    await expect(p.finish({ pairingId: r.pairingId })).rejects.toThrow(/unknown or has expired/);
+  });
+
+  it("refuses root by name, before any key is made", () => {
+    const p = pairing(fresh());
+    expect(() => p.start({ slug: "box", address: "10.0.4.9", user: "root", hostKey: `SHA256:${"a".repeat(43)}` })).toThrow(
+      /doesn't log in to a paired machine as root/,
+    );
+  });
+
+  it("refuses an account that is root under another name, takes its key back out, and saves nothing", async () => {
+    const { s, keys } = await machine({ password: "hunter2", uid: 0 });
+    const state = fresh();
+    const p = pairing(state);
+    const r = p.start({ slug: "box", address: s.host, port: s.port, user: "toor", hostKey: s.fingerprint });
+    await expect(p.finish({ pairingId: r.pairingId, password: "hunter2" })).rejects.toThrow(/toor is root on 127\.0\.0\.1 \(uid 0\)\. Dispatch doesn't log in/);
+    expect(keys).toEqual([]);
+    expect(state.hosts).toEqual([]);
+    expect(state.secrets.size).toBe(0);
     await expect(p.finish({ pairingId: r.pairingId })).rejects.toThrow(/unknown or has expired/);
   });
 

@@ -48,6 +48,17 @@ import {
 } from "./hosts.js";
 import { describeConnectError, type LinkConnection } from "./link.js";
 
+/**
+ * Why pairing refuses root (design ⚑4, Michael's call: refuse, or allow with a
+ * warning). A paired machine is a long-lived one people use for other work.
+ * Logged in as root, every agent command runs as root with no approval, which
+ * is the one thing "root with approval" exists to prevent. Provisioned
+ * machines (a disposable box per chat) are another matter: they may be root.
+ */
+export const ROOT_REFUSED =
+  "Dispatch doesn't log in to a paired machine as root: everything the agent ran there would run as root, with nobody " +
+  "asked. Make an account of its own for it (see the README), and turn on root with approval if it needs root now and then.";
+
 /** An error the human can fix, reported as HTTP 400 (or `status`). */
 export class UserError extends Error {
   constructor(
@@ -161,6 +172,7 @@ export class Pairing {
     for (const a of addresses) if (!validAddress(a)) throw new UserError(`not a host name or address: ${a}`);
     const user = str(body.user, "user");
     if (!validUser(user)) throw new UserError(`not an account name: ${user}`);
+    if (user === "root") throw new UserError(ROOT_REFUSED);
     const hostKey = str(body.hostKey, "hostKey");
     if (!/^SHA256:[A-Za-z0-9+/]{43}$/.test(hostKey)) throw new UserError("hostKey must be the SHA256: fingerprint shown by the scan");
     const hostKeyType = typeof body.hostKeyType === "string" && body.hostKeyType ? body.hostKeyType : "ssh-ed25519";
@@ -242,9 +254,17 @@ export class Pairing {
     let seenFrom: string | undefined;
     try {
       await k.connect(CONNECT_MS);
-      const res = await k.exec(`printf '%s' "$SSH_CLIENT"`, { timeoutMs: 15_000 });
-      seenFrom = res.stdout.trim().split(/\s+/)[0] || undefined;
+      const res = await k.exec(`printf '%s\n%s' "$SSH_CLIENT" "$(id -u)"`, { timeoutMs: 15_000 });
+      const [client, uid] = res.stdout.split("\n");
+      seenFrom = client?.trim().split(/\s+/)[0] || undefined;
+      if (uid?.trim() === "0") {
+        // Another name for root (toor, say). Its key comes out again, with the key itself.
+        const out = await k.exec(shCommand(removeKeyScript(keyBlobOf(p.publicKey))), { timeoutMs: 30_000 }).catch(() => undefined);
+        this.pending.delete(p.id);
+        throw new UserError(`${r.user} is root on ${r.address} (uid 0). ${ROOT_REFUSED}` + (out?.code === 0 ? "" : ` Take the key line back out of its authorized_keys.`));
+      }
     } catch (err) {
+      if (err instanceof UserError) throw err;
       const why = errText(err);
       if (/host denied/i.test(why)) throw new UserError(`${r.address} presented a different host key from the one you confirmed`);
       if (/authentication/i.test(why)) {

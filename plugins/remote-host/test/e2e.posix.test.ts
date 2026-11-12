@@ -26,8 +26,15 @@ import { HostRegistry } from "../src/registry.js";
 import { registerTools } from "../src/tools/index.js";
 
 const posix = process.platform !== "win32";
-/** dispatch-host finds listeners with lsof; a runner without it can't attribute ports. */
+/** dispatch-host finds a Mac's listeners with lsof, and Linux's with ss or /proc; a Mac without lsof can't attribute ports. */
 const hasLsof = posix && spawnSync("sh", ["-c", "command -v lsof"]).status === 0;
+const listsPorts = process.platform === "linux" || hasLsof;
+/**
+ * The "machine" is this computer, as this user. As root (CI's Debian job),
+ * a shell has no sudo shim: the cases that ask for approval through it don't
+ * apply, and the root login's own case does.
+ */
+const asRoot = posix && process.getuid?.() === 0;
 const INSTANCE = "e2e-instance";
 const ID = "remote-host/e2e";
 /** A stand-in MCP server. The "machine" is this computer, so it runs from the fixtures. */
@@ -301,7 +308,7 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     }
   });
 
-  it.skipIf(!hasLsof)("forwards a server the chat starts there, and withdraws it with the shell", { timeout: 60_000 }, async () => {
+  it.skipIf(!listsPorts)("forwards a server the chat starts there, and withdraws it with the shell", { timeout: 60_000 }, async () => {
     const h = await t.terminals.spawn(ID, { chatId: "chat-ports", name: "main" });
     const w = watch(h);
     // A dev server: started in the background from the chat's own shell, on a port the OS picks.
@@ -434,7 +441,9 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     const who = JSON.parse(await call("whoami"));
     expect(who.cwd).toBe(dir);
     expect(who.initParams.capabilities.roots).toEqual({ listChanged: false });
-    expect(who.argv).toEqual(["--isolated", "--viewport-size", "1280x800", "--browser", "chromium", "--output-dir", `${dir}/out`, "--headless"]);
+    // As root, Chrome's sandbox has to be off: it refuses to start as root with it.
+    const sandbox = asRoot ? ["--no-sandbox"] : [];
+    expect(who.argv).toEqual(["--isolated", "--viewport-size", "1280x800", "--browser", "chromium", "--output-dir", `${dir}/out`, "--headless", ...sandbox]);
     const tmp = mcpTmpPath(root, INSTANCE, chat, "playwright");
     expect(who.env).toEqual({ PLAYWRIGHT_BROWSERS_PATH: join(root, "browsers"), TMPDIR: tmp });
     expect(existsSync(tmp)).toBe(true);
@@ -490,7 +499,22 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     expect(ws.every((w) => w.exit?.reason?.kind === "killed")).toBe(true);
   });
 
-  it("sudo in a chat shell asks the user, and only then runs the command over the elevation login", { timeout: 60_000 }, async () => {
+  it.skipIf(!asRoot)("on a root login: no sudo shim, nothing asked, and the note and the pane say it is root", { timeout: 60_000 }, async () => {
+    const e = registry.get("e2e")!;
+    expect(e.link.probe).toMatchObject({ uid: 0, elevation: "root" });
+    expect(e.backend.elevation.state).toBe("root");
+    expect(e.backend.agentNote({ chatId: "chat-root" })).toContain("- Root: the login on E2E is root");
+    const h = await t.terminals.spawn(ID, { chatId: "chat-root", name: "main" });
+    const w = watch(h);
+    h.stdin.write('echo "uid=$(id -u) sudo=$(command -v sudo || echo none) sock=${DISPATCH_ELEVATE_SOCK:-unset}"\n');
+    await until(() => /uid=\d+ sudo=\S+ sock=\S+/.test(w.out), 20_000, "the shell's answer");
+    expect(w.out).toMatch(/uid=0 sudo=\S+ sock=unset/);
+    expect(w.out).not.toMatch(/sudo=\S*\.dispatch-host/);
+    expect(approvalsAsked).toEqual([]);
+    h.kill();
+  });
+
+  it.skipIf(asRoot)("sudo in a chat shell asks the user, and only then runs the command over the elevation login", { timeout: 60_000 }, async () => {
     const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "root" });
     const w = watch(h);
     let release!: () => void;
@@ -519,7 +543,7 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     h.kill();
   });
 
-  it("a denial runs nothing and fails the command; one that runs exits with its own code", { timeout: 60_000 }, async () => {
+  it.skipIf(asRoot)("a denial runs nothing and fails the command; one that runs exits with its own code", { timeout: 60_000 }, async () => {
     const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "deny" });
     const w = watch(h);
     decide = async (req) => (req.command?.includes("touch") ? "denied" : "approved");
@@ -532,7 +556,7 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     h.kill();
   });
 
-  it("Ctrl-C while it waits withdraws the request", { timeout: 60_000 }, async () => {
+  it.skipIf(asRoot)("Ctrl-C while it waits withdraws the request", { timeout: 60_000 }, async () => {
     const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "cancel" });
     const w = watch(h);
     let seen: ApprovalRequest | undefined;
@@ -550,7 +574,7 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     h.kill();
   });
 
-  it("Ctrl-C while it runs as root stops it there", { timeout: 60_000 }, async () => {
+  it.skipIf(asRoot)("Ctrl-C while it runs as root stops it there", { timeout: 60_000 }, async () => {
     const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "stop" });
     const w = watch(h);
     decide = async () => "approved";
@@ -563,7 +587,7 @@ describe.skipIf(!posix)("end to end under a real SSH server and dispatch-host (P
     h.kill();
   });
 
-  it("the helper logs every request, and nothing a shell would expand runs", { timeout: 60_000 }, async () => {
+  it.skipIf(asRoot)("the helper logs every request, and nothing a shell would expand runs", { timeout: 60_000 }, async () => {
     const h = await t.terminals.spawn(ID, { chatId: "chat-elev", name: "literal" });
     const w = watch(h);
     decide = async () => "approved";

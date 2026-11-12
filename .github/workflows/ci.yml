@@ -161,3 +161,81 @@ jobs:
           pnpm --filter "@dispatch-plugins/remote-host..." typecheck
           pnpm --filter "@dispatch-plugins/remote-host..." build
           pnpm --filter "@dispatch-plugins/remote-host..." test
+
+  # A Linux machine the way a provisioned one is reached (a Proxmox
+  # container): Debian 12, logged in as root, with no lsof and no sudo. There
+  # dispatch-host reads processes from /proc and ports from ss, and a shell
+  # gets no sudo shim. host-agent's and remote-host's tests run as root, and
+  # the end-to-end test also runs through a real OpenSSH sshd
+  # (test/sshd.e2e.posix.test.ts). procps is for the tests' own helpers:
+  # dispatch-host never runs ps on Linux.
+  linux-root:
+    name: host-agent and remote-host on Debian 12, as root, through sshd
+    runs-on: ubuntu-latest
+    container: debian:12
+    timeout-minutes: 25
+
+    steps:
+      # git before checkout, or checkout falls back to a tarball with no .git.
+      - name: Tools for the job (sshd, git, ss)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            ca-certificates curl git iproute2 openssh-client openssh-server procps xz-utils
+          test "$(id -u)" = 0
+
+      - name: Check out dispatch-plugins
+        uses: actions/checkout@v4
+        with:
+          path: dispatch-plugins
+
+      - name: Check out Dispatch (for the plugin SDK)
+        uses: actions/checkout@v4
+        with:
+          repository: mdennis281/dispatch
+          ref: ${{ env.DISPATCH_REF }}
+          path: dispatch
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build @dispatch/shared and @dispatch/plugin-sdk
+        working-directory: dispatch
+        run: |
+          pnpm install --frozen-lockfile --filter "@dispatch/plugin-sdk..."
+          pnpm --filter @dispatch/shared --filter @dispatch/plugin-sdk build
+
+      - name: Install
+        working-directory: dispatch-plugins
+        env:
+          DISPATCH_REPO: ${{ github.workspace }}/dispatch
+        run: pnpm install --frozen-lockfile
+
+      # Root's key in root's authorized_keys, as a provisioned container has
+      # it. Debian's sshd takes root with a key (PermitRootLogin
+      # prohibit-password). The host key is pinned, as pairing pins one.
+      - name: Start sshd, with a key for root
+        run: |
+          mkdir -p /run/sshd /root/.ssh
+          chmod 700 /root/.ssh
+          ssh-keygen -A
+          ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/rh_e2e
+          cat /root/.ssh/rh_e2e.pub >> /root/.ssh/authorized_keys
+          chmod 600 /root/.ssh/authorized_keys
+          /usr/sbin/sshd
+          {
+            echo "REMOTE_HOST_SSHD_KEY=/root/.ssh/rh_e2e"
+            echo "REMOTE_HOST_SSHD_HOST_KEY=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')"
+            echo "REMOTE_HOST_SSHD_PORTS=ss"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and test host-agent, remote-core and remote-host as root
+        working-directory: dispatch-plugins
+        run: |
+          pnpm --filter "@dispatch-plugins/remote-host..." build
+          pnpm --filter "@dispatch-plugins/remote-host..." test

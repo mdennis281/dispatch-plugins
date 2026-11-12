@@ -8,9 +8,10 @@ import { execFile } from "node:child_process";
 import { accessSync, constants, existsSync, readFileSync, statSync, statfsSync } from "node:fs";
 import { homedir, release, userInfo } from "node:os";
 import { posix } from "node:path";
-import { captureLoginEnv, loginShell, shellEnv } from "./env.js";
+import { shellEnv } from "./env.js";
 import { XCODE_DEVELOPER_DIR, gitEnv, hasCommandLineTools } from "./git-env.js";
 import { listInstances, type InstanceInfo } from "./lifecycle.js";
+import { bashPath, hostPlatform, type ElevationMode, type PortsVia } from "./platform.js";
 import { AGENT_VERSION } from "./version.js";
 
 /** The git the plugin's own git work runs (sync, forget, gc), and whether it runs. */
@@ -59,9 +60,18 @@ export interface ProbeResult {
   node: string;
   platform: NodeJS.Platform;
   arch: string;
-  os: { name?: string; version?: string; build?: string };
+  /** Linux: os-release's NAME, VERSION_ID, ID and ID_LIKE (`debian` on Debian and Ubuntu), which say how to install a tool. */
+  os: { name?: string; version?: string; build?: string; id?: string; like?: string };
   kernel: string;
   user: string;
+  /** The login's uid: 0 is root. Agents older than 0.5.0 don't report it. */
+  uid?: number;
+  /** How a chat shell gets root there (platform.ts). Agents older than 0.5.0 don't report it. */
+  elevation?: ElevationMode;
+  /** What finds the ports a chat's servers listen on; null: nothing can, so none is forwarded. Agents older than 0.5.0 don't report it. */
+  ports?: PortsVia | null;
+  /** The bash a chat shell runs; null: none. Agents older than 0.5.0 don't report it. */
+  bash?: string | null;
   home: string;
   /** Who is logged in at the screen (macOS). `root` means the login window: no GUI session. */
   consoleUser: string | null;
@@ -253,7 +263,12 @@ function osRelease(): ProbeResult["os"] {
         .filter((m): m is RegExpMatchArray => Boolean(m))
         .map((m) => [m[1]!, m[2]!]),
     );
-    return { name: kv.NAME, version: kv.VERSION_ID };
+    return {
+      ...(kv.NAME ? { name: kv.NAME } : {}),
+      ...(kv.VERSION_ID ? { version: kv.VERSION_ID } : {}),
+      ...(kv.ID ? { id: kv.ID } : {}),
+      ...(kv.ID_LIKE ? { like: kv.ID_LIKE } : {}),
+    };
   } catch {
     return {};
   }
@@ -261,7 +276,8 @@ function osRelease(): ProbeResult["os"] {
 
 export async function probe(root?: string): Promise<ProbeResult> {
   let loginEnvError: string | undefined;
-  const login = await captureLoginEnv({ shell: loginShell(process.env, process.platform), node: process.execPath }).catch(
+  const platform = hostPlatform();
+  const login = await platform.loginEnv({ node: process.execPath }).catch(
     (e: unknown) => {
       loginEnvError = e instanceof Error ? e.message : String(e);
       return undefined;
@@ -311,6 +327,10 @@ export async function probe(root?: string): Promise<ProbeResult> {
     os: darwin ? { ...(name ? { name } : {}), ...(version ? { version } : {}), ...(build ? { build } : {}) } : osRelease(),
     kernel: release(),
     user: userInfo().username,
+    ...(process.getuid ? { uid: process.getuid() } : {}),
+    elevation: platform.elevation,
+    ports: platform.portsVia(),
+    bash: bashPath(),
     home: homedir(),
     consoleUser,
     freeDiskBytes,

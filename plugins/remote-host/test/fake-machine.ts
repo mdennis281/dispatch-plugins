@@ -62,6 +62,8 @@ export class FakeMachine {
   forgetFails?: string;
   /** sshd's MaxSessions. */
   maxSessions = 10;
+  /** What `uname -s`, `uname -m` say, and the C library line (absent: an answer from before it was asked). */
+  uname: { platform: string; arch: string; libc?: string } = { platform: "Darwin", arch: "arm64" };
   /** What a `tcp` channel reaches: a test points it at a server of its own. */
   tcp?: (host: string, port: number) => Promise<ClientChannel>;
   /** Holds a connect to an address until it resolves. */
@@ -100,7 +102,10 @@ export class FakeMachine {
       this.stdin.push({ command, data });
     }
     const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "" });
-    if (command.includes("uname -s")) return ok(`/Users/dispatch\nDarwin\narm64\n${this.node ?? "none"}\n${this.node && this.agent ? this.agent : "none"}\n`);
+    if (command.includes("uname -s")) {
+      const u = this.uname;
+      return ok(`/Users/dispatch\n${u.platform}\n${u.arch}\n${this.node ?? "none"}\n${this.node && this.agent ? this.agent : "none"}\n${u.libc ? `${u.libc}\n` : ""}`);
+    }
     if (command.includes("unpacked node is not")) {
       this.node = "v24.22.2";
       return ok("installed v24.22.2\n");

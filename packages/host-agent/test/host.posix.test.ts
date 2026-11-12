@@ -18,6 +18,10 @@ import { F, FrameDecoder, decodeJson, decodeOutput, encodeFrame, type ErrorMsg, 
 const DIST = fileURLToPath(new URL("../dist/dispatch-host.mjs", import.meta.url));
 const posix = process.platform !== "win32";
 const hasLsof = posix && spawnSync("sh", ["-c", "command -v lsof"]).status === 0;
+/** Linux reads its listeners from ss or /proc; macOS needs lsof. */
+const listsPorts = process.platform === "linux" || hasLsof;
+/** Logged in as root (CI's Debian job), a shell gets no sudo shim. */
+const asRoot = process.getuid?.() === 0;
 const hasSetsid = posix && spawnSync("sh", ["-c", "command -v setsid"]).status === 0;
 const run = posix && existsSync(DIST);
 const INSTANCE = "inst-test";
@@ -181,13 +185,13 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     const r = new Relay(sid());
     await r.ready();
     await r.run('echo "token=${GITHUB_TOKEN:-none} brew=$HOMEBREW_PREFIX path=$PATH"');
-    // The sudo shims' directory first, then the login PATH as the profile left it.
-    const bin = join(dirname(DIST), "bin");
-    expect(r.text()).toContain(`token=none brew=/opt/homebrew-test path=${bin}:/opt/fake-tools/bin:`);
+    // The sudo shims' directory first (not as root: no shims), then the login PATH as the profile left it.
+    const bin = asRoot ? "" : `${join(dirname(DIST), "bin")}:`;
+    expect(r.text()).toContain(`token=none brew=/opt/homebrew-test path=${bin}/opt/fake-tools/bin:`);
     r.send(F.kill);
   });
 
-  it("routes sudo to dispatch-elevate, which asks over the session's socket", async () => {
+  it.skipIf(asRoot)("routes sudo to dispatch-elevate, which asks over the session's socket", async () => {
     const r = new Relay(sid());
     await r.ready();
     await r.run('echo "sudo=$(command -v sudo) sock=${DISPATCH_ELEVATE_SOCK:+set}"');
@@ -360,7 +364,16 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     await b.waitFor(() => !alive(bg));
   });
 
-  it.skipIf(!hasLsof)("attributes a listener to the chat whose shell started it", async () => {
+  it.skipIf(!asRoot)("gives a root login's shell no sudo shim: it is root, and sudo is the machine's own", async () => {
+    const r = new Relay(sid());
+    await r.ready();
+    await r.run('echo "uid=$(id -u) sudo=$(command -v sudo || echo none) sock=${DISPATCH_ELEVATE_SOCK:-unset}"');
+    expect(r.text()).toMatch(/uid=0 sudo=\S+ sock=unset/);
+    expect(r.text()).not.toContain(join(dirname(DIST), "bin", "sudo"));
+    r.send(F.kill);
+  });
+
+  it.skipIf(!listsPorts)("attributes a listener to the chat whose shell started it", async () => {
     const port = await new Promise<number>((res) => {
       const s = createServer().listen(0, "127.0.0.1", () => {
         const p = (s.address() as AddressInfo).port;

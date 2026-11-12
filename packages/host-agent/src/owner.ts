@@ -9,17 +9,18 @@
  * the shell ended, it was killed, or Dispatch went silent.
  */
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { posix } from "node:path";
 import { performance } from "node:perf_hooks";
 import { appendRun, StreamLog } from "./journal.js";
 import { sessionPaths, type SessionRecord } from "./layout.js";
-import { captureLoginEnv, loginShell, shellEnv } from "./env.js";
+import { shellEnv } from "./env.js";
 import { hasCommandLineTools } from "./git-env.js";
 import { FrameDecoder, F, checkElevate, decodeJson, encodeFrame, type AttachMsg, type ExitMsg } from "./protocol.js";
 import { ensureShims } from "./shims.js";
-import { escapees, hostKillIo, killTree, listProcs, sameProcess, sessionMembers, signalTree } from "./procs.js";
+import { bashPath, hostPlatform } from "./platform.js";
+import { escapees, killTree, sameProcess, signalTree } from "./procs.js";
 import { lastContact, readRecord, touchContact, writeRecord } from "./records.js";
 import { Session, type Client } from "./session.js";
 import { sweepInstance } from "./sweep.js";
@@ -44,12 +45,6 @@ export const NO_CWD_EXIT = 97;
 /** At most this many escapees are tracked per session (dead ones are pruned first). */
 const MAX_TRACKED = 256;
 
-/** bash, which core's probe and wrapping are written for: /bin/bash is there on macOS (3.2) and Linux. */
-function bashPath(): string {
-  for (const p of ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]) if (existsSync(p)) return p;
-  return "bash";
-}
-
 /** A RESUME point is two whole, non-negative byte offsets; anything else is a fresh attach. */
 function attachMsg(payload: Buffer): AttachMsg {
   const m = decodeJson<AttachMsg>(payload);
@@ -70,7 +65,7 @@ export async function runOwner(a: OwnerArgs): Promise<void> {
   // files or take over the socket.
   const prev = readRecord(paths.record);
   if (prev && prev.state === "running" && prev.ownerPid !== process.pid) {
-    const rows = await listProcs().catch(() => []);
+    const rows = await hostPlatform().procs().catch(() => []);
     if (sameProcess(rows, prev.ownerPid, prev.ownerStart)) {
       log(`session ${a.sid} already has an owner (${prev.ownerPid}); exiting`);
       process.exit(0);
@@ -124,17 +119,19 @@ async function serve(
   save: () => void,
   log: (line: string) => void,
 ): Promise<void> {
-  const login = await captureLoginEnv({ shell: loginShell(process.env, process.platform), node: process.execPath }).catch(
+  const platform = hostPlatform();
+  const login = await platform.loginEnv({ node: process.execPath }).catch(
     (err: unknown) => {
       log(`login environment not read (${String(err)}); using the fallback PATH`);
       return undefined;
     },
   );
   // `sudo` and `dispatch-elevate` for the shell, next to this agent build. A
-  // hosted process is no shell: nothing in it asks for root.
+  // hosted process is no shell: nothing in it asks for root. Nor does a root
+  // login's shell: it is root, and its `sudo` is the machine's own.
   let elevate: { binDir: string; socket: string } | undefined;
   const script = process.argv[1];
-  if (script && !a.exec) {
+  if (script && !a.exec && platform.elevation === "approval-helper") {
     const binDir = posix.join(posix.dirname(script), "bin");
     try {
       ensureShims(binDir, process.execPath, script);
@@ -146,7 +143,7 @@ async function serve(
   const env = shellEnv({ agentEnv: process.env, ...(login ? { login } : {}), extra: a.extraEnv, clt: hasCommandLineTools(), ...(elevate ? { elevate } : {}) });
 
   // Its own session (detached), so its pid is the group every kill takes down.
-  const [program, args] = a.exec ? [a.exec[0]!, a.exec.slice(1)] : [bashPath(), ["--noprofile", "--norc"]];
+  const [program, args] = a.exec ? [a.exec[0]!, a.exec.slice(1)] : [bashPath() ?? "bash", ["--noprofile", "--norc"]];
   const shell = spawn(program, args, { cwd: a.cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
   if (!shell.pid) {
     const err = await new Promise<Error>((r) => shell.once("error", r));
@@ -156,9 +153,9 @@ async function serve(
   shell.stdin.on("error", () => {});
   rec.shellPid = shell.pid;
   rec.state = "running";
-  const rows = await listProcs().catch(() => []);
-  rec.ownerStart = rows.find((r) => r.pid === process.pid)?.start;
-  rec.shellStart = rows.find((r) => r.pid === shell.pid)?.start;
+  const [ownerStart, shellStart] = await Promise.all([platform.procStart(process.pid), platform.procStart(shell.pid)]).catch(() => []);
+  rec.ownerStart = ownerStart;
+  rec.shellStart = shellStart;
   save();
   log(`session ${a.sid} for chat ${a.chat}: ${a.exec ? `process ${JSON.stringify(a.exec).slice(0, 300)}` : "bash"} ${shell.pid} in ${a.cwd}`);
 
@@ -198,9 +195,9 @@ async function serve(
     now: () => performance.now(),
     heartbeatMs: a.heartbeatMs,
     killTree: async () => {
-      await killTree(hostKillIo, target());
+      await killTree(platform.killIo, target());
     },
-    signal: (name) => signalTree(hostKillIo, target(), `SIG${name}` as NodeJS.Signals),
+    signal: (name) => signalTree(platform.killIo, target(), `SIG${name}` as NodeJS.Signals),
     onContact: contact,
     log,
     onExit: (exit: ExitMsg) => {
@@ -285,10 +282,10 @@ async function serve(
     setInterval(() => {
       if (!rec.shellPid || session.exited) return;
       void (async () => {
-        const now = await listProcs();
+        const now = await platform.procs();
         const kept = (rec.tracked ?? []).filter((t) => sameProcess(now, t.pid, t.start));
         const known = new Set(kept.map((t) => `${t.pid}@${t.start}`));
-        const fresh = escapees(now, rec.shellPid!, await sessionMembers(rec.shellPid!)).filter((t) => !known.has(`${t.pid}@${t.start}`));
+        const fresh = escapees(now, rec.shellPid!, await platform.sessionMembers(rec.shellPid!)).filter((t) => !known.has(`${t.pid}@${t.start}`));
         if (!fresh.length && kept.length === (rec.tracked ?? []).length) return;
         rec.tracked = [...kept, ...fresh].slice(-MAX_TRACKED);
         if (!session.exited) save();
@@ -307,7 +304,7 @@ async function serve(
           deadManMs: a.deadManMs,
           self: process.pid,
           selfSid: a.sid,
-          io: hostKillIo,
+          io: platform.killIo,
         });
         if (r.reaped.length || r.deadMan.length) log(`sweep: reaped ${r.reaped.join(",") || "none"}; dead-man ${r.deadMan.join(",") || "none"}`);
         const last = lastContact(a.root, a.instance);

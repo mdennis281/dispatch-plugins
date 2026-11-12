@@ -18,6 +18,7 @@ import {
   type ApprovalRequest,
   type ApprovalResult,
   type ElevationConnection,
+  type ElevationMachine,
   type ElevationShell,
 } from "../src/elevation.js";
 import type { HostConfig } from "../src/hosts.js";
@@ -133,7 +134,7 @@ function approvals() {
   return { api, asked, nth };
 }
 
-function setup(o: { key?: string | undefined; approvals?: boolean; refuse?: string; slowChannel?: boolean } = {}) {
+function setup(o: { key?: string | undefined; approvals?: boolean; refuse?: string; slowChannel?: boolean; machine?: ElevationMachine } = {}) {
   const m = machine({ ...(o.refuse ? { refuse: o.refuse } : {}), ...(o.slowChannel ? { slowChannel: true } : {}) });
   const a = approvals();
   const key = "key" in o ? o.key : "ELEVATE-PRIVATE-KEY";
@@ -144,6 +145,7 @@ function setup(o: { key?: string | undefined; approvals?: boolean; refuse?: stri
     ...(o.approvals === false ? {} : { approvals: a.api }),
     log,
     connect: m.connect,
+    ...(o.machine ? { machine: () => o.machine! } : {}),
   });
   return { el, m, a };
 }
@@ -220,6 +222,31 @@ describe("elevation", () => {
     expect(off.a.asked).toHaveLength(0);
     expect(await off.el.refresh()).toBe("off");
     expect(await setup().el.refresh()).toBe("on");
+  });
+
+  it("tells a shell on a root login to run it without sudo, and a machine that isn't a Mac that it can't be set up there", async () => {
+    const sh = new FakeShell();
+    const root = setup({ key: undefined, machine: { root: true, setup: false } });
+    await root.el.handle(req("e-1"), origin, sh);
+    expect(sh.ends[0]).toMatchObject({ code: null, error: "this shell is root on CVX Mac already (the login is root): run the command without sudo." });
+    await root.el.refresh();
+    expect(root.el.state).toBe("root");
+
+    const linux = setup({ key: undefined, machine: { root: false, setup: false } });
+    await linux.el.handle(req("e-2"), origin, sh);
+    expect(sh.ends[1]).toMatchObject({ code: null, error: expect.stringMatching(/root with approval can only be set up on a Mac so far/) });
+    await linux.el.refresh();
+    expect(linux.el.state).toBe("unavailable");
+    expect(root.a.asked).toHaveLength(0);
+    expect(linux.a.asked).toHaveLength(0);
+
+    // A key stored before is still honoured, and a Mac is as it was.
+    const kept = setup({ machine: { root: false, setup: false } });
+    await kept.el.refresh();
+    expect(kept.el.state).toBe("on");
+    const mac = setup({ key: undefined, machine: { root: false, setup: true } });
+    await mac.el.refresh();
+    expect(mac.el.state).toBe("off");
   });
 
   it("takes one at a time per machine: the second is asked only once the first is over, and says it waits", async () => {

@@ -12,6 +12,8 @@ import type { HelperResult } from "../src/elevation.js";
 import type { HostConfig } from "../src/hosts.js";
 import type { Pairing } from "../src/pairing.js";
 import type { HostRegistry } from "../src/registry.js";
+import type { ProbeResult } from "@dispatch-plugins/host-agent";
+import { PROBE } from "./fake-machine.js";
 import { defineRoutes } from "../src/routes.js";
 
 const HOST: HostConfig = {
@@ -27,8 +29,8 @@ const HOST: HostConfig = {
   pairedAt: "2026-11-06T00:00:00.000Z",
 };
 
-/** The routes over one registered machine whose helper answers `check` with `answer`. */
-function rig(answer: () => string, secrets: Record<string, string> = {}) {
+/** The routes over one registered machine whose helper answers `check` with `answer`, as last probed. */
+function rig(answer: () => string, secrets: Record<string, string> = {}, probe: ProbeResult | undefined = PROBE) {
   const t = createTestContext({
     id: "remote-host",
     capabilities: ["routes", "secrets", "secrets:write"],
@@ -44,7 +46,9 @@ function rig(answer: () => string, secrets: Record<string, string> = {}) {
     },
     refresh: async () => {},
   };
-  const registry = { get: (slug: string) => (slug === HOST.slug ? { host: HOST, backend: { elevation } } : undefined) } as unknown as HostRegistry;
+  const registry = {
+    get: (slug: string) => (slug === HOST.slug ? { host: HOST, link: { probe }, backend: { elevation } } : undefined),
+  } as unknown as HostRegistry;
   t.ctx.routes!(
     defineRoutes({
       ctx: t.ctx,
@@ -85,6 +89,19 @@ describe("the elevation routes", () => {
     expect(v.status).toBe(200);
     expect(checkedWith).toEqual([`check ${key}`]);
     expect(t.secrets.get("REMOTE_HOST_ELEVATE_KEY_LAB")).toBe(key);
+  });
+
+  it("make no setup command for a machine that isn't a Mac, or whose login is root", async () => {
+    const linux = rig(() => "", {}, { ...PROBE, platform: "linux", uid: 1000 });
+    const l = await linux.t.routes.call("POST", "/hosts/:slug/elevation/setup", { params: { slug: "lab" } });
+    expect(l.status).toBe(400);
+    expect(l.body).toMatchObject({ error: expect.stringMatching(/only be set up on a Mac so far, and Lab Mac isn't one/) });
+    const root = rig(() => "", {}, { ...PROBE, uid: 0 });
+    const r = await root.t.routes.call("POST", "/hosts/:slug/elevation/setup", { params: { slug: "lab" } });
+    expect(r.status).toBe(400);
+    expect(r.body).toMatchObject({ error: expect.stringMatching(/login is root already/) });
+    // Not probed yet: offered, as before.
+    expect((await rig(() => "", {}, undefined).t.routes.call("POST", "/hosts/:slug/elevation/setup", { params: { slug: "lab" } })).status).toBe(200);
   });
 
   it("mint a new key when none is stored, or the stored one can't be read", async () => {

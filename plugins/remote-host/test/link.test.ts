@@ -223,6 +223,36 @@ describe("finding the machine", () => {
     await expect(l.ready()).rejects.toThrow(/key was refused/);
   });
 
+  it("says to check sshd on Linux, and Remote Login on a Mac, when the connection is refused", () => {
+    const refused = new Error("connect ECONNREFUSED 10.0.4.9:22");
+    expect(describeConnectError(refused, "darwin")).toBe("connection refused (is Remote Login on?)");
+    expect(describeConnectError(refused, "linux")).toBe("connection refused (is sshd running?)");
+    expect(describeConnectError(refused)).toBe("connection refused (is Remote Login (macOS) or sshd (Linux) on?)");
+  });
+
+  it.each([
+    [{ platform: "Linux", arch: "x86_64", libc: "musl" }, /musl C library \(Alpine, say\), which isn't supported/],
+    [{ platform: "Linux", arch: "armv7l", libc: "gnu" }, /armv7l is a 32-bit machine, which isn't supported: dispatch-host needs x86_64 or arm64/],
+    [{ platform: "FreeBSD", arch: "amd64" }, /FreeBSD isn't supported: dispatch-host runs on macOS and Linux/],
+  ])("refuses a machine dispatch-host can't run on before sending anything: %j", async (uname, why) => {
+    const m = machine({ "10.0.4.5": "ok" });
+    m.uname = uname;
+    m.node = undefined;
+    const { l, runtime } = link(m);
+    await expect(l.ready()).rejects.toThrow(why);
+    expect(runtime.calls).toBe(0);
+    expect(m.stdin).toEqual([]);
+  });
+
+  it("installs on a glibc Linux", async () => {
+    const m = machine({ "10.0.4.5": "ok" });
+    m.uname = { platform: "Linux", arch: "x86_64", libc: "gnu" };
+    m.node = undefined;
+    const { l, runtime } = link(m);
+    await expect(l.ready()).resolves.toMatchObject({ paths: { platform: "Linux", arch: "x86_64", libc: "gnu" } });
+    expect(runtime.calls).toBe(1);
+  });
+
   it("is offline, and says to pair again, without its key", async () => {
     const m = machine({ "10.0.4.5": "ok" });
     const { l } = link(m, { key: undefined });
@@ -499,5 +529,30 @@ describe("statusFrom", () => {
     const blocked = statusFrom({ ...PROBE, brew: { ...brew, blocked: "Xcode's license isn't accepted (exit 69)" } }, 5);
     expect(blocked.state).toBe("degraded");
     expect(blocked.detail).not.toMatch(/source/);
+  });
+
+  const DEBIAN: ProbeResult = { ...PROBE, platform: "linux", os: { name: "Debian GNU/Linux", version: "12", id: "debian" }, uid: 0, elevation: "root", ports: "proc", bash: "/bin/bash" };
+
+  it("on Linux, says what the sync, the shells and the ports lack, and how Debian installs it", () => {
+    expect(statusFrom(DEBIAN, 5)).toEqual({ state: "online", lastSeenAt: 5 });
+    expect(statusFrom({ ...DEBIAN, tools: { ...DEBIAN.tools, git: null } }, 5).detail).toBe("git not found (as root: apt install git)");
+    expect(statusFrom({ ...DEBIAN, bash: null }, 5).detail).toBe("no bash, which a terminal there runs (as root: apt install bash)");
+    expect(statusFrom({ ...DEBIAN, ports: null }, 5).detail).toBe("its listening ports can't be read (no ss or /proc), so no server there is forwarded");
+    // An agent before 0.5.0 says nothing of either: that is no fault.
+    const { bash: _b, ports: _p, ...older } = DEBIAN;
+    expect(statusFrom(older, 5).state).toBe("online");
+    // Fedora: no apt to suggest.
+    expect(statusFrom({ ...DEBIAN, os: { name: "Fedora Linux", id: "fedora" }, tools: { ...DEBIAN.tools, git: null } }, 5).detail).toBe("git not found");
+  });
+
+  it("says a git older than 2.26 is too old for the sync, by whichever git it ran", () => {
+    const syncGit = { path: "/usr/bin/git", exitCode: 0, version: "git version 2.25.1" };
+    expect(statusFrom({ ...DEBIAN, syncGit }, 5)).toEqual({
+      state: "degraded",
+      detail: "git 2.25.1 is older than 2.26, which the file sync needs",
+      lastSeenAt: 5,
+    });
+    expect(statusFrom({ ...DEBIAN, syncGit: { ...syncGit, version: "git version 2.26.0" } }, 5).state).toBe("online");
+    expect(statusFrom({ ...DEBIAN, tools: { ...DEBIAN.tools, git: "git version 2.20.1" } }, 5).detail).toMatch(/git 2\.20\.1 is older than 2\.26/);
   });
 });

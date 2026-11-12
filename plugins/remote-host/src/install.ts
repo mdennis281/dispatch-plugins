@@ -24,6 +24,7 @@ import {
   sq,
 } from "@dispatch-plugins/host-agent";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
+import { runtimeFor } from "./remote-platform.js";
 
 /** What running a command on the machine needs. `SshConnection` is one. */
 export interface Exec {
@@ -39,6 +40,8 @@ export interface HostPaths {
   /** `uname -s` / `uname -m`. */
   platform: string;
   arch: string;
+  /** Linux: its C library, `gnu` or `musl`. */
+  libc?: string;
 }
 
 export interface EnsureResult {
@@ -67,15 +70,20 @@ export async function ensureAgent(
         `A="$R/${rel}"`,
         'if [ -x "$N" ]; then "$N" --version 2>/dev/null || echo broken; else echo none; fi',
         'if [ -x "$N" ] && [ -f "$A" ]; then "$N" "$A" version 2>/dev/null || echo broken; else echo none; fi',
+        // Last, so older lines keep their places: musl's loader is how Alpine and the like show.
+        'if [ "$(uname -s)" = Linux ]; then if ls /lib/ld-musl-* >/dev/null 2>&1; then echo musl; else echo gnu; fi; else echo -; fi',
       ].join("\n"),
     ),
     { timeoutMs: 30_000 },
   );
   const lines = look.stdout.split("\n").map((l) => l.trim());
-  const [home, platform, arch, nodeVersion, agentVersion] = lines;
+  const [home, platform, arch, nodeVersion, agentVersion, libcLine] = lines;
   if (look.code !== 0 || !home?.startsWith("/") || !platform || !arch) {
     throw new Error(`could not read the machine's layout (exit ${look.code}): ${look.stderr.trim() || look.stdout.trim() || "no output"}`);
   }
+  const libc = libcLine === "musl" || libcLine === "gnu" ? libcLine : undefined;
+  // Before anything is sent: a machine the pinned Node can't run on says so, not "the runtime failed its check".
+  runtimeFor(platform, arch, libc);
   const root = rootDir(home);
   const paths: HostPaths = {
     home,
@@ -84,6 +92,7 @@ export async function ensureAgent(
     agent: agentPath(root, deps.agent.version, deps.agent.sha256),
     platform,
     arch,
+    ...(libc ? { libc } : {}),
   };
   if (paths.agent !== posix.join(root, rel)) throw new Error("agent path mismatch"); // the two spellings must agree
   const installed: string[] = [];
