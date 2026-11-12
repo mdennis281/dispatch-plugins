@@ -343,7 +343,7 @@ export class ProxmoxTerminal {
       } else if ((await this.life.record(req.chatId))?.layout !== LAYOUT) {
         const res = await this.rescueFor(req, up, s);
         await this.life.patch(req.chatId, { layout: LAYOUT, rescue: res.entries.map(({ d, state, ref: r }) => ({ d, state, ref: r })) }, ref);
-        if (res.notice) notices.push(res.notice);
+        notices.push(...res.notices);
       }
       const rec = await this.life.record(req.chatId);
       // The incarnation: a container re-created under the same vmid is a new machine to remote-host.

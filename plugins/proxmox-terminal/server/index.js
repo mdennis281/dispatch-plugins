@@ -21260,7 +21260,7 @@ class LegacyRescue {
       state.lastError = void 0;
       await save();
       const entries = Object.values(state.entries).sort((a, b) => a.d.localeCompare(b.d));
-      return { entries, notice: noticeFor(job, entries) };
+      return { entries, notice: noticeFor(job, entries), notices: noticesFor(job, entries) };
     } catch (err) {
       const why = budget.signal.aborted ? `it ran over its ${Math.round((this.opts.budgetMs ?? RESCUE_BUDGET_MS) / 6e4)}-minute budget` : errText(err);
       state.phase = "failed";
@@ -21538,36 +21538,54 @@ function rescueRef(chatId, vmid, d) {
   return `refs/dispatch/rescue/proxmox/${component(chatId)}/${vmid}/${component(d)}`;
 }
 const STATUS = { M: "modified", A: "new", D: "deleted", T: "type changed" };
-function noticeFor(job, entries) {
-  const parts = [];
+const NOTICE_MAX = 480;
+const NOTICES_MAX = 5;
+function noticesFor(job, entries) {
+  const out = [];
   for (const e of entries) {
     if (e.state === "kept") {
-      parts.push(
-        `The old checkout \`${job.workDir}/${e.d}\` on this chat's container was left where it is: ${e.reason}. Nothing in it was copied or changed.`
-      );
+      out.push(fit(
+        (short) => short ? `Old checkout \`${job.workDir}/${e.d}\` was left on the container as it is: ${e.reason}.` : `The old checkout \`${job.workDir}/${e.d}\` on this chat's container was left where it is: ${e.reason}. Nothing in it was copied or changed.`
+      ));
       continue;
     }
-    if (!e.ref) {
-      if (e.excludedCount) {
-        parts.push(
-          `Before moving this chat's container to the new sync, nothing in checkout \`${e.d}\` differed from your last sync except untracked files the size caps leave out:${leftOut(job, e)}`
-        );
-      }
-      continue;
+    if (e.ref) {
+      const ref = e.ref;
+      out.push(fit((short, n) => {
+        const shown = (e.paths ?? []).slice(0, n).map((p) => `\`${p.path}\` (${STATUS[p.status] ?? p.status})`);
+        const more = (e.pathCount ?? 0) - shown.length;
+        const list = shown.length ? ` (${shown.join(", ")}${more > 0 ? `, +${more} more` : ""})` : "";
+        const what = e.pathCount ? `${e.pathCount} unsynced path${e.pathCount === 1 ? "" : "s"}${list}` : "its state";
+        const commits = e.commits ? `, and ${e.commits} commit${e.commits === 1 ? "" : "s"} made there` : "";
+        const from = /^[0-9a-f]{40}$/.test(e.diffFrom ?? "") ? e.diffFrom.slice(0, 12) : e.diffFrom ?? "HEAD";
+        const how = short ? `saved as \`${ref}\` (\`git diff ${from} ${ref} --stat\`).` : `saved in a ref: \`git diff ${from} ${ref} --stat\` to look, \`git checkout ${ref} -- <path>\` to take one, \`git update-ref -d ${ref}\` when done.`;
+        return `Checkout \`${e.d}\` on the container had ${what}${commits} before 0.2's sync; nothing here changed. They are ${how}`;
+      }, (e.paths ?? []).length));
     }
-    const shown = (e.paths ?? []).slice(0, 10).map((p) => `\`${p.path}\` (${STATUS[p.status] ?? p.status})`);
-    const more = (e.pathCount ?? 0) - shown.length;
-    const changed = e.pathCount ? `${e.pathCount} path${e.pathCount === 1 ? "" : "s"} there differed from your last sync: ${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}` : "nothing there differed from your last sync";
-    const commits = e.commits ? ` It also holds ${e.commits} commit${e.commits === 1 ? "" : "s"} made in the container.` : "";
-    const left = e.excludedCount ? ` Left out by the size caps:${leftOut(job, e)}` : "";
-    parts.push(
-      `Before moving this chat's container to the new sync, ${changed} (checkout \`${e.d}\`).${commits} Nothing here was changed. They are saved as \`${e.ref}\`. Use \`git diff ${e.diffFrom ?? "HEAD"} ${e.ref} --stat\` to look, \`git checkout ${e.ref} -- <path>\` to take one, and \`git update-ref -d ${e.ref}\` when you are done.${left}`
-    );
+    if (e.excludedCount) out.push(fit((short, n) => `Checkout \`${e.d}\`: left out by the size caps:${leftOut(job, e, short ? Math.min(n, 2) : n)}`, 5));
   }
-  return parts.length ? parts.join("\n\n") : void 0;
+  if (out.length > NOTICES_MAX) {
+    const rest = out.length - (NOTICES_MAX - 1);
+    out.splice(NOTICES_MAX - 1, rest, `…and ${rest} more notes on the old checkouts: Settings → Proxmox containers, or \`git for-each-ref refs/dispatch/rescue/\`.`);
+  }
+  return out;
 }
-function leftOut(job, e) {
-  const shown = (e.excluded ?? []).slice(0, 5).map((f) => f.path.endsWith("/") ? `\`${f.path}\` (a nested repository)` : `\`${f.path}\` (${Math.max(1, Math.round(f.bytes / MB))} MB)`);
+function fit(build, items = 0) {
+  for (const short of [false, true]) {
+    for (let n = Math.min(items, 10); n >= 0; n--) {
+      const s2 = build(short, n);
+      if (s2.length <= NOTICE_MAX) return s2;
+    }
+  }
+  const s = build(true, 0);
+  return s.length <= NOTICE_MAX ? s : `${s.slice(0, NOTICE_MAX - 1)}…`;
+}
+function noticeFor(job, entries) {
+  const all = noticesFor(job, entries);
+  return all.length ? all.join("\n\n") : void 0;
+}
+function leftOut(job, e, max = 5) {
+  const shown = (e.excluded ?? []).slice(0, max).map((f) => f.path.endsWith("/") ? `\`${f.path}\` (a nested repository)` : `\`${f.path}\` (${Math.max(1, Math.round(f.bytes / MB))} MB)`);
   const more = (e.excludedCount ?? 0) - shown.length;
   return ` ${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}. They stay in the container's \`${job.workDir}.pre-0.2/${e.d}\` until the container is destroyed.`;
 }
@@ -22068,7 +22086,7 @@ class ProxmoxTerminal {
       } else if ((await this.life.record(req.chatId))?.layout !== LAYOUT) {
         const res = await this.rescueFor(req, up, s);
         await this.life.patch(req.chatId, { layout: LAYOUT, rescue: res.entries.map(({ d, state, ref: r }) => ({ d, state, ref: r })) }, ref);
-        if (res.notice) notices.push(res.notice);
+        notices.push(...res.notices);
       }
       const rec = await this.life.record(req.chatId);
       const machine = `${up.vmid}:${rec?.createdAt ?? 0}`;
