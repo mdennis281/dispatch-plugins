@@ -12,7 +12,7 @@ import type { RescueRemote } from "../src/legacy-rescue.js";
 import type { PluginDependencyState } from "@dispatch/plugin-sdk";
 import type { MachineLease, MachinesV1, ProvisionedBackend, ProvisionedBackendOptions } from "@dispatch-plugins/remote-host-api";
 import type { PluginDependencies } from "../src/remote-host-link.js";
-import { ProxmoxError, type Proxmox } from "../src/proxmox.js";
+import { ProxmoxError, isGone, type Proxmox } from "../src/proxmox.js";
 import { readSettings } from "../src/settings.js";
 
 export interface Ct {
@@ -50,7 +50,8 @@ export function fakeProxmox(initial: Record<number, Ct> = {}) {
       return "UPID:clone";
     }
     const ct = cts.get(vmid);
-    if (!ct) throw new ProxmoxError(`Configuration file 'nodes/g/lxc/${vmid}.conf' does not exist`, 500);
+    // As the real pool-scoped token is answered: a vmid it can't see (deleted, or never in the pool) is a 403.
+    if (!ct) throw new ProxmoxError(`Proxmox GET /nodes/g/lxc/${vmid}${rest} → 403 Permission check failed (/vms/${vmid}, VM.Audit)`, 403);
     if (rest === "/config") return method === "GET" ? { hostname: ct.hostname, description: ct.description, template: ct.template } : null;
     if (rest === "/status/current") return { status: ct.status };
     if (rest === "/status/start") {
@@ -79,7 +80,7 @@ export function fakeProxmox(initial: Record<number, Ct> = {}) {
       try {
         return ((await call("GET", `/nodes/g/lxc/${vmid}/status/current`)) as { status: string }).status;
       } catch (err) {
-        if (/does not exist/.test(String(err))) return undefined;
+        if (isGone(err, vmid)) return undefined;
         throw err;
       }
     },

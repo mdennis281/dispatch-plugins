@@ -9,6 +9,7 @@ import { createTestContext } from "@dispatch/plugin-sdk/testing";
 import { ProxmoxTerminal, SKIP_AFTER_FAILURES } from "../src/backend.js";
 import { defineRoutes } from "../src/routes.js";
 import { readSettings } from "../src/settings.js";
+import { ProxmoxError, isGone } from "../src/proxmox.js";
 import { INSTANCE, emptyContainer, fakeProxmox, fakeRemoteHost, ours, rec, terminal } from "./fakes.js";
 
 const failed = (vmid: number, failures: number) => ({
@@ -288,5 +289,16 @@ describe("routes", () => {
     expect(f.cts.has(9002)).toBe(false);
     expect(await t.routes.call("POST", "/legacy/c1/destroy", { params: { chatId: "c1" } })).toMatchObject({ status: 404 });
     expect(await t.routes.call("POST", "/legacy/x%2Fy/destroy", { params: { chatId: "x/y" } })).toMatchObject({ status: 400 });
+  });
+});
+
+describe("isGone", () => {
+  it("a 500 'does not exist', or the pool-scoped token's 403 on that guest's own path", () => {
+    expect(isGone(new ProxmoxError("CT 9005 does not exist", 500), 9005)).toBe(true);
+    expect(isGone(new ProxmoxError("Proxmox GET … → 403 Permission check failed (/vms/9005, VM.Audit)", 403), 9005)).toBe(true);
+    // Another path's 403 is a real permission problem, not a missing guest.
+    expect(isGone(new ProxmoxError("Permission check failed (/vms/90051, VM.Audit)", 403), 9005)).toBe(false);
+    expect(isGone(new ProxmoxError("Permission check failed (/pool/dispatch-terminals, Pool.Audit)", 403), 9005)).toBe(false);
+    expect(isGone(new Error("does not exist"), 9005)).toBe(false);
   });
 });

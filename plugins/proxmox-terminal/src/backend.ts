@@ -28,7 +28,7 @@ import {
 import { BACKEND_ID, LABEL, ProxmoxForwarder } from "./forwarder.js";
 import { LegacyRescue, sshRescueRemote, type RescueJob, type RescueRemote, type RescueResult } from "./legacy-rescue.js";
 import type { MachineLease, ProvisionedBackendOptions, ProvisionRequest } from "@dispatch-plugins/remote-host-api";
-import { Proxmox, ProxmoxError, sleep } from "./proxmox.js";
+import { Proxmox, ProxmoxError, isGone, sleep } from "./proxmox.js";
 import { RemoteHostLink, type PluginDependencies } from "./remote-host-link.js";
 import { templateHostKeys, type Settings } from "./settings.js";
 
@@ -773,7 +773,7 @@ export class ProxmoxProvider implements MachineProvider<ContainerRef> {
     try {
       return await api.call<LxcConfig>("GET", `/nodes/${s.node}/lxc/${vmid}/config`);
     } catch (err) {
-      if (err instanceof ProxmoxError && GONE.test(err.message)) return undefined;
+      if (isGone(err, vmid)) return undefined;
       throw err;
     }
   }
@@ -820,7 +820,6 @@ interface LxcConfig {
   template?: number | string;
 }
 
-const GONE = /does not exist|no such|not found/i;
 
 /** How long a started container gets for its sshd to answer. */
 const SSH_WAIT_MS = 45_000;

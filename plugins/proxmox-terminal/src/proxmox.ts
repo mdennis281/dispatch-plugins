@@ -143,11 +143,25 @@ export class Proxmox {
       const s = await this.call<{ status: string }>("GET", `/nodes/${encodeURIComponent(node)}/lxc/${vmid}/status/current`);
       return s.status;
     } catch (err) {
-      // 500 "does not exist" — gone is an answer, not an error, here.
-      if (err instanceof ProxmoxError && /does not exist|no such|not found/i.test(err.message)) return undefined;
+      // Gone is an answer, not an error, here.
+      if (isGone(err, vmid)) return undefined;
       throw err;
     }
   }
+}
+
+/**
+ * Did this call fail because guest `vmid` isn't there? A 500 "does not exist",
+ * or, for a token whose rights come only from its pool (the setup's
+ * DispatchTerminal role), a 403 on that guest's own path: Proxmox answers a
+ * vmid outside the pool, deleted ones included, with "Permission check failed
+ * (/vms/<vmid>, VM.Audit)" (seen live on node g). Every container this plugin
+ * makes is cloned into the pool, so one it can't see is not one it has.
+ */
+export function isGone(err: unknown, vmid: number): boolean {
+  if (!(err instanceof ProxmoxError)) return false;
+  if (/does not exist|no such|not found/i.test(err.message)) return true;
+  return err.status === 403 && err.message.includes(`(/vms/${vmid},`);
 }
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {

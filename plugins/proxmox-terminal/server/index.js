@@ -21725,10 +21725,15 @@ class Proxmox {
       const s = await this.call("GET", `/nodes/${encodeURIComponent(node)}/lxc/${vmid}/status/current`);
       return s.status;
     } catch (err) {
-      if (err instanceof ProxmoxError && /does not exist|no such|not found/i.test(err.message)) return void 0;
+      if (isGone(err, vmid)) return void 0;
       throw err;
     }
   }
+}
+function isGone(err, vmid) {
+  if (!(err instanceof ProxmoxError)) return false;
+  if (/does not exist|no such|not found/i.test(err.message)) return true;
+  return err.status === 403 && err.message.includes(`(/vms/${vmid},`);
 }
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -22443,7 +22448,7 @@ class ProxmoxProvider {
     try {
       return await api.call("GET", `/nodes/${s.node}/lxc/${vmid}/config`);
     } catch (err) {
-      if (err instanceof ProxmoxError && GONE.test(err.message)) return void 0;
+      if (isGone(err, vmid)) return void 0;
       throw err;
     }
   }
@@ -22474,7 +22479,6 @@ class ProxmoxProvider {
     );
   }
 }
-const GONE = /does not exist|no such|not found/i;
 const SSH_WAIT_MS = 45e3;
 function tcpReady(ip, signal) {
   return new Promise((resolve) => {
