@@ -474,6 +474,9 @@ export class LegacyRescue {
     });
     let localErr = "";
     local.stderr.on("data", (c: Buffer) => (localErr += c.toString()));
+    // index-pack dying mid-pack makes the next write EPIPE; its exit code is
+    // the report. Unhandled, that error event would take the server down.
+    local.stdin.on("error", () => {});
     const localDone = new Promise<number | null>((res, rej) => {
       local.on("error", rej);
       local.on("close", res);

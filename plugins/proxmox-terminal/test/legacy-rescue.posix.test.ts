@@ -84,6 +84,8 @@ function shRemote(counter = { connects: 0, execs: 0 }): RescueRemote {
         child.stderr.on("data", (c: Buffer) => err.push(c));
         child.on("error", reject);
         child.on("close", (code) => resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") }));
+        // A command that never reads stdin may exit first: EPIPE, which the exit code already covers.
+        child.stdin.on("error", () => {});
         child.stdin.end(opts.input ?? "");
       }),
     pipe: (cmd, sink, opts) =>
@@ -336,6 +338,19 @@ describe.skipIf(!posix)("legacy rescue (real git)", () => {
     const first = await one.r.run(job(workDir, [local]));
     const again = await rescuer(one.kvNow()).r.run(job(workDir, [local]));
     expect(again).toEqual(first);
+  });
+
+  it("a pack over the cap is cut off without taking the process down, and leaves no ref", async () => {
+    const { local, workDir } = fixture();
+    await legacySync(local, workDir, "repo");
+    writeFileSync(`${workDir}/repo/big.txt`, "x".repeat(200_000) + Math.random()); // incompressible enough
+    const one = rescuer({}, { caps: { packBytes: 1 } });
+    await expect(one.r.run(job(workDir, [local]))).rejects.toThrow(/is over/);
+    expect(g(local, "for-each-ref", "refs/dispatch")).toBe("");
+    expect(existsSync(`${workDir}/repo`)).toBe(true); // not moved
+    const two = rescuer(one.kvNow());
+    const res = await two.r.run(job(workDir, [local]));
+    expect(res.entries[0]).toMatchObject({ state: "moved", ref: rescueRef("chat1", 9003, "repo") });
   });
 
   it("a failure is recorded and counted; the next run finishes", async () => {
