@@ -1,42 +1,27 @@
 /**
- * Unit tests — no Proxmox, no SSH, no Dispatch. The Proxmox API and the SSH
- * connection are faked at the seams `BackendDeps` exposes; the git snapshot
- * runs against a real throwaway repository. What is not Proxmox (snapshots,
- * the sync before each command, port parsing, key pasting) is tested in
- * packages/remote-core.
+ * Unit tests — no Proxmox, no SSH, no Dispatch, no remote-host. Proxmox's API,
+ * remote-host's `machines@1` and core's `ctx.dependencies` are faked at the
+ * seams `BackendDeps` exposes (test/fakes.ts). What runs on the machine is
+ * remote-host's, tested there; the rescue of pre-0.2 checkouts is in
+ * legacy-rescue.posix.test.ts.
  */
-import { EventEmitter } from "node:events";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createTestContext } from "@dispatch/plugin-sdk/testing";
-import type { SshConnection } from "@dispatch-plugins/remote-core";
 import plugin from "../src/server.js";
-import { ProxmoxTerminalBackend, hostnameFor } from "../src/backend.js";
+import { hostnameFor } from "../src/backend.js";
+import { NEEDS_NEWER_DISPATCH } from "../src/remote-host-link.js";
 import { readSettings } from "../src/settings.js";
-import { ProxmoxError, type Proxmox } from "../src/proxmox.js";
+import { INSTANCE, fakeDependencies, fakeProxmox, fakeRemoteHost, ours, rec, terminal } from "./fakes.js";
 
-const dirs: string[] = [];
-afterEach(() => {
-  // Retries: on Windows a git child can still hold the directory for a moment.
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+const spawnInfo = (chatId = "c1", signal = new AbortController().signal) => ({
+  chatId,
+  name: "main",
+  cwd: "/w/repo",
+  worktreePath: "/w/repo",
+  repoPath: "/w/repo",
+  signal,
 });
-
-function gitRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "pt-repo-"));
-  dirs.push(dir);
-  const g = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" }).toString().trim();
-  g("init", "-q");
-  g("config", "user.email", "t@t");
-  g("config", "user.name", "t");
-  writeFileSync(join(dir, "a.txt"), "one\n");
-  writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
-  g("add", "-A");
-  g("commit", "-qm", "init");
-  return dir;
-}
+const run = (chatId = "c1") => ({ runId: "r1", chatId, terminal: "main", command: "ls", cwd: "/w/repo", background: false, signal: new AbortController().signal });
 
 describe("helpers", () => {
   it("makes DNS-safe hostnames", () => {
@@ -45,154 +30,224 @@ describe("helpers", () => {
 
   it("reads settings over defaults, coercing numbers", () => {
     const s = readSettings({ cores: "4", insecureTls: true, apiUrl: " https://pve:8006 " });
-    expect(s).toMatchObject({ cores: 4, insecureTls: true, apiUrl: "https://pve:8006", templateVmid: 9000 });
+    expect(s).toMatchObject({ cores: 4, insecureTls: true, apiUrl: "https://pve:8006", templateVmid: 9000, templateHostKey: "" });
   });
 });
 
-/* ------------------------------------------------------------ the backend */
-
-class FakeChannel extends EventEmitter {
-  readonly stdout = new EventEmitter();
-  readonly stderr = new EventEmitter();
-  written: string[] = [];
-  readonly stdin = { write: (c: string) => void this.written.push(c) };
-  cwd = "/root/work/repo";
-  kill() {
-    this.emit("exit", null);
-  }
-}
-
-function fakes() {
-  const calls: string[] = [];
-  const state = { status: undefined as string | undefined, description: undefined as string | undefined };
-  const api = {
-    call: async (method: string, path: string, params?: Record<string, unknown>) => {
-      calls.push(`${method} ${path}${params?.newid ? ` newid=${params.newid}` : ""}`);
-      if (path === "/cluster/resources") return [{ vmid: 9001, type: "lxc", pool: "dispatch-terminals" }];
-      if (path.endsWith("/config") && method === "GET") {
-        if (!state.status) throw new ProxmoxError("Configuration file does not exist", 500);
-        return { description: state.description };
-      }
-      if (path.endsWith("/clone")) {
-        state.status = "stopped";
-        state.description = String(params?.description);
-        return "UPID:clone";
-      }
-      if (path.endsWith("/status/start")) {
-        state.status = "running";
-        return "UPID:start";
-      }
-      if (path.endsWith("/status/shutdown") || path.endsWith("/status/stop")) {
-        state.status = "stopped";
-        return "UPID:stop";
-      }
-      if (method === "DELETE") {
-        state.status = undefined;
-        return "UPID:destroy";
-      }
-      return null;
-    },
-    waitTask: async () => {},
-    ipv4: async () => "10.0.12.200",
-    status: async () => state.status,
-  } as unknown as Proxmox;
-  const remote: string[] = [];
-  const shells: FakeChannel[] = [];
-  const conn = Object.assign(new EventEmitter(), {
-    isOpen: true,
-    connect: async () => {},
-    exec: async (cmd: string) => {
-      remote.push(cmd);
-      return { code: 0, stdout: cmd.includes("test -d") ? "" : "", stderr: "" };
-    },
-    run: async (cmd: string) => {
-      remote.push(cmd);
-      return "";
-    },
-    shell: async () => {
-      const ch = new FakeChannel();
-      shells.push(ch);
-      return ch;
-    },
-    forward: async () => ({ localPort: 45000, close: () => {} }),
-    close() {
-      (this as { isOpen: boolean }).isOpen = false;
-    },
-  }) as unknown as SshConnection;
-  return { api, conn, calls, remote, shells, state };
-}
-
-describe("ProxmoxTerminalBackend", () => {
-  it("clones a free vmid on first spawn, sizes it, starts it, and hands back a shell in the mapped cwd", async () => {
-    const repo = gitRepo();
-    const f = fakes();
-    const t = createTestContext({ id: "proxmox-terminal" });
-    const backend = new ProxmoxTerminalBackend({
-      ctx: t.ctx,
-      kv: t.ctx.kv,
-      settings: () => readSettings({ apiUrl: "https://pve:8006", node: "g" }),
-      token: async () => "u@pve!t=x",
-      sshAuth: async () => ({ privateKey: "k" }),
-      proxmox: () => f.api,
-      connect: () => f.conn,
-    });
-    const handle = await backend.spawn({ chatId: "c1", name: "main", cwd: repo, signal: new AbortController().signal });
-    // 9001 is taken in the pool → 9002.
+describe("with remote-host", () => {
+  it("first spawn: clones a free vmid, sizes and starts it, and hands remote-host a lease to connect with", async () => {
+    const f = fakeProxmox({ 9001: ours("someone-else", "stopped") });
+    const { b, rh, kvNow } = terminal(f);
+    const h = await b.forwarder.spawn(spawnInfo());
+    expect(h).toBeDefined();
     expect(f.calls).toContain("POST /nodes/g/lxc/9000/clone newid=9002");
     expect(f.calls).toContain("PUT /nodes/g/lxc/9002/config");
     expect(f.calls).toContain("POST /nodes/g/lxc/9002/status/start");
-    expect(t.kv.get("chat:c1")).toMatchObject({ vmid: 9002 });
-    // Seeded (no GitHub origin → git init), then synced by pack.
-    expect(f.remote.some((c) => c.includes("git init"))).toBe(true);
-    expect(f.remote.some((c) => c.includes("git index-pack --stdin"))).toBe(true);
-    expect(f.remote.some((c) => /git checkout -q --force --detach [0-9a-f]{40}/.test(c))).toBe(true);
-    expect(handle.cwd).toBe("/root/work/repo");
-    expect(backend.agentNote({ chatId: "c1" })).toContain("useless on Linux");
+    const recd = kvNow()["chat:c1"] as { vmid: number; createdAt: number; layout: number; machine: string };
+    expect(recd).toMatchObject({ vmid: 9002, layout: 2, machine: `9002:${recd.createdAt}` });
+    const lease = rh.leases[0]!;
+    expect(lease).toMatchObject({
+      machine: `9002:${recd.createdAt}`,
+      addresses: ["10.0.12.200"],
+      user: "root",
+      hostKey: { trust: "provisioner" },
+      hostname: "dt-c1",
+      notices: [],
+    });
+    expect(await lease.auth()).toEqual({ privateKey: "k", password: undefined });
+    expect(JSON.stringify(kvNow())).not.toContain('"k"'); // the key is never kept
   });
 
-  it("stops the container when the chat goes idle, and destroys it when the chat is deleted", async () => {
-    const repo = gitRepo();
-    const f = fakes();
-    const t = createTestContext({ id: "proxmox-terminal" });
-    const backend = new ProxmoxTerminalBackend({
-      ctx: t.ctx,
-      kv: t.ctx.kv,
-      settings: () => readSettings({ apiUrl: "https://pve:8006", node: "g", idleStopMinutes: 0 }),
-      token: async () => "u@pve!t=x",
-      sshAuth: async () => ({ privateKey: "k" }),
-      proxmox: () => f.api,
-      connect: () => f.conn,
-    });
-    await backend.spawn({ chatId: "c1", name: "main", cwd: repo, signal: new AbortController().signal });
-    backend.onChatIdle({ chatId: "c1" });
+  it("pins the template's host key when it is set", async () => {
+    const f = fakeProxmox();
+    const { b, rh } = terminal(f, undefined, { templateHostKey: "SHA256:abc" });
+    await b.forwarder.spawn(spawnInfo());
+    expect(rh.leases[0]!.hostKey).toEqual({ pin: ["SHA256:abc"] });
+  });
+
+  it("registers with the caller's id and io, and forwards beforeRun, touching the unused clock", async () => {
+    const f = fakeProxmox({ 9002: ours("c1", "stopped") });
+    const { b, rh, kvNow } = terminal(f, { instance: INSTANCE, "chat:c1": rec(9002, { layout: 2, lastUsedAt: 1 }) });
+    expect(rh.st.options).toMatchObject({ id: "proxmox", label: "Proxmox container" });
+    await b.forwarder.spawn(spawnInfo());
+    (kvNow()["chat:c1"] as { lastUsedAt: number }).lastUsedAt = 1;
+    expect(await b.forwarder.beforeRun(run())).toEqual({ notices: ["synced"] });
+    expect(rh.calls).toContain("beforeRun c1");
+    expect((kvNow()["chat:c1"] as { lastUsedAt: number }).lastUsedAt).toBeGreaterThan(Date.now() - 5_000);
+  });
+
+  it("idle: remote-host ends the chat's sessions, then the container stops; delete: it forgets, then the container goes", async () => {
+    const f = fakeProxmox();
+    const { b, rh, kvNow } = terminal(f, undefined, { idleStopMinutes: 0 });
+    await b.forwarder.spawn(spawnInfo());
+    const machine = (kvNow()["chat:c1"] as { machine: string }).machine;
+    await b.forwarder.onChatIdle({ chatId: "c1" });
     await new Promise((r) => setTimeout(r, 50));
-    expect(f.calls).toContain("POST /nodes/g/lxc/9002/status/shutdown");
-    await backend.onChatDeleted({ chatId: "c1" });
-    expect(f.calls).toContain("DELETE /nodes/g/lxc/9002");
-    expect(t.kv.get("chat:c1")).toBeUndefined();
+    expect(rh.calls).toContain("endChat c1");
+    expect(f.cts.get(9001)?.status).toBe("stopped");
+    await b.forwarder.onChatDeleted({ chatId: "c1" });
+    expect(rh.calls).toContain("forgetChat c1");
+    expect(rh.calls).toContain(`machineGone ${machine}`);
+    expect(f.cts.has(9001)).toBe(false);
+    expect(kvNow()["chat:c1"]).toBeUndefined();
+  });
+
+  it("a chat with a shell or a run on remote-host is busy: no TTL destroy, no boot stop", async () => {
+    const f = fakeProxmox({ 9002: ours("c1") });
+    const rh = fakeRemoteHost();
+    rh.machines.set("c1", { chatId: "c1", machine: "9002:1", connected: true, shells: 0, running: true });
+    const { b } = terminal(f, { instance: INSTANCE, "chat:c1": rec(9002, { layout: 2, lastUsedAt: Date.now() - 30 * 86_400_000 }) }, {}, { rh });
+    await b.reconcile({ chats: ["c1"] });
+    expect(f.cts.get(9002)?.status).toBe("running");
+    rh.machines.clear();
+    await b.sweep();
+    expect(f.cts.has(9002)).toBe(false);
+  });
+
+  it("uninstall: remote-host forgets this plugin's machines, then every clone goes", async () => {
+    const f = fakeProxmox({ 9002: ours("c1") });
+    const { b, rh } = terminal(f, { instance: INSTANCE, "chat:c1": rec(9002) });
+    await b.onShutdown({ reason: "uninstall", deadline: Date.now() + 5_000 });
+    expect(rh.calls[0]).toBe("forgetAll");
+    expect(f.cts.has(9002)).toBe(false);
+  });
+
+  it("an agent note is remote-host's machine part plus proxmox's lifecycle lines", async () => {
+    const { b } = terminal(fakeProxmox());
+    const note = b.forwarder.agentNote({ chatId: "c1" })!;
+    expect(note).toContain("remote-host's machine part");
+    expect(note).toContain("per-chat Proxmox container");
+    expect(note).not.toContain("/root/work");
   });
 
   it("refuses loudly with no API URL or token, so Dispatch can say why", async () => {
-    const t = createTestContext({ id: "proxmox-terminal" });
-    const backend = new ProxmoxTerminalBackend({
-      ctx: t.ctx,
-      kv: t.ctx.kv,
-      settings: () => readSettings({}),
-      token: async () => undefined,
-      sshAuth: async () => ({}),
+    const t = terminal(fakeProxmox(), undefined, { apiUrl: "" });
+    await expect(t.b.forwarder.spawn(spawnInfo())).rejects.toThrow(/no API URL/);
+    expect(t.b.status()).toMatchObject({ state: "offline", detail: expect.stringContaining("not set up") });
+  });
+});
+
+describe("pre-0.2 containers", () => {
+  it("a legacy record is rescued once at its first spawn, then marked layout 2", async () => {
+    const f = fakeProxmox({ 9002: ours("c1", "stopped") });
+    let connects = 0;
+    const { b, kvNow } = terminal(f, { instance: INSTANCE, "chat:c1": rec(9002) }, {}, {
+      rescueRemote: async () => {
+        connects++;
+        return { exec: async () => ({ code: 0, stdout: "", stderr: "" }), pipe: async () => ({ code: 0, stderr: "" }) };
+      },
     });
-    await expect(
-      backend.spawn({ chatId: "c1", name: "main", cwd: process.cwd(), signal: new AbortController().signal }),
-    ).rejects.toThrow(/no API URL/);
+    await b.forwarder.spawn(spawnInfo());
+    await b.forwarder.spawn(spawnInfo());
+    expect(connects).toBe(1);
+    expect(kvNow()["chat:c1"]).toMatchObject({ vmid: 9002, layout: 2, rescue: [] });
+    expect(kvNow()["rescue:chat1"]).toBeUndefined();
+    expect(kvNow()["rescue:c1"]).toMatchObject({ phase: "done" });
+  });
+
+  it("a rescue still running refuses the spawn with its progress; it keeps going, and the next spawn uses its result", async () => {
+    const f = fakeProxmox({ 9002: ours("c1", "stopped") });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { b, kvNow } = terminal(f, { instance: INSTANCE, "chat:c1": rec(9002) }, {}, {
+      rescueRemote: async () => {
+        await gate;
+        return { exec: async () => ({ code: 0, stdout: "", stderr: "" }), pipe: async () => ({ code: 0, stderr: "" }) };
+      },
+    });
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50); // the spawn's own budget runs out
+    await expect(b.forwarder.spawn(spawnInfo("c1", ac.signal))).rejects.toThrow(/rescuing the old container.*run the command again/);
+    expect(b.rescue.running("c1")).toBe(true);
+    expect((kvNow()["chat:c1"] as { layout?: number }).layout).toBeUndefined();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    await b.forwarder.spawn(spawnInfo());
+    expect(kvNow()["chat:c1"]).toMatchObject({ layout: 2 });
+  });
+
+  it("a failed rescue refuses the spawn with the reason and leaves the container as it is", async () => {
+    const f = fakeProxmox({ 9002: ours("c1", "stopped") });
+    const { b, kvNow } = terminal(f, { instance: INSTANCE, "chat:c1": rec(9002) }, {}, {
+      rescueRemote: async () => {
+        throw new Error("ssh: handshake failed");
+      },
+    });
+    await expect(b.forwarder.spawn(spawnInfo())).rejects.toThrow(/handshake failed.*attempt 1/);
+    expect(f.cts.has(9002)).toBe(true);
+    expect((kvNow()["chat:c1"] as { layout?: number }).layout).toBeUndefined();
+  });
+});
+
+describe("refusing mode", () => {
+  it("on a core without plugin dependencies: refuses with the reason, and still destroys a deleted chat's container", async () => {
+    const f = fakeProxmox({ 9002: ours("c1") });
+    const { b, kvNow } = terminal(f, { instance: INSTANCE, "chat:c1": rec(9002) }, {}, { deps: null });
+    expect(b.status()).toEqual({ state: "offline", detail: NEEDS_NEWER_DISPATCH });
+    await expect(b.forwarder.spawn(spawnInfo())).rejects.toThrow(/needs a newer Dispatch/);
+    expect(await b.forwarder.beforeRun(run())).toEqual({ refuse: NEEDS_NEWER_DISPATCH });
+    expect(b.forwarder.agentNote({ chatId: "c1" })).toContain("refused right now");
+    await b.forwarder.onChatDeleted({ chatId: "c1" }); // resolves: no cleanup row
+    expect(f.cts.has(9002)).toBe(false);
+    expect(kvNow()["destroy:9002"]).toBeUndefined();
+  });
+
+  it("names why for a remote-host that is switched off, missing, or too old", async () => {
+    const rh = fakeRemoteHost();
+    for (const [state, want] of [
+      ["disabled", /switched off/],
+      ["missing", /not installed/],
+      ["incompatible", /machines v1\) \(has 0\.9\.2\)\. Update/],
+    ] as const) {
+      const { b } = terminal(fakeProxmox(), undefined, {}, { deps: fakeDependencies(rh, state, state === "incompatible" ? "has 0.9.2" : undefined).deps });
+      await expect(b.forwarder.spawn(spawnInfo())).rejects.toThrow(want);
+    }
+  });
+
+  it("lost mid-run: refuses from then on, says so, and keeps managing containers", async () => {
+    const f = fakeProxmox();
+    const rh = fakeRemoteHost();
+    const d = fakeDependencies(rh);
+    const { b, changes } = terminal(f, undefined, { idleStopMinutes: 0 }, { rh, deps: d.deps });
+    await b.forwarder.spawn(spawnInfo());
+    d.lose("disabled");
+    rh.revoke();
+    expect(changes()).toBe(1);
+    expect(b.status()).toMatchObject({ state: "offline", detail: expect.stringContaining("switched off") });
+    await expect(b.forwarder.spawn(spawnInfo())).rejects.toThrow(/switched off/);
+    await b.forwarder.onChatIdle({ chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(f.cts.get(9001)?.status).toBe("stopped"); // the Proxmox lifecycle never stops
+  });
+
+  it("a call that went inert under us (revoked, not yet lost) is refused, never handed back as a shell", async () => {
+    const rh = fakeRemoteHost();
+    const { b } = terminal(fakeProxmox(), undefined, {}, { rh });
+    rh.revoke();
+    await expect(b.forwarder.spawn(spawnInfo())).rejects.toThrow(/went away/);
   });
 });
 
 describe("activate", () => {
-  it("registers the proxmox backend", async () => {
+  it("registers the proxmox backend first, with fallback refuse — refusing on a core without dependencies", async () => {
     const t = createTestContext({ id: "proxmox-terminal", capabilities: ["terminals", "secrets", "kv"] });
     await plugin.activate(t.ctx);
     expect([...t.terminalBackends.keys()]).toEqual(["proxmox"]);
     expect(t.terminalBackends.get("proxmox")).toMatchObject({ label: "Proxmox container", shell: "bash", fallback: "refuse" });
+    expect(t.terminalStatus.get("proxmox")).toMatchObject({ state: "offline" });
+    await plugin.deactivate?.();
+  });
+
+  it("goes online through ctx.dependencies when remote-host is there", async () => {
+    const t = createTestContext({
+      id: "proxmox-terminal",
+      capabilities: ["terminals", "secrets", "kv"],
+      settings: { apiUrl: "https://pve:8006", node: "g" },
+    });
+    Object.assign(t.ctx, { dependencies: fakeDependencies(fakeRemoteHost()).deps });
+    await plugin.activate(t.ctx);
+    expect(t.terminalStatus.get("proxmox")).toMatchObject({ state: "online" });
+    await plugin.deactivate?.();
   });
 });
 
@@ -225,5 +280,12 @@ describe("the committed bundle", () => {
     expect([...t.terminalBackends.keys()]).toEqual(["proxmox"]);
     expect(typeof mod.default.onShutdown).toBe("function");
     expect(typeof mod.default.reconcile).toBe("function");
+  });
+
+  it("inlines no remote-host code: its only way in is ctx.dependencies", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../server/index.js", import.meta.url), "utf8");
+    expect(src).not.toContain("dispatch-host session");
+    expect(src).toContain("dependencies");
   });
 });

@@ -192,6 +192,18 @@ describe("lease", () => {
     expect(kvNow()["chat:c1"]).toBeUndefined();
   });
 
+  it("an idle stop that comes due while the machine is busy waits until it is quiet", async () => {
+    const f = fakeProvider({ 2: ours("c1") });
+    let busy = true;
+    const { l, kvNow } = life(f, { instance: INSTANCE, "chat:c1": rec(2, { idleDeadline: Date.now() - 1 }) }, { busy: () => busy });
+    await l.start();
+    expect(f.machines.get(2)?.status).toBe("running");
+    expect((kvNow()["chat:c1"] as ChatRecord<Ref>).idleDeadline).toBeDefined(); // kept for the next sweep
+    busy = false;
+    await l.sweep();
+    expect(f.machines.get(2)?.status).toBe("stopped");
+  });
+
   it("detaches before a stop, and before a destroy", async () => {
     const f = fakeProvider({ 2: ours("c1"), 3: ours("c2") });
     const { l, detached } = life(f, { instance: INSTANCE, "chat:c1": rec(2, { idleDeadline: Date.now() - 1 }), "chat:c2": rec(3) });

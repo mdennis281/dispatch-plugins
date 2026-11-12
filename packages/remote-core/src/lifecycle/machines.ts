@@ -554,11 +554,17 @@ export class MachineLifecycle<R extends MachineRef> {
 
   /**
    * Stop the chat's machine, unless a lease has happened since the stop was
-   * decided (`gen`). The next lease starts it again. Detaches first.
+   * decided (`gen`) or something runs there now. The next lease starts it
+   * again. Detaches first.
+   *
+   * Busy matters as well as the generation: an idle event the caller handles
+   * asynchronously can capture a generation AFTER a concurrent lease bumped
+   * it, and that stop would otherwise land on a machine in use. A busy
+   * machine keeps its deadline, and the sweep tries again once it is quiet.
    */
   private stopIdle(st: LifeState<R>, gen: number): Promise<void> {
     return this.serial(st, async () => {
-      if (st.generation !== gen || !st.ref) return;
+      if (st.generation !== gen || !st.ref || this.busy(st)) return;
       await this.detach(st, "stop");
       // Detaching may have yielded to a lease that queued behind us; it
       // bumped the generation, and the machine is about to be in use.

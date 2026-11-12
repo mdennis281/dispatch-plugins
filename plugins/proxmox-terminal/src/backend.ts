@@ -1,33 +1,44 @@
 /**
- * The Proxmox terminal backend: one LXC per chat, linked-cloned from a
- * template the first time the chat opens a terminal, stopped when the chat
- * goes idle, destroyed when the chat is deleted.
+ * proxmox-terminal 0.2: one LXC per chat, linked-cloned from a template the
+ * first time the chat opens a terminal, stopped when the chat goes idle,
+ * destroyed when the chat is deleted — with everything that runs ON the
+ * container (the session supervisor, three-way sync, ports, MCP) done by
+ * remote-host, reached through core's plugin dependencies as `machines@1`.
  *
- * The container holds its OWN git checkout of the chat's code, synced from the
- * local worktree before every command (remote-core's RemoteCheckouts). Losing
- * the container loses only installs and build output: the real copy of the
- * code is on the Dispatch host.
- *
- * Everything that isn't Proxmox — the chat registry, spawning a synced shell,
- * forwarding ports, idle stops, destroy retries, adoption — is remote-core's
- * RemoteChats. This file is the Proxmox provider it drives, and the wiring.
+ * This file is the Proxmox half: {@link ProxmoxProvider} (clone, start, stop,
+ * destroy, prove a container is the chat's) under remote-core's
+ * MachineLifecycle (kv, sweep, idle, destroy queue, adoption, TTL), and
+ * {@link ProxmoxTerminal}, which ties them to remote-host: its `provision`
+ * brings a chat's container up, rescues a pre-0.2 checkout once
+ * (legacy-rescue.ts), and hands remote-host a lease to connect with.
  */
-import type {
-  PluginContext,
-  TerminalBackend,
-  TerminalBackendHandle,
-  TerminalSpawnInfo,
-} from "@dispatch/plugin-sdk";
-import { RemoteChats, SshConnection, type Provider, type ShutdownReason, type SshAuth } from "@dispatch-plugins/remote-core";
+import type { PluginContext } from "@dispatch/plugin-sdk";
+import {
+  MachineLifecycle,
+  SshConnection,
+  errText,
+  pinnedHostKey,
+  trustProvisioner,
+  type LeaseChat,
+  type MachineProvider,
+  type ShutdownReason,
+  type SshAuth,
+} from "@dispatch-plugins/remote-core";
+import { BACKEND_ID, LABEL, ProxmoxForwarder } from "./forwarder.js";
+import { LegacyRescue, sshRescueRemote, type RescueJob, type RescueRemote, type RescueResult } from "./legacy-rescue.js";
+import type { MachineLease, PluginDependencies, ProvisionedBackendOptions, ProvisionRequest } from "./machines-api.js";
 import { Proxmox, ProxmoxError, sleep } from "./proxmox.js";
+import { RemoteHostLink } from "./remote-host-link.js";
 import type { Settings } from "./settings.js";
 
 export type { ShutdownReason };
-
-export const BACKEND_ID = "proxmox";
+export { BACKEND_ID };
 
 /** What names a chat's container in kv: `chat:<chatId>` and `destroy:<vmid>`. */
 export type ContainerRef = { vmid: number; hostname: string };
+
+/** `chat:<id>.layout` once the container's pre-0.2 checkouts are rescued (or it never had any). */
+export const LAYOUT = 2;
 
 /** Under core's 60 s onChatDeleted timeout, so a slow destroy is ours to report, not a timeout. */
 const DESTROY_WAIT_MS = 45_000;
@@ -39,104 +50,246 @@ export interface BackendDeps {
   settings: () => Settings;
   /** The Proxmox API token, `USER@REALM!ID=SECRET`. */
   token: () => Promise<string | undefined>;
-  /** SSH credentials for the containers. */
+  /** SSH credentials for the containers. Read per connect, never kept. */
   sshAuth: () => Promise<SshAuth>;
+  /** `ctx.dependencies` (core C2); undefined on a core without plugin dependencies. */
+  dependencies?: () => PluginDependencies | undefined;
+  /** remote-host came or went: the backend's status should follow. */
+  statusChanged?: () => void;
   /** Injectable for tests. */
   proxmox?: (s: Settings, token: string) => Proxmox;
-  connect?: (host: string, user: string, auth: SshAuth) => SshConnection;
+  /** A shell on a container for the legacy rescue. Default: SSH with the same key. Injectable for tests. */
+  rescueRemote?: (host: string, s: Settings, auth: SshAuth) => Promise<RescueRemote>;
 }
 
-export class ProxmoxTerminalBackend implements TerminalBackend {
-  readonly id = BACKEND_ID;
-  readonly label = "Proxmox container";
-  readonly shell = "bash" as const;
-  /**
-   * When a container can't be brought up, Dispatch refuses the terminal (with
-   * the reason) instead of running it locally. A local fallback runs Linux
-   * commands in a Windows shell against a different tree. Shipped ahead of
-   * 0.2, so every instance remembers "refuse" for `proxmox` before 0.2 exists.
-   */
-  readonly fallback = "refuse" as const;
-  private readonly chats: RemoteChats<ContainerRef>;
+/** Everything proxmox-terminal runs; one per activation. */
+export class ProxmoxTerminal {
+  readonly provider: ProxmoxProvider;
+  readonly life: MachineLifecycle<ContainerRef>;
+  readonly rescue: LegacyRescue;
+  readonly link: RemoteHostLink;
+  /** What is registered as the `proxmox` terminal backend. */
+  readonly forwarder: ProxmoxForwarder;
 
   constructor(private readonly deps: BackendDeps) {
-    this.chats = new RemoteChats<ContainerRef>({
-      backendId: BACKEND_ID,
-      label: "proxmox-terminal",
-      provider: new ProxmoxProvider(deps, () => this.chats.instanceId()),
+    const log = deps.ctx.log;
+    this.provider = new ProxmoxProvider(deps, () => this.life.instanceId());
+    this.rescue = new LegacyRescue({ kv: deps.kv, log });
+    this.life = new MachineLifecycle<ContainerRef>({
+      provider: this.provider,
       kv: deps.kv,
-      log: deps.ctx.log,
-      publishPort: (p) => deps.ctx.terminals!.publishPort(BACKEND_ID, p),
+      log,
       policy: () => {
         const s = deps.settings();
-        return { idleStopMinutes: s.idleStopMinutes, destroyUnusedDays: s.destroyUnusedDays, workDir: s.workDir };
+        return { idleStopMinutes: s.idleStopMinutes, destroyUnusedDays: s.destroyUnusedDays };
       },
+      busy: (chatId) => this.busy(chatId),
+      detach: (chatId, why) => this.detach(chatId, why),
+      // An unrescued pre-0.2 container may hold edits that never came back:
+      // never destroy it for being unused. Deleting its chat still does.
+      mayExpire: (rec) => rec.layout === LAYOUT,
+      // 0.1.x may have queued destroys (the TTL) for chats that still exist,
+      // under rules that let it destroy unrescued containers. Revive those.
+      reviveLiveDestroys: { marker: "migrated-destroys" },
+    });
+    this.link = new RemoteHostLink({
+      deps: () => deps.dependencies?.(),
+      options: () => this.provisionOptions(),
+      log,
+      changed: () => deps.statusChanged?.(),
+    });
+    this.forwarder = new ProxmoxForwarder({ link: this.link, life: this.life, settings: deps.settings, log });
+  }
+
+  /** For `ctx.terminals.setStatus("proxmox", …)`. */
+  status(): { state: "online" | "offline"; detail?: string } {
+    if (!this.deps.settings().apiUrl) return { state: "offline", detail: "not set up: no Proxmox API URL (Settings → Plugins → Proxmox terminal)" };
+    const why = this.link.reason();
+    return why ? { state: "offline", detail: why } : { state: "online" };
+  }
+
+  /* ------------------------------------------------------- remote-host */
+
+  provisionOptions(): ProvisionedBackendOptions {
+    const terminals = this.deps.ctx.terminals!;
+    return {
+      id: BACKEND_ID,
+      label: LABEL,
+      io: {
+        publishPort: (p) => terminals.publishPort(BACKEND_ID, p),
+        updateBackend: (u) => terminals.updateBackend?.(BACKEND_ID, u),
+      },
+      provision: (req) => this.provision(req),
+    };
+  }
+
+  /**
+   * remote-host's way in: bring the chat's container up (cloning one the
+   * first time), rescue a pre-0.2 container's checkouts once, and say how to
+   * reach it. Runs as a lease, so no idle stop or boot sweep can stop the
+   * container under it.
+   */
+  provision(req: ProvisionRequest): Promise<MachineLease> {
+    const s = this.deps.settings();
+    return this.life.lease(req.chatId, async (chat) => {
+      const up = await this.provider.ensureUp(chat, req.signal);
+      const ref: ContainerRef = { vmid: up.vmid, hostname: up.hostname };
+      const notices: string[] = [];
+      if (up.created) {
+        await this.life.patch(req.chatId, { layout: LAYOUT }, ref);
+      } else if ((await this.life.record(req.chatId))?.layout !== LAYOUT) {
+        const res = await this.rescueFor(req, up, s);
+        await this.life.patch(req.chatId, { layout: LAYOUT, rescue: res.entries.map(({ d, state, ref: r }) => ({ d, state, ref: r })) }, ref);
+        if (res.notice) notices.push(res.notice);
+      }
+      const rec = await this.life.record(req.chatId);
+      // The incarnation: a container re-created under the same vmid is a new machine to remote-host.
+      const machine = `${up.vmid}:${rec?.createdAt ?? 0}`;
+      if (rec?.machine !== machine) await this.life.patch(req.chatId, { machine }, ref);
+      return {
+        machine,
+        addresses: [up.ip],
+        user: s.sshUser,
+        auth: () => this.auth(),
+        hostKey: s.templateHostKey ? { pin: [s.templateHostKey] } : { trust: "provisioner" },
+        hostname: up.hostname,
+        notices,
+      } satisfies MachineLease;
     });
   }
 
-  get spawnTimeoutMs(): number {
-    return Math.max(30, this.deps.settings().spawnTimeoutSeconds) * 1_000;
+  /** Read per connect; never kept. */
+  private async auth(): Promise<{ privateKey?: string; password?: string }> {
+    const a = await this.deps.sshAuth();
+    if (!a.privateKey && !a.password) {
+      throw new Error("no SSH credentials: set the sshKeyPath setting, or the PROXMOX_TERMINAL_SSH_KEY / _SSH_PASSWORD secret");
+    }
+    return { privateKey: a.privateKey, password: a.password };
   }
 
-  spawn(info: TerminalSpawnInfo): Promise<TerminalBackendHandle> {
-    return this.chats.spawn(info);
+  /**
+   * The rescue of a pre-0.2 container, waited on for part of the spawn's
+   * budget. Still going after that: the spawn is refused with its progress
+   * and the job carries on; the next spawn picks up its result.
+   */
+  private async rescueFor(req: ProvisionRequest, up: { vmid: number; ip: string }, s: Settings): Promise<RescueResult> {
+    const job: RescueJob = {
+      chatId: req.chatId,
+      vmid: up.vmid,
+      workDir: s.workDir,
+      candidates: [req.worktreePath, req.repoPath].filter((p): p is string => !!p),
+      connect: () => this.rescueRemote(up.ip, s),
+    };
+    const run = this.rescue.run(job);
+    run.catch(() => {}); // abandoned by a refused spawn, it still settles on its own
+    const waitMs = Math.max(10_000, this.forwarder.spawnTimeoutMs - 90_000);
+    const done = await settleWithin(run, waitMs, req.signal).catch(async (err: unknown) => {
+      const n = (await this.rescue.state(req.chatId))?.failures ?? 1;
+      throw new Error(`${errText(err)} (attempt ${n}; the next command tries again, and the container is left as it is)`);
+    });
+    if (done === PENDING) throw new Error(`${this.rescue.describe(req.chatId)}. It keeps going on its own: run the command again in a minute`);
+    return done;
   }
 
-  agentNote({ chatId }: { chatId: string }): string {
-    const st = this.chats.peek(chatId);
-    const where = st
-      ? `container ${st.ref?.hostname ?? hostnameFor(chatId)} (vmid ${st.ref?.vmid ?? 0})`
-      : "a per-chat Proxmox container";
-    const workDir = this.deps.settings().workDir;
-    return [
-      `- Your terminal runs on ${where}: Debian Linux with its own git checkout of this repo under ${workDir}/.`,
-      `- Edit files LOCALLY as usual. Before every terminal command Dispatch snapshots your local worktree — committed, ` +
-        `uncommitted and untracked files alike — and checks it out on the container. Never push to GitHub to get a change ` +
-        `over, and don't edit files inside the container: the next command overwrites tracked files there.`,
-      `- Ignored directories (node_modules, dist, build output) are NOT synced; the container keeps its own. A Windows-built ` +
-        `node_modules is useless on Linux, so run the install (e.g. \`pnpm install\`) in the terminal once per container, ` +
-        `and again when dependencies change.`,
-      `- There is no GitHub token on the container, by design. Do git work locally.`,
-      `- The container stops when the chat goes idle (the next command restarts it) and is destroyed when the chat is ` +
-        `deleted. Only installs and build output are lost; your code lives on the Dispatch host.`,
-    ].join("\n");
+  private async rescueRemote(ip: string, s: Settings): Promise<RescueRemote> {
+    const auth = await this.auth();
+    if (this.deps.rescueRemote) return this.deps.rescueRemote(ip, s, auth);
+    const conn = new SshConnection({
+      host: ip,
+      username: s.sshUser,
+      ...auth,
+      hostVerifier: s.templateHostKey ? pinnedHostKey([s.templateHostKey]) : trustProvisioner(),
+    });
+    await conn.connect(60_000);
+    return { ...sshRescueRemote(conn), close: () => conn.close() };
+  }
+
+  /**
+   * Something runs on the chat's container: a shell or a command remote-host
+   * holds there, a lease in flight (the lifecycle counts those itself), or
+   * the rescue. While remote-host is away nothing can run there.
+   */
+  private busy(chatId: string): boolean {
+    if (this.rescue.running(chatId)) return true;
+    const p = this.link.get();
+    if (!p) return false;
+    const ms = p.machines();
+    if (!Array.isArray(ms)) return false; // inert: revoked under us
+    return ms.some((m) => m.chatId === chatId && ((m.connected && m.shells > 0) || m.running));
+  }
+
+  /** The lifecycle is about to stop or destroy the chat's container: tell remote-host, best effort. */
+  private async detach(chatId: string, why: "stop" | "destroy" | "close"): Promise<void> {
+    if (why === "stop") return this.link.quietly(`ending chat ${chatId}'s sessions`, (p) => p.endChat(chatId));
+    if (why === "destroy") {
+      const machine = (await this.life.record(chatId))?.machine;
+      if (typeof machine === "string") await this.link.quietly(`forgetting machine ${machine}`, (p) => p.machineGone(machine));
+      else await this.link.quietly(`forgetting chat ${chatId}`, (p) => p.forgetChat(chatId));
+    }
+  }
+
+  /* --------------------------------------------- the backend's surface */
+
+  spawn(info: Parameters<ProxmoxForwarder["spawn"]>[0]): ReturnType<ProxmoxForwarder["spawn"]> {
+    return this.forwarder.spawn(info);
   }
 
   onChatIdle(e: { chatId: string }): Promise<void> {
-    return this.chats.onChatIdle(e);
+    return this.forwarder.onChatIdle(e);
   }
 
   onChatDeleted(e: { chatId: string }): Promise<void> {
-    return this.chats.onChatDeleted(e);
+    return this.forwarder.onChatDeleted(e);
   }
 
   /** This instance's id; every clone's description carries it. */
   instanceId(): Promise<string> {
-    return this.chats.instanceId();
+    return this.life.instanceId();
   }
 
   /** Called once from activate: the boot sweep, then one a minute. Never throws. */
   start(): Promise<void> {
-    return this.chats.start();
+    return this.life.start();
   }
 
   sweep(opts?: { adopt?: boolean; boot?: boolean; liveChats?: ReadonlySet<string> }): Promise<void> {
-    return this.chats.sweep(opts);
+    return this.life.sweep(opts);
   }
 
   /** Startup reconcile (core's module hook, forwarded by server.ts). */
   reconcile(e: { chats: Iterable<string | { id: string }> }): Promise<void> {
-    return this.chats.reconcile(e);
+    return this.life.reconcile(e);
   }
 
-  /** Timed shutdown (core's module hook, forwarded by server.ts). */
-  onShutdown(e: { reason: ShutdownReason; deadline?: number; signal?: AbortSignal }): Promise<void> {
-    return this.chats.onShutdown(e);
+  /** Timed shutdown (core's module hook). Uninstall: remote-host forgets this plugin's machines first. */
+  async onShutdown(e: { reason: ShutdownReason; deadline?: number; signal?: AbortSignal }): Promise<void> {
+    if (e.reason === "uninstall") await this.link.quietly("forgetting this plugin's machines", (p) => p.forgetAll());
+    return this.life.onShutdown(e);
   }
 
   dispose(): Promise<void> {
-    return this.chats.dispose();
+    return this.life.dispose();
   }
+}
+
+const PENDING = Symbol("pending");
+
+/** `p`'s value, or PENDING once `ms` passes or `signal` aborts. `p`'s rejection propagates. */
+function settleWithin<T>(p: Promise<T>, ms: number, signal?: AbortSignal): Promise<T | typeof PENDING> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => resolve(PENDING), ms);
+    signal?.addEventListener("abort", () => resolve(PENDING), { once: true });
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (err: unknown) => {
+        clearTimeout(t);
+        reject(err);
+      },
+    );
+  });
 }
 
 /**
@@ -145,7 +298,7 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
  * stopped or destroyed unless that tag (or failing it, the hostname we gave
  * it) says it is the chat's.
  */
-class ProxmoxProvider implements Provider<ContainerRef> {
+export class ProxmoxProvider implements MachineProvider<ContainerRef> {
   constructor(
     private readonly deps: BackendDeps,
     private readonly instanceId: () => Promise<string>,
@@ -186,25 +339,33 @@ class ProxmoxProvider implements Provider<ContainerRef> {
     await this.api();
   }
 
-  async bringUp(
-    chat: { chatId: string; ref?: ContainerRef; remember(ref: ContainerRef): Promise<void> },
+  /**
+   * Make sure the chat's container exists and runs, and return its address.
+   * A remembered vmid that no longer holds the chat's container is never
+   * reused: a new one is cloned. `created`: it was cloned just now, so it has
+   * no pre-0.2 checkouts to rescue.
+   */
+  async ensureUp(
+    chat: LeaseChat<ContainerRef>,
     signal: AbortSignal,
-  ): Promise<SshConnection> {
+  ): Promise<{ vmid: number; hostname: string; ip: string; created: boolean }> {
     const s = this.deps.settings();
     const api = await this.api();
     let vmid = chat.ref?.vmid ?? 0;
-    const hostname = chat.ref?.hostname ?? hostnameFor(chat.chatId);
+    const hostname = chat.ref?.hostname || hostnameFor(chat.chatId);
     let status = vmid ? await api.status(s.node, vmid) : undefined;
     // A remembered vmid whose container was destroyed behind our back may
     // since have gone to another chat (or the other Dispatch instance sharing
-    // the pool). Starting and syncing into THAT would be the worst outcome here.
+    // the pool). Starting THAT would be the worst outcome here.
     if (status && (await this.ownership(api, s, vmid, chat.chatId)) !== "ours") {
       this.log.warn(`vmid ${vmid} no longer holds chat ${chat.chatId}'s container; making a new one`);
       status = undefined;
     }
+    let created = false;
     if (!status) {
       vmid = await this.cloneFor(api, s, chat, hostname, signal);
       status = "stopped";
+      created = true;
     }
     if (status !== "running") {
       this.log.info(`starting container ${vmid} for chat ${chat.chatId}`);
@@ -212,15 +373,7 @@ class ProxmoxProvider implements Provider<ContainerRef> {
       await api.waitTask(s.node, upid, 60_000, signal);
     }
     const ip = await this.waitForIp(api, s.node, vmid, signal);
-    const auth = await this.deps.sshAuth();
-    if (!auth.privateKey && !auth.password) {
-      throw new Error("no SSH credentials: set the sshKeyPath setting, or the PROXMOX_TERMINAL_SSH_KEY / _SSH_PASSWORD secret");
-    }
-    const conn = this.deps.connect
-      ? this.deps.connect(ip, s.sshUser, auth)
-      : new SshConnection({ host: ip, username: s.sshUser, ...auth });
-    await conn.connect(60_000, signal);
-    return conn;
+    return { vmid, hostname, ip, created };
   }
 
   /** Linked-clone the template into a free vmid, size it, and remember it. */

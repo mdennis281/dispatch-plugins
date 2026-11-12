@@ -19,7 +19,10 @@ export interface Settings {
   destroyUnusedDays: number;
   sshUser: string;
   sshKeyPath: string;
+  /** Only used to rescue checkouts made before 0.2. */
   workDir: string;
+  /** The template's SSH host key (`SHA256:…`), which every clone shares. Empty: trust the Proxmox API. */
+  templateHostKey: string;
   spawnTimeoutSeconds: number;
   caCert: string;
   insecureTls: boolean;
@@ -40,6 +43,7 @@ export const DEFAULTS: Settings = {
   sshUser: "root",
   sshKeyPath: "",
   workDir: "/root/work",
+  templateHostKey: "",
   spawnTimeoutSeconds: 240,
   caCert: "",
   insecureTls: false,

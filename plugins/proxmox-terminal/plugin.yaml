@@ -2,7 +2,7 @@
 # Contract: Dispatch docs/plugins.md → "Terminal backends". Setup: README.md.
 id: proxmox-terminal
 name: Proxmox terminal
-version: 0.1.14
+version: 0.2.0
 dispatch: ">=1"
 description: >-
   Run each chat's managed terminals in its own Proxmox LXC — a linked clone of
@@ -16,6 +16,14 @@ secrets:
   - PROXMOX_TERMINAL_API_TOKEN
   - PROXMOX_TERMINAL_SSH_KEY
   - PROXMOX_TERMINAL_SSH_PASSWORD
+# remote-host runs everything ON the container (supervisor, sync, ports, MCP).
+# Optional, so the Proxmox lifecycle (idle stops, destroys, uninstall) keeps
+# running without it; terminals are refused then, never run locally.
+dependencies:
+  remote-host:
+    uses: [machines@1]
+    version: ">=0.10.0 <1"
+    optional: true
 capabilities:
   - terminals
   - secrets
