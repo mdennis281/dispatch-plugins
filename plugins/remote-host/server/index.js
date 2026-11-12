@@ -21787,6 +21787,13 @@ function runtimeFor(platform, arch, libc) {
     throw new UnsupportedMachine(`${platform} on ${arch} isn't supported: dispatch-host needs x86_64 or arm64`);
   }
 }
+function libcScript(root = "") {
+  const glibc = [`${root}/lib64/ld-linux-x86-64.so.2`, `${root}/lib/ld-linux-aarch64.so.1`].map((p) => `[ -e ${sq(p)} ]`).join(" || ");
+  return [
+    `if getconf GNU_LIBC_VERSION >/dev/null 2>&1 || ${glibc}; then echo gnu`,
+    `else m=-; for f in ${sq(root)}/lib/ld-musl-*; do [ -e "$f" ] && m=musl; done; echo "$m"; fi`
+  ].join("\n");
+}
 function rootLogin(probe, user) {
   return probe?.uid !== void 0 ? probe.uid === 0 : user === "root";
 }
@@ -21830,8 +21837,10 @@ async function ensureAgent(conn, deps) {
         `A="$R/${rel}"`,
         'if [ -x "$N" ]; then "$N" --version 2>/dev/null || echo broken; else echo none; fi',
         'if [ -x "$N" ] && [ -f "$A" ]; then "$N" "$A" version 2>/dev/null || echo broken; else echo none; fi',
-        // Last, so older lines keep their places: musl's loader is how Alpine and the like show.
-        'if [ "$(uname -s)" = Linux ]; then if ls /lib/ld-musl-* >/dev/null 2>&1; then echo musl; else echo gnu; fi; else echo -; fi'
+        // Last, so older lines keep their places: the C library, for Alpine and the like (musl).
+        `if [ "$(uname -s)" = Linux ]; then`,
+        libcScript(),
+        "else echo -; fi"
       ].join("\n")
     ),
     { timeoutMs: 3e4 }

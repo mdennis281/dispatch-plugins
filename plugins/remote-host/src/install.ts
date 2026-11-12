@@ -24,7 +24,7 @@ import {
   sq,
 } from "@dispatch-plugins/host-agent";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
-import { runtimeFor } from "./remote-platform.js";
+import { libcScript, runtimeFor } from "./remote-platform.js";
 
 /** What running a command on the machine needs. `SshConnection` is one. */
 export interface Exec {
@@ -70,8 +70,10 @@ export async function ensureAgent(
         `A="$R/${rel}"`,
         'if [ -x "$N" ]; then "$N" --version 2>/dev/null || echo broken; else echo none; fi',
         'if [ -x "$N" ] && [ -f "$A" ]; then "$N" "$A" version 2>/dev/null || echo broken; else echo none; fi',
-        // Last, so older lines keep their places: musl's loader is how Alpine and the like show.
-        'if [ "$(uname -s)" = Linux ]; then if ls /lib/ld-musl-* >/dev/null 2>&1; then echo musl; else echo gnu; fi; else echo -; fi',
+        // Last, so older lines keep their places: the C library, for Alpine and the like (musl).
+        `if [ "$(uname -s)" = Linux ]; then`,
+        libcScript(),
+        "else echo -; fi",
       ].join("\n"),
     ),
     { timeoutMs: 30_000 },

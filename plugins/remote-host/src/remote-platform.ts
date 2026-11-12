@@ -9,7 +9,7 @@
  * host-agent's platform.ts is the other side of this seam, on the machine.
  * Linux exercises both now; Windows (Phase 7) becomes one more case of each.
  */
-import { compareVersions, nodeTarball, type NodeTarball, type ProbeResult } from "@dispatch-plugins/host-agent";
+import { compareVersions, nodeTarball, sq, type NodeTarball, type ProbeResult } from "@dispatch-plugins/host-agent";
 
 /** A machine dispatch-host can't run on, and why. Reported as it is, never retried into a different failure. */
 export class UnsupportedMachine extends Error {
@@ -43,6 +43,22 @@ export function runtimeFor(platform: string, arch: string, libc?: string): NodeT
   } catch {
     throw new UnsupportedMachine(`${platform} on ${arch} isn't supported: dispatch-host needs x86_64 or arm64`);
   }
+}
+
+/**
+ * A POSIX sh snippet printing the machine's C library: `gnu`, `musl`, or `-`
+ * when it can't tell (never refused for that). glibc is looked for first, by
+ * `getconf GNU_LIBC_VERSION` or its loader: a Debian or Ubuntu with the
+ * `musl` package (musl-tools, for static Rust builds) has `/lib/ld-musl-*`
+ * too, and is no musl system. `root` is for the tests: a directory standing
+ * in for `/`.
+ */
+export function libcScript(root = ""): string {
+  const glibc = [`${root}/lib64/ld-linux-x86-64.so.2`, `${root}/lib/ld-linux-aarch64.so.1`].map((p) => `[ -e ${sq(p)} ]`).join(" || ");
+  return [
+    `if getconf GNU_LIBC_VERSION >/dev/null 2>&1 || ${glibc}; then echo gnu`,
+    `else m=-; for f in ${sq(root)}/lib/ld-musl-*; do [ -e "$f" ] && m=musl; done; echo "$m"; fi`,
+  ].join("\n");
 }
 
 /**

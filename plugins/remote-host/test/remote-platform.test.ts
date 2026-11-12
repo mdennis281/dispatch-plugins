@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import type { ProbeResult } from "@dispatch-plugins/host-agent";
 import {
   UnsupportedMachine,
@@ -6,6 +10,7 @@ import {
   elevationSetupPossible,
   gitTooOld,
   installHint,
+  libcScript,
   refusedHint,
   rootLogin,
   runtimeFor,
@@ -36,6 +41,38 @@ describe("runtimeFor", () => {
   ])("refuses %s %s %s, saying why", (platform, arch, libc, why) => {
     expect(() => runtimeFor(platform, arch, libc)).toThrow(UnsupportedMachine);
     expect(() => runtimeFor(platform, arch, libc)).toThrow(why);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("libcScript", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** Run it against a stand-in `/` holding `files`, with a `getconf` that knows GNU_LIBC_VERSION or not. */
+  function libc(files: string[], getconfKnowsGlibc: boolean): string {
+    const root = mkdtempSync(join(tmpdir(), "rh-libc-"));
+    dirs.push(root);
+    for (const f of files) {
+      mkdirSync(join(root, f, ".."), { recursive: true });
+      writeFileSync(join(root, f), "");
+    }
+    const bin = join(root, "bin-fake");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "getconf"), `#!/bin/sh\nexit ${getconfKnowsGlibc ? 0 : 1}\n`, { mode: 0o755 });
+    return spawnSync("/bin/sh", ["-c", libcScript(root)], { env: { PATH: bin }, encoding: "utf8" }).stdout.trim();
+  }
+
+  it("says gnu for glibc, even with Debian's musl package beside it", () => {
+    expect(libc(["lib/ld-musl-x86_64.so.1", "lib64/ld-linux-x86-64.so.2"], false)).toBe("gnu");
+    expect(libc(["lib/ld-musl-aarch64.so.1", "lib/ld-linux-aarch64.so.1"], false)).toBe("gnu");
+    expect(libc(["lib/ld-musl-x86_64.so.1"], true)).toBe("gnu");
+  });
+
+  it("says musl only with musl's loader and no glibc, and can't tell with neither", () => {
+    expect(libc(["lib/ld-musl-x86_64.so.1"], false)).toBe("musl");
+    expect(libc([], false)).toBe("-");
   });
 });
 
