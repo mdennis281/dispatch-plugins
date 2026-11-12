@@ -1,6 +1,6 @@
 /**
  * The commands a chat shell gets in front of its PATH: `dispatch-elevate`,
- * and `sudo`, which hands its command to it.
+ * `sudo`, which hands its command to it, and `dispatch-gui` (Tier B, gui/cli.ts).
  *
  * The agent's account has no sudo password and must never get one (design:
  * the approval gate is enforced off the machine). The machine's own `sudo`
@@ -64,6 +64,16 @@ export function sudoShim(elevate: string): string {
   ].join("\n");
 }
 
+/** `dispatch-gui`: run a command in the Mac's login session, or lease its Simulator or Safari (gui/cli.ts). */
+export function guiShim(node: string, script: string): string {
+  return [
+    "#!/bin/sh",
+    "# The Mac's login session (Tier B): dispatch-gui run|sim|safari|status. dispatch-gui help says more.",
+    `exec ${sq(node)} ${sq(script)} dispatch-gui "$@"`,
+    "",
+  ].join("\n");
+}
+
 /**
  * Write the shims into `binDir` (next to the agent build that uses them),
  * each atomically and only when its content changed: every session's owner
@@ -74,6 +84,7 @@ export function ensureShims(binDir: string, node: string, script: string): void 
   const elevate = posix.join(binDir, "dispatch-elevate");
   write(elevate, elevateShim(node, script));
   write(posix.join(binDir, "sudo"), sudoShim(elevate));
+  write(posix.join(binDir, "dispatch-gui"), guiShim(node, script));
 }
 
 function write(file: string, content: string): void {

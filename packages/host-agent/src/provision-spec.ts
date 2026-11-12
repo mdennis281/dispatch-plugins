@@ -18,7 +18,7 @@ export interface ProvisionSpec {
    * A browser to install with the prefix's own `playwright-core` (one of
    * `packages` must bring it). Into `~/.dispatch-host/browsers`, shared.
    */
-  browser?: "chromium" | "firefox";
+  browser?: "chromium" | "firefox" | "webkit";
   /** Report that browser's executable (chrome-devtools-mcp is pointed at it). */
   executable?: boolean;
 }
@@ -64,7 +64,9 @@ export function checkProvisionSpec(raw: unknown): ProvisionSpec {
   if (typeof e.bin !== "string" || e.bin.length > 200 || !e.bin.split("/").every((s) => BIN_PART.test(s))) {
     throw new Error(`not a path within the package: ${JSON.stringify(e.bin)}`);
   }
-  if (o.browser !== undefined && o.browser !== "chromium" && o.browser !== "firefox") throw new Error(`not a browser this installs: ${JSON.stringify(o.browser)}`);
+  if (o.browser !== undefined && o.browser !== "chromium" && o.browser !== "firefox" && o.browser !== "webkit") {
+    throw new Error(`not a browser this installs: ${JSON.stringify(o.browser)}`);
+  }
   if (o.executable && !o.browser) throw new Error("executable needs a browser");
   return {
     packages,

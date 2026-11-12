@@ -60,8 +60,26 @@ describe("planProcess", () => {
     expect(() => planProcess(playwright(["--browser", "webkit", "--headless"]), ctx)).toThrow(/WebKit needs a desktop session on CVX Mac/);
     expect(() => planProcess(playwright(["--browser", "chrome"]), ctx)).toThrow(/headed browser .*needs a desktop session/);
     expect(() => planProcess(devtools(["--isolated"]), ctx)).toThrow(/needs a desktop session/);
-    // With one, they would run.
-    expect(planProcess(playwright(["--browser", "chrome"]), { ...ctx, desktop: true }).provision?.browser).toBe("chromium");
+    expect(() => planProcess(devtools(["--isolated"]), { ...ctx, noDesktop: "nobody is logged in there as dispatch" })).toThrow(
+      /on CVX Mac, which it doesn't have now \(nobody is logged in there as dispatch\)/,
+    );
+  });
+
+  it("runs headed browsers and WebKit in the desktop session when there is one, and headless ones outside it", () => {
+    const desk = { ...ctx, desktop: true };
+    const headed = planProcess(playwright(["--browser", "chrome"]), desk);
+    expect(headed.desktop).toBe(true);
+    expect(headed.provision?.browser).toBe("chromium");
+    expect(headed.argv(paths)).not.toContain("--headless");
+    // WebKit even headless: it never finishes launching outside the login session.
+    const webkit = planProcess(playwright(["--browser", "webkit", "--headless"]), desk);
+    expect(webkit).toMatchObject({ desktop: true, provision: { browser: "webkit" } });
+    expect(webkit.argv(paths).slice(-3)).toEqual(["--output-dir", paths.out, "--headless"]);
+    const dt = planProcess(devtools(["--isolated"]), desk);
+    expect(dt.desktop).toBe(true);
+    expect(dt.argv(paths)).not.toContain("--headless");
+    expect(planProcess(playwright(["--headless"]), desk).desktop).toBe(false);
+    expect(planProcess(devtools(["--headless"]), desk).desktop).toBe(false);
   });
 
   it("never passes on a Dispatch-host output directory", () => {
