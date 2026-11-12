@@ -50,6 +50,13 @@ export class ProxmoxTerminalBackend implements TerminalBackend {
   readonly id = BACKEND_ID;
   readonly label = "Proxmox container";
   readonly shell = "bash" as const;
+  /**
+   * When a container can't be brought up, Dispatch refuses the terminal (with
+   * the reason) instead of running it locally. A local fallback runs Linux
+   * commands in a Windows shell against a different tree. Shipped ahead of
+   * 0.2, so every instance remembers "refuse" for `proxmox` before 0.2 exists.
+   */
+  readonly fallback = "refuse" as const;
   private readonly chats: RemoteChats<ContainerRef>;
 
   constructor(private readonly deps: BackendDeps) {
