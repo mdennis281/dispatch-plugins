@@ -67,8 +67,8 @@ export function runsOf(ctx: unknown): RunsView | undefined {
   };
 }
 
-/** This plugin's backends. They check the lock too, so between them the older run keeps it. */
-const OWN_PREFIX = "remote-host/";
+/** remote-host's own paired machines, when nothing says which backends are this plugin's. */
+const PAIRED_PREFIX = "remote-host/";
 /** How long a pull-back waits for another run in the files to end. */
 export const AFTER_WAIT_MS = 2 * 60_000;
 /** A wait this short isn't worth a notice. */
@@ -80,6 +80,13 @@ export interface CheckoutLockDeps {
   runs: RunsView;
   /** This machine's backend id: its own runs are ChatSync's per-machine lock. */
   self: string;
+  /**
+   * Whether a backend is one remote-host serves (its paired machines, and the
+   * backends of machines it runs for other plugins, `proxmox`): those check
+   * this lock too, so between them the older run keeps it. Default: the ids
+   * of paired machines.
+   */
+  mine?: (backend: string) => boolean;
   /** A location by backend id, for messages: "this computer", a machine's name. */
   where(backend: string): string;
   /** Tests: the pull-back's wait. */
@@ -103,7 +110,11 @@ export interface WaitResult {
 }
 
 export class CheckoutLock {
-  constructor(private readonly d: CheckoutLockDeps) {}
+  private readonly mine: (backend: string) => boolean;
+
+  constructor(private readonly d: CheckoutLockDeps) {
+    this.mine = d.mine ?? ((b) => b.startsWith(PAIRED_PREFIX));
+  }
 
   /**
    * Runs elsewhere that work in these files now, other than `q.runId`.
@@ -127,7 +138,7 @@ export class CheckoutLock {
       } else if (r.chatId === q.chatId) {
         // Another location's shell has its own directory there; what it shares
         // with this one is the chat's files here, which it syncs too.
-        if (!r.backend.startsWith(OWN_PREFIX)) out.push(r);
+        if (!this.mine(r.backend)) out.push(r);
         // Another of this plugin's machines can't have overlapped (the newer
         // one refused), and waiting on it after could wait on a wait.
         else if (phase === "before" && older(r, me)) out.push(r);

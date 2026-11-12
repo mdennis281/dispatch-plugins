@@ -37,6 +37,10 @@ export interface RegistryDeps {
   elevationConnect?: ElevationDeps["connect"];
   /** Tests: how long a pull-back waits for a run elsewhere in the files. */
   lockWaitMs?: number;
+  /** Whether a backend is one remote-host serves (paired, or provisioned for another plugin): the lock across locations. */
+  mine?: (backend: string) => boolean;
+  /** A location's name for a backend that isn't a paired machine (a provisioned one's label). */
+  otherLabel?: (backend: string) => string | undefined;
 }
 
 export interface Entry {
@@ -143,6 +147,7 @@ export class HostRegistry {
       ...(reservedPorts ? { reservedPorts } : {}),
       ...(runs ? { runs, where: (backend: string) => this.labelOf(backend) } : {}),
       ...(this.deps.lockWaitMs !== undefined ? { lockWaitMs: this.deps.lockWaitMs } : {}),
+      ...(this.deps.mine ? { mine: this.deps.mine } : {}),
       ...(approvals ? { approvals } : {}),
       ...(toolsOf(ctx) ? { agentTools: true } : {}),
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || undefined,
@@ -162,10 +167,20 @@ export class HostRegistry {
     ctx.log.info(`remote-host: registered ${id} (${host.label})`);
   }
 
-  /** A location's name, by backend id: one of these machines by its label, anything else by its id. */
+  /** A location's name, by backend id: one of these machines by its label, a provisioned backend by its own, anything else by its id. */
   private labelOf(backend: string): string {
+    return this.label(backend) ?? this.deps.otherLabel?.(backend) ?? backend;
+  }
+
+  /** A paired machine's label, by its backend id. */
+  label(backend: string): string | undefined {
     for (const e of this.entries.values()) if (backendId(e.host.slug) === backend) return e.host.label;
-    return backend;
+    return undefined;
+  }
+
+  /** Whether `backend` is one of the paired machines. */
+  isPaired(backend: string): boolean {
+    return this.label(backend) !== undefined;
   }
 
   get(slug: string): Entry | undefined {

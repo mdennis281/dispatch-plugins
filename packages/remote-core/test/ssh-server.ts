@@ -42,6 +42,8 @@ export interface TestSshServerOptions {
   maxSessions?: number;
   /** The address to listen on. Default 127.0.0.1; `::1` plays a machine reachable over IPv6 only. */
   listenHost?: string;
+  /** Its host key (an OpenSSH private key). Default: a new one. Two servers given one play linked clones of one template. */
+  hostKey?: string;
 }
 
 export interface TestSshServer {
@@ -59,7 +61,7 @@ export interface TestSshServer {
 
 export async function startTestSshServer(opts: TestSshServerOptions = {}): Promise<TestSshServer> {
   // Not ssh2's generateKeyPairSync: one key in 256 it makes is malformed (see keys.ts).
-  const hostKey = { private: generateKeyPair("test-host").privateKey };
+  const hostKey = { private: opts.hostKey ?? generateKeyPair("test-host").privateKey };
   const parsed = utils.parseKey(hostKey.private);
   if (parsed instanceof Error) throw parsed;
   const attempts: AuthAttempt[] = [];

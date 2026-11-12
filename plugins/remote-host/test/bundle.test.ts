@@ -82,6 +82,8 @@ describe("the manifest", () => {
     expect(optionalCapabilities).toEqual(["approvals", "runner", "tools"]);
     expect(manifestSecrets).toEqual(["REMOTE_HOST_KEY_*", "REMOTE_HOST_ELEVATE_KEY_*"]);
     expect(manifest).toMatch(/^id: remote-host$/m);
+    // What other plugins may use: machines@1 (proxmox-terminal's containers), and nothing else.
+    expect(manifest).toMatch(/^provides:\n {2}machines: \[1\]\n(?! )/m);
     const pkg = JSON.parse(readFileSync(`${dir}/package.json`, "utf8")) as { version: string };
     expect(manifest).toContain(`version: ${pkg.version}`);
   });
@@ -101,6 +103,7 @@ describe("the manifest", () => {
       secrets: manifestSecrets,
       capabilities,
       optionalCapabilities,
+      provides: { machines: [1] },
     });
     expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
     expect(pluginSecretAllowed(manifestSecrets, "REMOTE_HOST_KEY_CVX_MAC")).toBe(true);

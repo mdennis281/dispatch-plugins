@@ -147,6 +147,33 @@ A Linux machine pairs like a Mac: its own sshd, an account of its own for Dispat
 - **Homebrew** is mentioned to the agent on Linux only when the login can install with it, and never for root, which
   brew refuses.
 
+## Machines for other plugins
+
+Another plugin that makes a machine per chat (proxmox-terminal's containers) can have remote-host run what happens on
+it: the chat's shells, the synced checkout, forwarded ports, MCP servers and the agent's tools, the same as on a paired
+machine. It asks through Dispatch's plugin dependencies (`machines@1`; the types are in
+`packages/remote-host-api`). What is different:
+
+- **The other plugin owns the machine.** It registers the terminal location under its own name (`proxmox`), starts the
+  machine when a terminal needs it, stops it when the chat goes idle, and destroys it when the chat is deleted.
+  remote-host never starts one itself: the agent's tools say a stopped machine is stopped.
+- **Each connect is made fresh.** remote-host dials it only when something needs it, at the addresses the plugin gives
+  for that connect, and remembers none: a stopped container's address goes to the next one.
+- **Its identity is checked before anything runs.** Clones of one template share a host key, so the right key at an
+  old address may be another chat's container. On a machine's first connect remote-host writes a token there
+  (`~/.dispatch-host/incarnation`), and every later connect must read it back (and the hostname, when the plugin gives
+  one). A machine that doesn't is refused at once, and nothing runs on it.
+- **Its key is the other plugin's.** It is asked for on every connect and goes straight into that connection: never
+  stored, logged or shown.
+- **It may be logged in as root**, with no approval-gated root: the shell is root already, and the agent is told so.
+- **A machine made again** (destroyed and re-created for the chat) starts afresh: your files are sent to it, nothing
+  is brought back or deleted here, and the next command says that what was installed or built on the old one is gone.
+- **Only its own.** A plugin reaches only the machines it made: never a paired one, another plugin's, or remote-host's
+  keys. It needs Dispatch's `terminals` permission. What remote-host keeps for it goes when the plugin is uninstalled,
+  or after it has been gone for three restarts.
+
+On a Dispatch without plugin dependencies none of this is offered, and remote-host works as before.
+
 ## Root, with your approval
 
 The account Dispatch logs in as has no sudo password, and never gets one. Instead, `sudo <command>` (or `dispatch-elevate <command>`) in a chat's terminal there asks **you**:

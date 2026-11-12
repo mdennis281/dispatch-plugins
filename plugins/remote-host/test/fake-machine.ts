@@ -68,6 +68,12 @@ export class FakeMachine {
   tcp?: (host: string, port: number) => Promise<ClientChannel>;
   /** Holds a connect to an address until it resolves. */
   hold?: (address: string) => Promise<void>;
+  /** What `hostname` says there. */
+  hostname = "fake-host";
+  /** `~/.dispatch-host/incarnation` there (a provisioned machine's token): absent until written. */
+  incarnation?: string;
+  /** Its host key, when a test pins one: a connect whose verifier refuses it fails as ssh2's does. */
+  hostKey?: Buffer;
   readonly addresses: Record<string, AddressBehaviour>;
   readonly targets: SshTarget[] = [];
   readonly commands: string[] = [];
@@ -102,6 +108,16 @@ export class FakeMachine {
       this.stdin.push({ command, data });
     }
     const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "" });
+    if (command.includes("incarnation-none")) {
+      return ok(`host=${this.hostname}\n${this.incarnation !== undefined ? `incarnation=${this.incarnation}` : "incarnation-none"}\n`);
+    }
+    if (command.includes("set -C")) {
+      if (this.incarnation !== undefined) return { code: 1, stdout: "", stderr: "cannot overwrite existing file\n" };
+      // The token as the script quotes it, inside the script's own quoting: '\''<machine> <token>'\''.
+      const m = command.match(/'\\''(\S+) ([0-9a-f]{32})'\\''/);
+      this.incarnation = m ? `${m[1]} ${m[2]}` : "?";
+      return ok("");
+    }
     if (command.includes("uname -s")) {
       const u = this.uname;
       return ok(`/Users/dispatch\n${u.platform}\n${u.arch}\n${this.node ?? "none"}\n${this.node && this.agent ? this.agent : "none"}\n${u.libc ? `${u.libc}\n` : ""}`);
@@ -179,6 +195,9 @@ export class FakeConn extends EventEmitter implements LinkConnection {
     if (b === "refused") throw new Error(`connect ECONNREFUSED ${this.target.host}:22`);
     if (b === "timeout") throw new Error("Timed out while waiting for handshake");
     if (b === "bad-key") throw new Error("All configured authentication methods failed");
+    if (this.m.hostKey && this.target.hostVerifier && !(await this.target.hostVerifier(this.m.hostKey))) {
+      throw new Error("Host denied (verification failed)");
+    }
     this.isOpen = true;
   }
 

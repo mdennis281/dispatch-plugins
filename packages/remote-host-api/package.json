@@ -1,0 +1,21 @@
+{
+  "name": "@dispatch-plugins/remote-host-api",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "The types of remote-host's `machines@1` export, for plugins that provision machines and have remote-host run what happens on them. Types and one inert constant: import it with `import type`, never at runtime.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@dispatch/plugin-sdk": "link:../../.dispatch-sdk",
+    "@types/node": "^26.1.0",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT"
+}

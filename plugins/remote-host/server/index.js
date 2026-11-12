@@ -21917,21 +21917,139 @@ const SESSIONS_PER_CONNECTION = 8;
 const CONTROL_EXECS = 6;
 const KEEPALIVE = { intervalMs: 5e3, countMax: 3 };
 const LOW_DISK_BYTES = 5 * 1024 ** 3;
-class HostLink {
-  constructor(host, deps) {
-    this.host = host;
-    this.deps = deps;
-    this.t = { ...DEFAULT_TIMING, ...deps.timing };
-    this.now = deps.now ?? Date.now;
-  }
+class LinkBase {
   linked;
-  connecting;
-  /** Bumped whenever how to reach the machine changes. A connect from an older generation is thrown away. */
-  gen = 0;
   pool = [];
   adding;
   execs = 0;
   execWaiting = [];
+  disposed = false;
+  now;
+  constructor(now) {
+    this.now = now ?? Date.now;
+  }
+  get paths() {
+    return this.linked?.paths;
+  }
+  /** Whether a verified connection is up right now. */
+  get connected() {
+    return !!this.linked?.conn.isOpen;
+  }
+  /** How many connections carry shells right now (for tests and the log). */
+  get sessionConnections() {
+    return this.pool.length;
+  }
+  /**
+   * A channel running `command` for a shell, on a connection with room for it
+   * (opened if none has). The channel stays open for the shell's life.
+   */
+  async openSession(command2, signal) {
+    await this.ready(signal);
+    const gen = this.generation();
+    for (; ; ) {
+      if (signal?.aborted) throw new Error("cancelled");
+      const slot = this.pool.find((p) => p.conn.isOpen && p.open < SESSIONS_PER_CONNECTION);
+      if (!slot) {
+        this.adding ??= this.addSessionConnection().finally(() => {
+          this.adding = void 0;
+        });
+        await withAbort(this.adding, signal);
+        continue;
+      }
+      if (gen !== this.generation()) throw new Error("the machine's settings changed; try again");
+      slot.open++;
+      slot.idleSince = void 0;
+      let ch;
+      try {
+        ch = await slot.conn.channel(command2);
+      } catch (err) {
+        this.release(slot);
+        throw err;
+      }
+      ch.on("close", () => this.release(slot));
+      return ch;
+    }
+  }
+  /**
+   * Run a command on the control connection. At most {@link CONTROL_EXECS} run
+   * at once, the rest wait their turn: a burst (a dozen spawns each making
+   * its directory, kills after a drop) must not hit sshd's `MaxSessions`.
+   */
+  async exec(command2, opts = {}) {
+    await this.takeExecSlot();
+    try {
+      const { conn } = await this.ready();
+      return await conn.exec(command2, opts);
+    } finally {
+      this.execs--;
+      this.execWaiting.shift()?.();
+    }
+  }
+  /**
+   * A TCP connection to `host:port` as the machine sees it, over the control
+   * connection as it is NOW: a forward made before a reconnect keeps working
+   * after it. Rejects AT ONCE while the machine is offline: it never starts a
+   * connect, so a browser retrying a forwarded port can't skip the backoff
+   * (the link's own timer reconnects).
+   */
+  async tcp(host, port) {
+    const l = this.linked;
+    if (!l?.conn.isOpen) throw new Error(`${this.name()} is not connected`);
+    return l.conn.tcp(host, port);
+  }
+  /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
+  async agent(args, timeoutMs = 3e4) {
+    const { paths } = await this.ready();
+    const r = await this.exec(agentCommand(paths, args), { timeoutMs });
+    if (r.code !== 0) throw new Error(`dispatch-host ${args[0]} exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
+    return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "null");
+  }
+  async takeExecSlot() {
+    while (this.execs >= CONTROL_EXECS) await new Promise((r) => this.execWaiting.push(r));
+    this.execs++;
+  }
+  async addSessionConnection() {
+    const linked = await this.ready();
+    const gen = this.generation();
+    const conn = await this.dialAgain(linked);
+    const entry = { conn, open: 0, idleSince: this.now() };
+    conn.on("close", () => {
+      this.pool = this.pool.filter((p) => p !== entry);
+    });
+    if (this.disposed || gen !== this.generation()) {
+      conn.close();
+      throw new Error(this.disposed ? "the plugin is shutting down" : "the machine's settings changed; try again");
+    }
+    this.pool.push(entry);
+    return entry;
+  }
+  release(slot) {
+    slot.open = Math.max(0, slot.open - 1);
+    if (slot.open === 0) slot.idleSince = this.now();
+  }
+  /** Close the extra connections that have carried no shell for `idleMs`. */
+  closeIdle(idleMs) {
+    const now = this.now();
+    for (const p of this.pool) {
+      if (p.open === 0 && p.idleSince !== void 0 && now - p.idleSince >= idleMs) p.conn.close();
+    }
+  }
+  closePool() {
+    const pool = this.pool;
+    this.pool = [];
+    for (const p of pool) p.conn.close();
+  }
+}
+class HostLink extends LinkBase {
+  constructor(host, deps) {
+    super(deps.now);
+    this.host = host;
+    this.deps = deps;
+    this.t = { ...DEFAULT_TIMING, ...deps.timing };
+  }
+  connecting;
+  /** Bumped whenever how to reach the machine changes. A connect from an older generation is thrown away. */
+  gen = 0;
   timer;
   failures = 0;
   nextAttemptAt = 0;
@@ -21942,11 +22060,9 @@ class HostLink {
   lastSweepAt = 0;
   busy = false;
   gcRunning = false;
-  disposed = false;
   memory = {};
   current = { state: "degraded", detail: CONNECTING };
   t;
-  now;
   get status() {
     return this.current;
   }
@@ -21957,19 +22073,8 @@ class HostLink {
   get address() {
     return this.linked?.address ?? this.memory.lastAddress;
   }
-  get paths() {
-    return this.linked?.paths;
-  }
-  /** Whether a verified connection is up right now. */
-  get connected() {
-    return !!this.linked?.conn.isOpen;
-  }
   get config() {
     return this.host;
-  }
-  /** How many connections carry shells right now (for tests and the log). */
-  get sessionConnections() {
-    return this.pool.length;
   }
   /** Report "connecting", then connect in the background and keep the link up. */
   start() {
@@ -22023,75 +22128,6 @@ class HostLink {
     if (now - lastContact <= this.t.recentContactMs) return void 0;
     this.nextAttemptAt = Math.min(this.nextAttemptAt, now + this.t.nudgeMs);
     return new Error(`it is offline (${this.current.detail ?? "no answer"}); Dispatch keeps trying to reach it`);
-  }
-  /**
-   * A channel running `command` for a shell, on a connection with room for it
-   * (opened if none has). The channel stays open for the shell's life.
-   */
-  async openSession(command2, signal) {
-    await this.ready(signal);
-    const gen = this.gen;
-    for (; ; ) {
-      if (signal?.aborted) throw new Error("cancelled");
-      const slot = this.pool.find((p) => p.conn.isOpen && p.open < SESSIONS_PER_CONNECTION);
-      if (!slot) {
-        this.adding ??= this.addSessionConnection().finally(() => {
-          this.adding = void 0;
-        });
-        await withAbort(this.adding, signal);
-        continue;
-      }
-      if (gen !== this.gen) throw new Error("the machine's settings changed; try again");
-      slot.open++;
-      slot.idleSince = void 0;
-      let ch;
-      try {
-        ch = await slot.conn.channel(command2);
-      } catch (err) {
-        this.release(slot);
-        throw err;
-      }
-      ch.on("close", () => this.release(slot));
-      return ch;
-    }
-  }
-  /**
-   * Run a command on the control connection. At most {@link CONTROL_EXECS} run
-   * at once, the rest wait their turn: a burst (a dozen spawns each making
-   * its directory, kills after a drop) must not hit sshd's `MaxSessions`.
-   */
-  async exec(command2, opts = {}) {
-    await this.takeExecSlot();
-    try {
-      const { conn } = await this.ready();
-      return await conn.exec(command2, opts);
-    } finally {
-      this.execs--;
-      this.execWaiting.shift()?.();
-    }
-  }
-  /**
-   * A TCP connection to `host:port` as the machine sees it, over the control
-   * connection as it is NOW: a forward made before a reconnect keeps working
-   * after it. Rejects AT ONCE while the machine is offline: it never starts a
-   * connect, so a browser retrying a forwarded port can't skip the backoff
-   * (the link's own timer reconnects).
-   */
-  async tcp(host, port) {
-    const l = this.linked;
-    if (!l?.conn.isOpen) throw new Error(`${this.host.label} is not connected`);
-    return l.conn.tcp(host, port);
-  }
-  /** Run a dispatch-host query command (`hello`, `list`, `kill` …) and parse its one line of JSON. */
-  async agent(args, timeoutMs = 3e4) {
-    const { paths } = await this.ready();
-    const r = await this.exec(agentCommand(paths, args), { timeoutMs });
-    if (r.code !== 0) throw new Error(`dispatch-host ${args[0]} exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
-    return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "null");
-  }
-  async takeExecSlot() {
-    while (this.execs >= CONTROL_EXECS) await new Promise((r) => this.execWaiting.push(r));
-    this.execs++;
   }
   /**
    * For a human pressing "Check": probe a live link without disturbing its
@@ -22232,9 +22268,13 @@ class HostLink {
     const reaped = [...swept?.reaped ?? [], ...swept?.deadMan ?? []];
     if (reaped.length) this.deps.log.info(`remote-host ${this.host.slug}: swept ${reaped.length} orphaned session(s)`);
   }
-  async addSessionConnection() {
-    const linked = await this.ready();
-    const gen = this.gen;
+  generation() {
+    return this.gen;
+  }
+  name() {
+    return this.host.label;
+  }
+  async dialAgain(linked) {
     const key2 = await this.deps.privateKey();
     if (!key2) throw new Error(`no key: the ${keySecretName(this.host.slug)} secret is missing`);
     const conn = this.make(this.target(linked.address, key2));
@@ -22244,25 +22284,7 @@ class HostLink {
       conn.close();
       throw new Error(`could not open another connection for shells: ${describeConnectError(err, this.memory.probe?.platform)}`);
     }
-    const entry = { conn, open: 0, idleSince: this.now() };
-    conn.on("close", () => {
-      this.pool = this.pool.filter((p) => p !== entry);
-    });
-    if (this.disposed || gen !== this.gen) {
-      conn.close();
-      throw new Error(this.disposed ? "the plugin is shutting down" : "the machine's settings changed; try again");
-    }
-    this.pool.push(entry);
-    return entry;
-  }
-  release(slot) {
-    slot.open = Math.max(0, slot.open - 1);
-    if (slot.open === 0) slot.idleSince = this.now();
-  }
-  closePool() {
-    const pool = this.pool;
-    this.pool = [];
-    for (const p of pool) p.conn.close();
+    return conn;
   }
   closed(conn) {
     if (this.linked?.conn !== conn) return;
@@ -22304,9 +22326,7 @@ class HostLink {
     this.busy = true;
     try {
       const now = this.now();
-      for (const p of this.pool) {
-        if (p.open === 0 && p.idleSince !== void 0 && now - p.idleSince >= this.t.idleSessionConnectionMs) p.conn.close();
-      }
+      this.closeIdle(this.t.idleSessionConnectionMs);
       if (!this.linked?.conn.isOpen) {
         if (!this.connecting && now >= this.nextAttemptAt) await this.attempt().catch(() => {
         });
@@ -22833,6 +22853,13 @@ async function removeElevation(el) {
     if (/isn't set up/.test(errText$1(err)) && !(err instanceof ElevationLoginError)) return { there: "not-set-up" };
     if (err instanceof ElevationLoginError) return { there: err.kind === "refused" ? "refused" : "unreachable", detail: errText$1(err) };
     return { there: "failed", detail: errText$1(err) };
+  }
+}
+class MachinesError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+    this.name = "MachinesError";
   }
 }
 const SCAN_MAX = 4 * 1024 * 1024;
@@ -25360,14 +25387,16 @@ function runsOf(ctx) {
     ...typeof view.onRun === "function" ? { onRun: (fn) => view.onRun(fn) } : {}
   };
 }
-const OWN_PREFIX = "remote-host/";
+const PAIRED_PREFIX = "remote-host/";
 const AFTER_WAIT_MS = 2 * 6e4;
 const WAIT_NOTICE_MS = 1e3;
 const POLL_MS = 500;
 class CheckoutLock {
   constructor(d) {
     this.d = d;
+    this.mine = d.mine ?? ((b) => b.startsWith(PAIRED_PREFIX));
   }
+  mine;
   /**
    * Runs elsewhere that work in these files now, other than `q.runId`.
    * `before`: what refuses a command here. `after`: what a pull-back waits for.
@@ -25386,7 +25415,7 @@ class CheckoutLock {
       if (r.backend === "local") {
         if (await inFiles(q.root, r.cwd)) out.push(r);
       } else if (r.chatId === q.chatId) {
-        if (!r.backend.startsWith(OWN_PREFIX)) out.push(r);
+        if (!this.mine(r.backend)) out.push(r);
         else if (phase === "before" && older(r, me)) out.push(r);
       }
     }
@@ -25588,6 +25617,8 @@ class MachineEngine {
    * timeout, and the agent's next call then waits for the same one.
    */
   provisions = /* @__PURE__ */ new Map();
+  /** Foreground runs each shell has in flight (runBegin until its runEnd), by shell: for {@link running}. */
+  runsInFlight = /* @__PURE__ */ new Map();
   async spawn(info) {
     const chatId = assertId("chat", info.chatId);
     const linked = await this.deps.link.ready(info.signal);
@@ -25612,13 +25643,17 @@ class MachineEngine {
     sh.on("elevate", (req) => void this.elevation.handle(req, { chatId, terminal: info.name }, sh));
     sh.on("elevateCancel", (id) => this.elevation.cancel(id));
     sh.on("exit", () => {
+      this.runsInFlight.delete(key2);
       this.elevation.cancelShell(sh);
       if (this.shells.get(key2) === sh) this.shells.delete(key2);
       this.syncs.get(chatId)?.releaseTerminal(info.name);
       if (!this.chatsWithShells().has(chatId)) this.ports.dropChat(chatId);
     });
     this.ports.wake();
-    sh.on("runEnd", (m) => this.syncs.get(chatId)?.runEnded(m.runId));
+    sh.on("runEnd", (m) => {
+      this.runsInFlight.get(key2)?.delete(m.runId);
+      this.syncs.get(chatId)?.runEnded(m.runId);
+    });
     return sh;
   }
   /** {@link place}'s paths, with nothing made or set up: where `localCwd` is there. */
@@ -25796,7 +25831,7 @@ class MachineEngine {
     return join(this.mcpLocalHostDir(), assertId("chat", chatId));
   }
   mcpLocalHostDir() {
-    return join(this.deps.mcpLocalRoot ?? join(tmpdir(), "dispatch-remote-host"), this.deps.instanceId, this.spec.key);
+    return mcpLocalHostDir(this.deps.mcpLocalRoot, this.deps.instanceId, this.spec.key);
   }
   /**
    * End every shell this backend holds, KILL down each channel, and wait
@@ -25985,12 +26020,44 @@ class MachineEngine {
   async beforeRun(info) {
     const sync = this.syncs.get(info.chatId);
     const r = sync ? await sync.beforeRun(info) : {};
-    if (!r.refuse) this.shells.get(shellKey(info.chatId, info.terminal))?.runBegin(info.runId, info.background);
+    if (!r.refuse) {
+      const key2 = shellKey(info.chatId, info.terminal);
+      const sh = this.shells.get(key2);
+      sh?.runBegin(info.runId, info.background);
+      if (sh && !info.background) {
+        let runs = this.runsInFlight.get(key2);
+        if (!runs) this.runsInFlight.set(key2, runs = /* @__PURE__ */ new Set());
+        runs.add(info.runId);
+      }
+    }
     return r;
   }
   /** Bring back what the command changed there. */
   async afterRun(info) {
     return await this.syncs.get(info.chatId)?.afterRun(info) ?? {};
+  }
+  /** Whether a command runs in one of the chat's shells here, or one of its MCP servers is up. */
+  running(chatId) {
+    for (const [k, runs] of this.runsInFlight) if (runs.size && k.slice(0, k.indexOf("\0")) === chatId) return true;
+    for (const k of this.processes.keys()) if (k.slice(0, k.indexOf("\0")) === chatId) return true;
+    return false;
+  }
+  /**
+   * Forget a chat HERE only, never contacting the machine: its shells and
+   * servers end (their channels close), and its records, sync state and
+   * local copies go. For a provisioned machine, whose provisioner destroys
+   * the machine itself.
+   */
+  async forgetLocal(chatId) {
+    if (!ID.test(chatId)) return;
+    this.endShells(chatId);
+    this.syncs.delete(chatId);
+    this.served.delete(chatId);
+    this.live?.delete(chatId);
+    await rm(this.mcpLocalDir(chatId), { recursive: true, force: true }).catch(() => {
+    });
+    await this.deps.kv?.delete(this.servedKey(chatId));
+    await this.deps.kv?.delete(syncKey(this.spec.kvPrefix, chatId));
   }
   chatSync(chatId, root) {
     this.remote ??= linkRemote(this.deps.link);
@@ -26014,33 +26081,54 @@ class MachineEngine {
     return new CheckoutLock({
       runs,
       self: this.spec.backendId,
+      ...this.deps.mine ? { mine: this.deps.mine } : {},
       where: (backend) => backend === "local" ? "this computer" : this.deps.where?.(backend) ?? backend,
       ...this.deps.lockWaitMs !== void 0 ? { afterWaitMs: this.deps.lockWaitMs } : {}
     });
   }
   agentNote(info) {
     const host = this.spec.host();
-    const probe = this.deps.link.probe;
     const paths = this.deps.link.paths;
-    const where = paths ? chatDir(paths, this.deps.instanceId, info.chatId) : `~/.dispatch-host/…/chats/${info.chatId}`;
-    return [
-      `- This terminal runs on ${host.label}${describe$1(probe)}, over SSH as \`${host.user}\`, under dispatch-host. A dropped connection pauses the command and picks it up again; it is not restarted.`,
-      `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, with PATH and locale from the login shell. On it: ${tools(probe)}.`,
-      ...probe?.platform === "darwin" ? [xcodeNote(probe)] : [],
-      ...probe?.brew && brewUsable(probe, host.user) ? [brewNote(probe.brew)] : [],
-      rootNote(host.label, this.elevation.state, probe?.platform === "darwin"),
-      `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked files too, but not ignored ones) is copied to this chat's own checkout there, under ${where}, and the shell starts at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB aren't sent.`,
-      `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${host.slug}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command; one that timed out holds every terminal until it ends (Ctrl-C it). Likewise while a terminal on this computer (or this chat's terminal on another machine) runs a command in the same files: a command in this terminal is refused, so run them one after the other, not side by side. Outside a git repository nothing is synced.`,
-      `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started from this chat's terminals; nothing else on the machine is.`,
-      mcpNote(host.label, this.mcpLocalDir(info.chatId)),
-      ...this.deps.agentTools ? [
-        `- To bring here what the sync doesn't (build output, an .xcresult, a screenshot, a test report, a file outside the checkout), call remote-host's \`remote_fetch\` tool with its path there; it says where the copy is. Its \`machine_status\` tool says what ${host.label} is and what this chat has there, without running a command.`
-      ] : [],
-      `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its checkout there.`,
-      `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
-      `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you started (Ctrl-C the terminal, \`kill %1\`).`
-    ].join("\n");
+    return machineNote({
+      label: host.label,
+      user: host.user,
+      key: this.spec.key,
+      probe: this.deps.link.probe,
+      where: paths ? chatDir(paths, this.deps.instanceId, info.chatId) : `~/.dispatch-host/…/chats/${info.chatId}`,
+      elevation: this.elevation.state,
+      mcpLocalDir: this.mcpLocalDir(info.chatId),
+      agentTools: !!this.deps.agentTools,
+      provisioned: !!this.spec.provisioned
+    });
   }
+}
+function mcpLocalHostDir(root, instanceId, key2) {
+  return join(root ?? join(tmpdir(), "dispatch-remote-host"), instanceId, key2);
+}
+function machineNote(n) {
+  const { label, probe } = n;
+  const root = !n.provisioned ? rootNote(label, n.elevation, probe?.platform === "darwin") : n.elevation === "root" || n.user === "root" ? rootNote(label, "root", false) : n.user ? `- Root: nothing runs as root on ${label}: the login isn't root, and root with approval is only for paired machines. If something truly needs root, tell the user what and why.` : `- Root: if the login on ${label} is root, everything you run there already runs as root (no sudo needed); otherwise nothing can, as root with approval is only for paired machines.`;
+  return [
+    `- This terminal runs on ${label}${describe$1(probe)}, over SSH${n.user ? ` as \`${n.user}\`` : ""}, under dispatch-host. A dropped connection pauses the command and picks it up again; it is not restarted.`,
+    `- The shell is the machine's \`/bin/bash\`${probe?.platform === "darwin" ? " (version 3.2 on macOS: no `declare -A`, no `${x,,}`)" : ""}, with PATH and locale from the login shell. On it: ${tools(probe)}.`,
+    ...probe?.platform === "darwin" ? [xcodeNote(probe)] : [],
+    ...probe?.brew && n.user && brewUsable(probe, n.user) ? [brewNote(probe.brew)] : [],
+    root,
+    `- Your files sync with this machine around every command. Before it, your worktree as it is (uncommitted and untracked files too, but not ignored ones) is copied to this chat's own checkout there, under ${n.where}, and the shell starts at the matching place in it. After it, files the command changed there come back here. Ignored files (node_modules, build output) are NOT synced: install and build there. Untracked files over ${Math.round(DEFAULT_CAP_BYTES / 1024 ** 2)} MB aren't sent.`,
+    `- If a file changed both there and here, the next command is refused until you settle it: the machine's version is saved beside yours as \`<file>.from-${n.key}\`. While one terminal of this chat runs a command there, the others are refused, so files never change under a running command; one that timed out holds every terminal until it ends (Ctrl-C it). Likewise while a terminal on this computer (or this chat's terminal on another machine) runs a command in the same files: a command in this terminal is refused, so run them one after the other, not side by side. Outside a git repository nothing is synced.`,
+    `- A server you start in this terminal there (a dev server, say) is forwarded to this computer while the terminal lives: on the same port when it is free here and not one Dispatch keeps for itself (4318, 4319 and the like), else on another, which the terminal result and Ports & processes give (\`here:\`). Open that URL from this computer, never the machine's address. Only listeners on its loopback or on all interfaces are forwarded, and only those started from this chat's terminals; nothing else on the machine is.`,
+    mcpNote(label, n.mcpLocalDir),
+    ...n.agentTools ? [
+      `- To bring here what the sync doesn't (build output, an .xcresult, a screenshot, a test report, a file outside the checkout), call remote-host's \`remote_fetch\` tool with its path there; it says where the copy is. Its \`machine_status\` tool says what ${label} is and what this chat has there, without running a command.`
+    ] : [],
+    ...n.provisioned ? [] : [
+      `- When this chat goes idle its shells there end, and what they were running with them; deleting the chat deletes its checkout there.`
+    ],
+    `- Only the terminal tool runs there. Your own Bash, file tools and git still act on THIS computer; commit here, not there.`,
+    ...n.provisioned ? [] : [
+      `- Other chats, and another Dispatch, may share this machine. Never kill processes by name or by port: stop what you started (Ctrl-C the terminal, \`kill %1\`).`
+    ]
+  ].join("\n");
 }
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const ORPHAN_GRACE_MS = 10 * 6e4;
@@ -26151,6 +26239,776 @@ function tools(probe) {
   const list2 = [has("git", t.git), has("node", t.node), has("pnpm", t.pnpm)];
   if (probe.platform === "darwin") list2.push(has("Xcode", t.xcodebuild));
   return list2.join(", ");
+}
+const INCARNATION_FILE = ".dispatch-host/incarnation";
+class ProvisionedLink extends LinkBase {
+  constructor(machine, deps) {
+    super(deps.now);
+    this.machine = machine;
+    this.deps = deps;
+    this.t = { ...DEFAULT_TIMING, ...deps.timing };
+  }
+  /** A lease the next connect uses instead of asking again (the spawn that just provisioned). */
+  fresh;
+  /** The lease the live connection came from: extra connections for shells use it too. */
+  current;
+  connecting;
+  gen = 0;
+  lastProbe;
+  lastAddress;
+  timer;
+  lastHelloAt = 0;
+  busy = false;
+  t;
+  get probe() {
+    return this.lastProbe;
+  }
+  get address() {
+    return this.linked?.address ?? this.lastAddress;
+  }
+  /** A lease just provisioned for this machine: the next connect uses it. */
+  use(lease) {
+    this.fresh = lease;
+  }
+  ready(signal) {
+    if (this.linked?.conn.isOpen) return Promise.resolve(this.linked);
+    if (this.disposed) return Promise.reject(new Error(`${this.deps.label}: the connection was closed`));
+    this.connecting ??= this.connect().finally(() => {
+      this.connecting = void 0;
+    });
+    return withAbort(this.connecting, signal);
+  }
+  /** End the connections (the chat went idle). The next thing that needs the machine provisions and dials again. */
+  close() {
+    this.gen++;
+    const l = this.linked;
+    this.linked = void 0;
+    l?.conn.close();
+    this.closePool();
+  }
+  dispose() {
+    this.disposed = true;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = void 0;
+    this.close();
+  }
+  generation() {
+    return this.gen;
+  }
+  name() {
+    return this.deps.label;
+  }
+  async dialAgain(linked) {
+    const lease = this.current;
+    if (!lease) throw new Error(`${this.deps.label} is not connected`);
+    const conn = this.make(this.target(linked.address, lease, await credentials(lease)));
+    try {
+      await conn.connectOnce();
+    } catch (err) {
+      conn.close();
+      throw new Error(`could not open another connection for shells: ${describeConnectError(err, this.lastProbe?.platform)}`);
+    }
+    return conn;
+  }
+  async connect() {
+    const lease = this.fresh ?? await this.deps.provision();
+    this.fresh = void 0;
+    if (lease.machine !== this.machine) {
+      throw new Error(`${this.deps.label}: this chat's machine was made again, so its terminals there are gone; open the terminal again`);
+    }
+    const gen = this.gen;
+    const misses = [];
+    const wrong = [];
+    let keyMismatches = 0;
+    for (const address of lease.addresses) {
+      if (this.disposed) break;
+      const conn = this.make(this.target(address, lease, await credentials(lease)));
+      try {
+        await conn.connectOnce();
+      } catch (err) {
+        conn.close();
+        const why = describeConnectError(err, this.lastProbe?.platform);
+        if (/host denied/i.test(errText$1(err))) keyMismatches++;
+        misses.push(`${address}: ${why}`);
+        continue;
+      }
+      try {
+        return await this.verify(conn, address, lease, gen);
+      } catch (err) {
+        conn.close();
+        if (err instanceof MachinesError && err.code === "wrong-machine") {
+          wrong.push(`${address}: ${err.message}`);
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (this.disposed) throw new Error(`${this.deps.label}: the connection was closed`);
+    if (wrong.length) {
+      throw new MachinesError("wrong-machine", `${this.deps.label}: another machine answered (${wrong.join("; ")}); nothing was run there`);
+    }
+    if (keyMismatches && keyMismatches === misses.length) {
+      throw new MachinesError("host-key-mismatch", `${this.deps.label}: ${misses.join("; ")}`);
+    }
+    throw new MachinesError("unreachable", `${this.deps.label} can't be reached: ${misses.join("; ") || "no address to try"}`);
+  }
+  /** Is this the machine, and is dispatch-host ready on it? Nothing runs there before the first answer is yes. */
+  async verify(conn, address, lease, gen) {
+    await this.checkIdentity(conn, lease);
+    const { paths, installed } = await ensureAgent(conn, { agent: this.deps.agent, runtime: this.deps.runtime });
+    if (installed.length) this.deps.log.info(`remote-host ${this.deps.label} ${this.machine}: installed ${installed.join(", ")}`);
+    const run = async (args) => {
+      const r = await conn.exec(agentCommand(paths, args), { timeoutMs: 6e4 });
+      if (r.code !== 0) throw new Error(`dispatch-host ${args[0]} exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
+      return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "null");
+    };
+    await run(["sweep", "--instance", this.deps.instanceId]);
+    await run(["hello", "--instance", this.deps.instanceId]);
+    const probe = await run(["probe"]);
+    if (this.disposed || gen !== this.gen) {
+      conn.close();
+      throw new Error(`${this.deps.label}: the connection was closed while connecting`);
+    }
+    const linked = { conn, paths, address };
+    this.linked = linked;
+    this.current = lease;
+    this.lastAddress = address;
+    this.lastProbe = probe;
+    this.lastHelloAt = this.now();
+    conn.on("close", () => {
+      if (this.linked?.conn === conn) this.linked = void 0;
+    });
+    this.startTimer();
+    this.deps.log.info(
+      `remote-host ${this.deps.label} ${this.machine}: connected at ${address} (${[probe.os.name, probe.os.version].filter(Boolean).join(" ") || probe.platform}, ${probe.arch})`
+    );
+    return linked;
+  }
+  /**
+   * The incarnation token, and the hostname if the lease gives one. The token
+   * is written on the incarnation's first connect, then must read back on
+   * every later one: a machine with none, or another's, is not this one.
+   */
+  async checkIdentity(conn, lease) {
+    const id = await conn.exec(shCommand(IDENTITY_SCRIPT), { timeoutMs: 2e4 });
+    if (id.code !== 0) throw new Error(`could not tell which machine answered (exit ${id.code}): ${id.stderr.trim().slice(0, 200)}`);
+    const { hostname: hostname2, incarnation } = parseIdentity(id.stdout);
+    if (lease.hostname && !sameHostname(hostname2, lease.hostname)) {
+      throw new MachinesError("wrong-machine", `its hostname is ${JSON.stringify(hostname2 ?? "")}, not ${JSON.stringify(lease.hostname)}`);
+    }
+    const kept = await this.deps.token.get();
+    if (incarnation !== void 0) {
+      const cut = incarnation.lastIndexOf(" ");
+      const machine = cut > 0 ? incarnation.slice(0, cut) : "";
+      const token22 = cut > 0 ? incarnation.slice(cut + 1) : "";
+      if (machine !== lease.machine || !token22) throw new MachinesError("wrong-machine", "it is another chat's machine (its incarnation token names another)");
+      if (kept && token22 !== kept) throw new MachinesError("wrong-machine", "its incarnation token isn't the one this chat's machine was given");
+      if (!kept) await this.deps.token.set(token22);
+      return;
+    }
+    if (kept) {
+      throw new MachinesError("wrong-machine", "it has no incarnation token, so it isn't the machine this chat used (a new machine at a reused address)");
+    }
+    const token2 = randomBytes(16).toString("hex");
+    const w = await conn.exec(shCommand(writeTokenScript(lease.machine, token2)), { timeoutMs: 2e4 });
+    if (w.code !== 0) throw new Error(`could not mark the machine as this chat's (exit ${w.code}): ${w.stderr.trim().slice(0, 200)}`);
+    await this.deps.token.set(token2);
+  }
+  target(address, lease, auth) {
+    return {
+      host: address,
+      port: lease.port ?? 22,
+      username: lease.user,
+      ...auth.privateKey ? { privateKey: auth.privateKey } : { password: auth.password },
+      hostVerifier: "pin" in lease.hostKey ? pinnedHostKey(lease.hostKey.pin) : trustProvisioner(),
+      keepalive: KEEPALIVE
+    };
+  }
+  make(target) {
+    return this.deps.connect ? this.deps.connect(target) : new SshConnection(target);
+  }
+  startTimer() {
+    if (this.timer || this.disposed) return;
+    this.timer = setInterval(() => void this.tick(), this.t.tickMs);
+    this.timer.unref?.();
+  }
+  /** While connected: the hellos dispatch-host's dead-man switch wants, and idle extra connections closed. Never a reconnect. */
+  async tick() {
+    if (this.disposed || this.busy) return;
+    this.busy = true;
+    try {
+      this.closeIdle(this.t.idleSessionConnectionMs);
+      if (!this.linked?.conn.isOpen || this.now() - this.lastHelloAt < this.t.helloEveryMs) return;
+      try {
+        await this.agent(["hello", "--instance", this.deps.instanceId], 15e3);
+        this.lastHelloAt = this.now();
+      } catch (err) {
+        if (/channel open failure|open failed/i.test(errText$1(err))) return;
+        this.deps.log.info(`remote-host ${this.deps.label} ${this.machine}: no answer (${errText$1(err)}); connecting again when it is next needed`);
+        this.close();
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+}
+async function credentials(lease) {
+  const a = await lease.auth();
+  const privateKey = typeof a?.privateKey === "string" && a.privateKey ? a.privateKey : void 0;
+  const password = typeof a?.password === "string" && a.password ? a.password : void 0;
+  if (privateKey) return { privateKey };
+  if (!password) throw new MachinesError("bad-lease", "the lease's auth() gave neither a private key nor a password");
+  if (!("pin" in lease.hostKey)) throw new MachinesError("bad-lease", "a password is sent only to a pinned host key; this lease trusts the provisioner instead");
+  return { password };
+}
+const IDENTITY_SCRIPT = [
+  `h=$(hostname 2>/dev/null || uname -n)`,
+  `printf 'host=%s\\n' "$h"`,
+  `f="$HOME/${INCARNATION_FILE}"`,
+  `if [ -f "$f" ]; then printf 'incarnation=%s\\n' "$(head -n 1 "$f")"; else echo 'incarnation-none'; fi`
+].join("\n");
+function writeTokenScript(machine, token2) {
+  return [
+    `umask 077`,
+    `mkdir -p "$HOME/.dispatch-host"`,
+    `(set -C; printf '%s\\n' ${sq(`${machine} ${token2}`)} > "$HOME/${INCARNATION_FILE}")`
+  ].join("\n");
+}
+function parseIdentity(stdout) {
+  let hostname2;
+  let incarnation;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.startsWith("host=")) hostname2 = line.slice(5).trim();
+    else if (line.startsWith("incarnation=")) incarnation = line.slice(12).trim();
+  }
+  return { ...hostname2 ? { hostname: hostname2 } : {}, ...incarnation !== void 0 ? { incarnation } : {} };
+}
+function sameHostname(seen, want) {
+  if (!seen) return false;
+  const short2 = (h) => h.toLowerCase().split(".")[0];
+  return seen.toLowerCase() === want.toLowerCase() || short2(seen) === short2(want);
+}
+function backendPrefixes(base) {
+  return [`served:${base}/`, `sync:${base}/`, `pchat:${base}:`, `ptoken:${base}/`];
+}
+function callerPrefixes(callerId) {
+  return ["served:", "sync:", "pchat:", "ptoken:"].map((p) => `${p}x/${callerId}/`);
+}
+const chatKey = (base, chatId) => `pchat:${base}:${chatId}`;
+const tokenKey = (base, machine) => `ptoken:${base}/${machine}`;
+async function dropEngineRecords(kv, base, chatId, machine) {
+  await kv?.delete(`served:${base}/${machine}:${chatId}`);
+  await kv?.delete(`sync:${base}/${machine}:${chatId}`);
+}
+async function forgetChatRecords(kv, base, chatId) {
+  const rec = await kv?.get(chatKey(base, chatId)).catch(() => void 0);
+  if (rec?.machine) await dropEngineRecords(kv, base, chatId, rec.machine);
+  await kv?.delete(chatKey(base, chatId));
+}
+class ProvisionedMachines {
+  constructor(opts, d, onDisposed = () => {
+  }) {
+    this.opts = opts;
+    this.d = d;
+    this.onDisposed = onDisposed;
+    this.id = opts.id;
+    this.label = opts.label;
+    this.base = `x/${d.callerId}/${opts.id}`;
+    this.key = opts.id.replace(/[^A-Za-z0-9_-]/g, "-");
+    if (d.signal.aborted) void this.dispose();
+    else d.signal.addEventListener("abort", () => void this.dispose(), { once: true });
+  }
+  id;
+  label;
+  /** `x/<callerId>/<backendId>`. */
+  base;
+  /** The engines' key: logs, conflict copies (`<file>.from-<key>`), the local folder of MCP copies. */
+  key;
+  slots = /* @__PURE__ */ new Map();
+  /** Spawns for one chat take turns: two terminals opening at once must not make two engines. */
+  turns = /* @__PURE__ */ new Map();
+  /** What the chat's next command result says once: the lease's notices, a machine made again. */
+  notices = /* @__PURE__ */ new Map();
+  /** What each chat's machine was last seen to be, for the agent note while it is stopped. */
+  seen = /* @__PURE__ */ new Map();
+  disposed = false;
+  /** What the caller gets: plain objects of functions, which the membrane can revoke. */
+  facade() {
+    const backend = {
+      id: this.id,
+      label: this.label,
+      shell: "bash",
+      fallback: "refuse",
+      spawnTimeoutMs: 5 * 6e4,
+      runHookTimeoutMs: 30 * 6e4,
+      spawn: (info) => this.spawn(info),
+      spawnProcess: (info) => this.spawnProcess(info),
+      beforeRun: (info) => this.beforeRun(info),
+      afterRun: (info) => this.afterRun(info),
+      agentNote: (info) => this.agentNote(info)
+    };
+    return {
+      backend,
+      endChat: (chatId) => this.endChat(chatId),
+      forgetChat: (chatId) => this.forgetChat(chatId),
+      machineGone: (machine) => this.machineGone(machine),
+      forgetAll: () => this.forgetAll(),
+      dispose: () => this.dispose(),
+      machines: () => this.machines()
+    };
+  }
+  /** The chat's slot, if it has a machine this run. */
+  slot(chatId) {
+    return this.slots.get(chatId);
+  }
+  /** Whether the chat had a machine here this run, connected or not. */
+  knows(chatId) {
+    return this.slots.has(chatId) || this.seen.has(chatId);
+  }
+  lastSeen(chatId) {
+    return this.slots.get(chatId)?.link.probe ?? this.seen.get(chatId)?.probe;
+  }
+  async spawn(info) {
+    const slot = await this.inTurn(info.chatId, () => this.attach(info));
+    const sh = await slot.engine.spawn(info);
+    return this.deliver(slot, sh);
+  }
+  async spawnProcess(info) {
+    const slot = await this.inTurn(info.chatId, () => this.attach(info));
+    const p = await slot.engine.spawnProcess(info);
+    return this.deliver(slot, p);
+  }
+  async beforeRun(info) {
+    const slot = this.slots.get(info.chatId);
+    const r = slot ? await slot.engine.beforeRun(info) : {};
+    const once2 = this.takeNotices(info.chatId);
+    return once2.length ? { ...r, notices: [...once2, ...r.notices ?? []] } : r;
+  }
+  async afterRun(info) {
+    return await this.slots.get(info.chatId)?.engine.afterRun(info) ?? {};
+  }
+  agentNote(info) {
+    const slot = this.slots.get(info.chatId);
+    if (slot) return slot.engine.agentNote(info);
+    const seen = this.seen.get(info.chatId);
+    return machineNote({
+      label: this.label,
+      ...seen ? { user: seen.user } : {},
+      key: this.key,
+      probe: seen?.probe,
+      where: `~/.dispatch-host/…/chats/${info.chatId}`,
+      elevation: void 0,
+      mcpLocalDir: join(mcpLocalHostDir(this.d.mcpLocalRoot, this.d.instanceId, this.key), info.chatId),
+      agentTools: !!this.d.agentTools,
+      provisioned: true
+    });
+  }
+  /** The chat went idle: its sessions there end (if the machine is connected; never a dial), and the connection closes. */
+  async endChat(chatId) {
+    const slot = this.slots.get(chatId);
+    if (!slot) return;
+    this.slots.delete(chatId);
+    this.remember(slot);
+    try {
+      await slot.engine.chatIdle(chatId);
+    } finally {
+      this.close(slot);
+    }
+  }
+  /** The chat was deleted: everything kept for it here goes. The machine is never contacted; destroying it is the caller's. */
+  async forgetChat(chatId) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(chatId)) return;
+    const slot = this.slots.get(chatId);
+    this.slots.delete(chatId);
+    this.notices.delete(chatId);
+    this.seen.delete(chatId);
+    if (slot) {
+      await slot.engine.forgetLocal(chatId);
+      this.close(slot);
+    }
+    await rm(join(mcpLocalHostDir(this.d.mcpLocalRoot, this.d.instanceId, this.key), chatId), { recursive: true, force: true }).catch(() => {
+    });
+    await forgetChatRecords(this.d.kv, this.base, chatId);
+  }
+  /** The caller destroyed `machine`: every chat on it is forgotten, and so is its token. */
+  async machineGone(machine) {
+    const chats = /* @__PURE__ */ new Set();
+    for (const s of this.slots.values()) if (s.machine === machine) chats.add(s.chatId);
+    for (const k of await this.d.kv?.list(`pchat:${this.base}:`) ?? []) {
+      const rec = await this.d.kv?.get(k).catch(() => void 0);
+      if (rec?.machine === machine) chats.add(k.slice(`pchat:${this.base}:`.length));
+    }
+    for (const chat of chats) await this.forgetChat(chat);
+    await this.d.kv?.delete(tokenKey(this.base, machine));
+  }
+  /** The caller is being uninstalled: everything kept for this backend goes. */
+  async forgetAll() {
+    for (const chat of [...this.slots.keys()]) await this.forgetChat(chat);
+    for (const prefix of backendPrefixes(this.base)) {
+      for (const k of await this.d.kv?.list(prefix) ?? []) await this.d.kv?.delete(k);
+    }
+  }
+  async dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.onDisposed();
+    const slots = [...this.slots.values()];
+    this.slots.clear();
+    await Promise.all(slots.map((s) => s.engine.killAll(300).catch(() => {
+    })));
+    for (const s of slots) this.close(s);
+  }
+  machines() {
+    return [...this.slots.values()].map((s) => {
+      const address = s.link.address;
+      return {
+        chatId: s.chatId,
+        machine: s.machine,
+        connected: s.link.connected,
+        shells: s.engine.chatActivity(s.chatId).shells.length,
+        running: s.engine.running(s.chatId),
+        ...address ? { address } : {}
+      };
+    });
+  }
+  /** The chat's machine, provisioned now, with an engine for it: the one it had, or a new one for a new incarnation. */
+  async attach(info) {
+    this.live();
+    const chatId = assertId("chat", info.chatId);
+    const spawnInfo = info;
+    const req = {
+      chatId,
+      ...spawnInfo.projectId ? { projectId: spawnInfo.projectId } : {},
+      ...spawnInfo.worktreePath ? { worktreePath: spawnInfo.worktreePath } : {},
+      ...spawnInfo.repoPath ? { repoPath: spawnInfo.repoPath } : {}
+    };
+    const lease = checkLease(await this.opts.provision({ ...req, signal: info.signal }));
+    this.live();
+    this.note(chatId, lease.notices);
+    let slot = this.slots.get(chatId);
+    if (slot && slot.machine === lease.machine) {
+      slot.req = req;
+      slot.user = lease.user;
+      slot.link.use(lease);
+      return slot;
+    }
+    const kv = this.d.kv;
+    const before = slot?.machine ?? (await kv?.get(chatKey(this.base, chatId)).catch(() => void 0))?.machine;
+    if (slot) {
+      this.slots.delete(chatId);
+      await slot.engine.killAll(0).catch(() => {
+      });
+      this.close(slot);
+    }
+    if (before && before !== lease.machine) {
+      await dropEngineRecords(kv, this.base, chatId, before);
+      this.note(chatId, ["this chat's machine was made again: what was installed or built on the old one is gone, and your files go to the new one"]);
+      this.d.log.info(`remote-host ${this.key}: chat ${chatId}'s machine is a new one (${lease.machine}, was ${before})`);
+    }
+    await kv?.set(chatKey(this.base, chatId), { machine: lease.machine, at: Date.now() });
+    slot = this.makeSlot(chatId, lease, req);
+    this.slots.set(chatId, slot);
+    this.seen.delete(chatId);
+    return slot;
+  }
+  makeSlot(chatId, lease, req) {
+    const machine = lease.machine;
+    const kv = this.d.kv;
+    const link = new ProvisionedLink(machine, {
+      instanceId: this.d.instanceId,
+      label: this.label,
+      agent: this.d.agent,
+      runtime: this.d.runtime,
+      log: this.d.log,
+      provision: () => this.reprovision(chatId),
+      token: {
+        get: async () => (await kv?.get(tokenKey(this.base, machine)))?.token,
+        set: async (token2) => {
+          await kv?.set(tokenKey(this.base, machine), { token: token2 });
+        }
+      },
+      ...this.d.connect ? { connect: this.d.connect } : {},
+      ...this.d.timing ? { timing: this.d.timing } : {}
+    });
+    const slot = { chatId, machine, link, engine: void 0, user: lease.user, req };
+    const host = () => ({
+      slug: this.key,
+      label: this.label,
+      user: slot.user,
+      addresses: [],
+      port: 22,
+      hostKey: "",
+      hostKeyType: "",
+      keyFingerprint: "",
+      allowFrom: [],
+      pairedAt: ""
+    });
+    const deps = {
+      link,
+      instanceId: this.d.instanceId,
+      log: this.d.log,
+      ...kv ? { kv } : {},
+      // The caller's to publish: its forwards show under its backend.
+      publish: (p) => {
+        const withdraw = this.opts.io.publishPort(p);
+        return typeof withdraw === "function" ? withdraw : () => {
+        };
+      },
+      ...this.d.runs ? { runs: this.d.runs } : {},
+      ...this.d.where ? { where: this.d.where } : {},
+      ...this.d.mine ? { mine: this.d.mine } : {},
+      ...this.d.reservedPorts ? { reservedPorts: this.d.reservedPorts } : {},
+      ...this.d.agentTools ? { agentTools: true } : {},
+      ...this.d.shell ? { shell: this.d.shell } : {},
+      ...this.d.sync ? { sync: this.d.sync } : {},
+      ...this.d.portPollMs ? { portPollMs: this.d.portPollMs } : {},
+      ...this.d.lockWaitMs !== void 0 ? { lockWaitMs: this.d.lockWaitMs } : {},
+      ...this.d.mcpLocalRoot ? { mcpLocalRoot: this.d.mcpLocalRoot } : {}
+    };
+    slot.engine = new MachineEngine(
+      { backendId: this.id, key: this.key, kvPrefix: `${this.base}/${machine}`, adoptLegacySync: false, host, provisioned: true },
+      deps
+    );
+    link.use(lease);
+    return slot;
+  }
+  /** The connection dropped and something needs the machine: ask the provisioner again (it may have to start it). */
+  async reprovision(chatId) {
+    this.live();
+    const req = this.slots.get(chatId)?.req ?? { chatId };
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort();
+    this.d.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      const lease = checkLease(await this.opts.provision({ ...req, signal: ctl.signal }));
+      this.live();
+      this.note(chatId, lease.notices);
+      const slot = this.slots.get(chatId);
+      if (slot && slot.machine === lease.machine) slot.user = lease.user;
+      return lease;
+    } finally {
+      this.d.signal.removeEventListener("abort", onAbort);
+    }
+  }
+  /** A handle made for a caller that went away meanwhile is ended, never delivered. */
+  deliver(slot, handle) {
+    this.remember(slot);
+    if (this.disposed || this.d.signal.aborted) {
+      handle.kill();
+      throw new MachinesError("revoked", `${this.label}: remote-host stopped serving this backend`);
+    }
+    return handle;
+  }
+  remember(slot) {
+    this.seen.set(slot.chatId, { user: slot.user, ...slot.link.probe ? { probe: slot.link.probe } : {} });
+  }
+  close(slot) {
+    slot.engine.dispose();
+    slot.link.dispose();
+  }
+  inTurn(chatId, fn) {
+    const prev = this.turns.get(chatId) ?? Promise.resolve();
+    const p = prev.catch(() => {
+    }).then(fn);
+    const tail = p.catch(() => {
+    });
+    this.turns.set(chatId, tail);
+    void tail.then(() => {
+      if (this.turns.get(chatId) === tail) this.turns.delete(chatId);
+    });
+    return p;
+  }
+  note(chatId, notices) {
+    if (!notices?.length) return;
+    const list2 = this.notices.get(chatId) ?? [];
+    for (const n of notices) list2.push(`[${this.label}] ${n}`);
+    this.notices.set(chatId, list2.slice(-10));
+  }
+  takeNotices(chatId) {
+    const list2 = this.notices.get(chatId) ?? [];
+    this.notices.delete(chatId);
+    return list2;
+  }
+  live() {
+    if (this.disposed || this.d.signal.aborted) throw new MachinesError("revoked", `${this.label}: remote-host stopped serving this backend`);
+  }
+}
+function checkLease(lease) {
+  const bad = (why) => new MachinesError("bad-lease", `the provisioner's lease ${why}`);
+  if (!lease || typeof lease !== "object") throw bad("isn't an object");
+  const l = lease;
+  if (typeof l.machine !== "string" || !/^[\x21-\x7e]{1,200}$/.test(l.machine)) {
+    throw bad("has no usable `machine` (1 to 200 printable characters, no spaces)");
+  }
+  const addresses = Array.isArray(l.addresses) ? [...l.addresses] : [];
+  if (!addresses.length || addresses.length > 16 || !addresses.every((a) => typeof a === "string" && /^[A-Za-z0-9.:%_[\]-]{1,253}$/.test(a))) {
+    throw bad("has no usable `addresses` (1 to 16 host names or IPs)");
+  }
+  if (l.port !== void 0 && !(Number.isInteger(l.port) && l.port >= 1 && l.port <= 65535)) throw bad("has a `port` that isn't one");
+  if (typeof l.user !== "string" || !/^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(l.user)) throw bad("has no usable `user`");
+  if (typeof l.auth !== "function") throw bad("has no `auth()`");
+  const hk = l.hostKey;
+  let hostKey;
+  if (hk && typeof hk === "object" && "pin" in hk) {
+    const pins = Array.isArray(hk.pin) ? [...hk.pin] : [];
+    if (!pins.length || !pins.every((p) => typeof p === "string" && /^SHA256:[A-Za-z0-9+/]{43}=?$/.test(p))) {
+      throw bad("has a `hostKey.pin` that isn't a list of SHA256 fingerprints");
+    }
+    hostKey = { pin: pins };
+  } else if (hk && typeof hk === "object" && hk.trust === "provisioner") {
+    hostKey = { trust: "provisioner" };
+  } else {
+    throw bad('has no `hostKey` (a `pin` list, or `{ trust: "provisioner" }`)');
+  }
+  if (l.hostname !== void 0 && (typeof l.hostname !== "string" || !/^[A-Za-z0-9.-]{1,253}$/.test(l.hostname))) throw bad("has a `hostname` that isn't one");
+  const notices = Array.isArray(l.notices) ? l.notices.filter((n) => typeof n === "string" && !!n.trim()).slice(0, 5).map((n) => n.slice(0, 500)) : [];
+  const auth = l.auth;
+  return {
+    machine: l.machine,
+    addresses,
+    ...l.port !== void 0 ? { port: l.port } : {},
+    user: l.user,
+    auth: () => auth(),
+    hostKey,
+    ...l.hostname !== void 0 ? { hostname: l.hostname } : {},
+    ...notices.length ? { notices } : {}
+  };
+}
+const MACHINES_MINOR = 0;
+const BACKEND_ID = /^(?:[a-z0-9][a-z0-9-]{0,39}\/)?[a-z0-9][a-z0-9-]{0,47}$/;
+const CALLER_GONE_RECONCILES = 3;
+class MachinesService {
+  constructor(d) {
+    this.d = d;
+  }
+  backends = /* @__PURE__ */ new Set();
+  disposed = false;
+  /** Serve `machines@1` (during activate only). True when this Dispatch has plugin dependencies. */
+  serve(ctx) {
+    const provides = ctx.provides;
+    if (!provides) return false;
+    provides.serve("machines", 1, (caller) => this.api(caller));
+    return true;
+  }
+  /** What one caller gets: its own factory of provisioned backends. */
+  api(caller) {
+    return {
+      contract: { name: "machines", major: 1, minor: MACHINES_MINOR },
+      createProvisionedBackend: (opts) => this.create(caller, opts).facade()
+    };
+  }
+  /** Is `backend` one of the provisioned backends served now? */
+  serves(backend) {
+    for (const b of this.backends) if (b.id === backend) return true;
+    return false;
+  }
+  /** The lock's "is this run remote-host's": paired machines, and every provisioned backend. */
+  mine = (backend) => this.serves(backend) || !!this.d.paired?.(backend);
+  /** A location's name, for the lock: a paired machine's label, a provisioned backend's, or its id. */
+  where = (backend) => {
+    for (const b of this.backends) if (b.id === backend) return b.label;
+    return this.d.where?.(backend) ?? backend;
+  };
+  /** The provisioned backends with a machine for `chatId` this run (the agent's tools). */
+  forChat(chatId) {
+    return [...this.backends].filter((b) => b.knows(chatId));
+  }
+  /**
+   * Dispatch listed the chats that exist. What is kept for any other chat of
+   * any caller goes (running or not: a caller that is off can't say). Then a
+   * caller no longer installed for {@link CALLER_GONE_RECONCILES} reconciles
+   * in a row has everything kept for it removed.
+   */
+  async reconcile(live2) {
+    const kv = this.d.kv;
+    if (!kv) return;
+    try {
+      for (const k of await kv.list("pchat:x/")) {
+        const cut = k.lastIndexOf(":");
+        const chatId = k.slice(cut + 1);
+        if (live2.has(chatId)) continue;
+        const base = k.slice("pchat:".length, cut);
+        const running = [...this.backends].find((b) => b.base === base);
+        if (running) await running.forgetChat(chatId);
+        else await forgetChatRecords(kv, base, chatId);
+      }
+      await this.collectCallers();
+    } catch (err) {
+      this.d.log.warn(`remote-host: tidying what other plugins' machines left failed: ${errText$1(err)}`);
+    }
+  }
+  async dispose() {
+    this.disposed = true;
+    await Promise.all([...this.backends].map((b) => b.dispose()));
+    this.backends.clear();
+  }
+  create(caller, opts) {
+    if (this.disposed || caller.signal.aborted) throw new MachinesError("revoked", "remote-host is shutting down");
+    if (!caller.capabilities.includes("terminals")) {
+      throw new MachinesError("forbidden", `${caller.name} may not run terminals (it wasn't granted the \`terminals\` capability)`);
+    }
+    if (!opts || typeof opts !== "object") throw new Error("createProvisionedBackend needs its options");
+    if (typeof opts.id !== "string" || !BACKEND_ID.test(opts.id) || opts.id === "local") {
+      throw new Error(`createProvisionedBackend: ${JSON.stringify(opts.id)} isn't a backend id`);
+    }
+    if (typeof opts.label !== "string" || !opts.label.trim() || opts.label.length > 80) throw new Error("createProvisionedBackend: `label` must be 1 to 80 characters");
+    if (typeof opts.provision !== "function") throw new Error("createProvisionedBackend: `provision` must be a function");
+    if (!opts.io || typeof opts.io.publishPort !== "function") throw new Error("createProvisionedBackend: `io.publishPort` must be a function");
+    if (/^remote-host\//.test(opts.id) || this.serves(opts.id)) throw new Error(`createProvisionedBackend: ${opts.id} is already served`);
+    const pm = new ProvisionedMachines(
+      opts,
+      {
+        callerId: caller.id,
+        signal: caller.signal,
+        instanceId: this.d.instanceId,
+        log: this.d.log,
+        ...this.d.kv ? { kv: this.d.kv } : {},
+        agent: this.d.agent,
+        runtime: this.d.runtime,
+        ...this.d.runs ? { runs: this.d.runs } : {},
+        where: this.where,
+        mine: this.mine,
+        ...this.d.reservedPorts ? { reservedPorts: this.d.reservedPorts } : {},
+        ...this.d.agentTools ? { agentTools: true } : {},
+        ...this.d.connect ? { connect: this.d.connect } : {},
+        ...this.d.overrides
+      },
+      () => this.backends.delete(pm)
+    );
+    this.backends.add(pm);
+    this.d.log.info(`remote-host: serving ${opts.id} (${opts.label}) for ${caller.id}`);
+    return pm;
+  }
+  async collectCallers() {
+    const kv = this.d.kv;
+    const dependents = this.d.dependents?.();
+    if (!kv || !dependents) return;
+    const present = new Set(dependents.map((d) => d.id));
+    const callers = /* @__PURE__ */ new Set();
+    for (const kind2 of ["served:", "sync:", "pchat:", "ptoken:"]) {
+      const all = `${kind2}x/`;
+      for (const k of await kv.list(all)) {
+        const caller = k.slice(all.length).split("/")[0];
+        if (caller) callers.add(caller);
+      }
+    }
+    for (const k of await kv.list("pgone:")) callers.add(k.slice("pgone:".length));
+    for (const caller of callers) {
+      const counter = `pgone:${caller}`;
+      if (present.has(caller)) {
+        await kv.delete(counter);
+        continue;
+      }
+      const n = ((await kv.get(counter).catch(() => void 0))?.n ?? 0) + 1;
+      if (n < CALLER_GONE_RECONCILES) {
+        await kv.set(counter, { n });
+        continue;
+      }
+      for (const prefix of callerPrefixes(caller)) for (const k of await kv.list(prefix)) await kv.delete(k);
+      await kv.delete(counter);
+      this.d.log.info(`remote-host: removed what it kept for ${caller}'s machines; ${caller} is no longer installed`);
+    }
+  }
 }
 class PairedBackend {
   constructor(id, engine) {
@@ -26452,6 +27310,38 @@ function toolsOf(ctx) {
   const t = ctx?.tools;
   return t && typeof t.register === "function" ? t : void 0;
 }
+function provisionedMachine(pm, chatId) {
+  const slot = pm.slot(chatId);
+  const up = !!slot?.link.connected;
+  const probe = pm.lastSeen(chatId);
+  const address = slot?.link.address;
+  return {
+    slug: pm.key,
+    label: pm.label,
+    id: pm.id,
+    ownChat: true,
+    ...up ? { engine: slot.engine } : { stopped: `${pm.label} for this chat is stopped. A terminal command starts it; the tools never do.` },
+    view: () => ({
+      status: up ? { state: "online" } : { state: "offline", detail: "stopped (a terminal command starts it)" },
+      ...address ? { address } : {},
+      ...probe ? { probe } : {},
+      elevation: { on: false, canAsk: false }
+    })
+  };
+}
+function machinesFor(deps, chatId) {
+  const views = new Map(deps.registry.list().map((v) => [v.slug, v]));
+  const paired = deps.registry.all().map(
+    (e) => ({
+      slug: e.host.slug,
+      label: e.host.label,
+      id: backendId(e.host.slug),
+      engine: e.engine,
+      view: () => views.get(e.host.slug) ?? { status: { state: "offline" }, elevation: { on: false, canAsk: false } }
+    })
+  );
+  return [...deps.provisioned?.(chatId) ?? [], ...paired];
+}
 function registerTools(tools2, deps) {
   if (!tools2) return () => {
   };
@@ -26504,12 +27394,14 @@ async function remoteFetch(deps, args, call) {
     const path = text(args.path, "path");
     if (!path) throw new ToolRefusal("`path` is required: the file or folder on the machine to copy.");
     const to = args.to === void 0 ? void 0 : text(args.to, "to");
-    const e = await pickOne(deps.registry, call.chatId, args.host === void 0 ? void 0 : text(args.host, "host"));
-    label = e.host.label;
+    const m = await pickOne(machinesFor(deps, call.chatId), call.chatId, args.host === void 0 ? void 0 : text(args.host, "host"));
+    label = m.label;
+    const e = m.engine;
+    if (!e) throw new ToolRefusal(`${m.stopped ?? `${label} can't be used right now.`} Nothing was copied.`);
     const signal = call.signal;
-    const there = await e.engine.whereThere(call.chatId, call.cwd, signal);
+    const there = await e.whereThere(call.chatId, call.cwd, signal);
     from = remotePath(path, there);
-    const remote = e.engine.remoteSide();
+    const remote = e.remoteSide();
     const found = await look(remote, from);
     if (found.kind === "missing") {
       const rel = path.startsWith("/") || path.startsWith("~") ? "" : ` (a relative path is taken in ${there.cwd})`;
@@ -26524,10 +27416,10 @@ async function remoteFetch(deps, args, call) {
         replacing = true;
       }
     } else {
-      dest = resolve(e.engine.fetchedDir(call.chatId), localName(from));
+      dest = resolve(e.fetchedDir(call.chatId), localName(from));
     }
     const got = await pull(remote, from, found, dest, { signal });
-    deps.log.info(`remote-host ${e.host.slug}: remote_fetch for ${call.chatId}: ${from} → ${dest} (${mb(got.bytes)})`);
+    deps.log.info(`remote-host ${m.slug}: remote_fetch for ${call.chatId}: ${from} → ${dest} (${mb(got.bytes)})`);
     return await answer(got, from, dest, label, call, args.show === true);
   } catch (err) {
     if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
@@ -26614,29 +27506,26 @@ function remotePath(path, there) {
 async function machineStatus(deps, args, call) {
   try {
     const name = args.host === void 0 ? void 0 : text(args.host, "host");
-    const all = deps.registry.all();
+    const all = machinesFor(deps, call.chatId);
     if (!all.length) return "No machines are paired. The user pairs one in Settings → Remote hosts.";
     let chosen;
     if (name) chosen = [byName(all, name)];
     else {
       const mine = await chatsMachines(all, call.chatId);
-      chosen = mine.length ? mine : all;
+      chosen = mine.length ? mine : all.filter((m) => !m.ownChat);
     }
-    const views = new Map(deps.registry.list().map((v) => [v.slug, v]));
     const blocks = [];
-    for (const e of chosen) {
-      const v = views.get(e.host.slug);
-      if (v) blocks.push(await describe(e, v, call));
-    }
+    for (const m of chosen) blocks.push(await describe(m, call));
     return blocks.join("\n\n");
   } catch (err) {
     if (err instanceof ToolRefusal) return { content: [{ type: "text", text: err.message }], isError: true };
     throw err;
   }
 }
-async function describe(e, v, call) {
+async function describe(m, call) {
+  const v = m.view();
   const p = v.probe;
-  const lines = [`${v.label} (terminal location ${v.id}): ${v.status.state}${v.status.detail ? `, ${v.status.detail}` : ""}`];
+  const lines = [`${m.label} (terminal location ${m.id}): ${v.status.state}${v.status.detail ? `, ${v.status.detail}` : ""}`];
   const facts = [];
   if (v.address) facts.push(v.status.state === "offline" ? `last reached at ${v.address}` : `at ${v.address}`);
   if (p) {
@@ -26661,43 +27550,51 @@ async function describe(e, v, call) {
     lines.push(`  tools: ${tools2.join(", ")}`);
     if (p.consoleUser === "root") lines.push("  nobody is logged in at its screen (no desktop session)");
   }
-  lines.push(`  root with approval: ${v.elevation.on ? v.elevation.canAsk ? "on (sudo asks the user)" : "set up, but this Dispatch can't ask the user" : "off (sudo is refused)"}`);
-  const act = e.engine.chatActivity(call.chatId);
+  if (m.ownChat) {
+    lines.push(`  root: ${p?.uid === 0 ? "the login is root" : p ? "none (root with approval is only for paired machines)" : "not known until it runs"}`);
+  } else {
+    lines.push(`  root with approval: ${v.elevation.on ? v.elevation.canAsk ? "on (sudo asks the user)" : "set up, but this Dispatch can't ask the user" : "off (sudo is refused)"}`);
+  }
+  const act = m.engine?.chatActivity(call.chatId) ?? { shells: [], servers: [], ports: [] };
   const mine = [];
   if (act.shells.length) mine.push(`terminals ${act.shells.join(", ")}`);
   if (act.servers.length) mine.push(`MCP servers ${act.servers.join(", ")}`);
   if (act.ports.length) mine.push(`forwarded ports ${act.ports.map((f) => `${f.remotePort} → ${f.url}`).join(", ")}`);
   lines.push(`  this chat there: ${mine.length ? mine.join("; ") : "nothing running"}`);
-  if (v.status.state !== "offline") {
+  if (v.status.state !== "offline" && m.engine) {
     try {
-      const there = await withTimeout(e.engine.whereThere(call.chatId, call.cwd, call.signal), 5e3);
+      const there = await withTimeout(m.engine.whereThere(call.chatId, call.cwd, call.signal), 5e3);
       lines.push(`  this chat's ${there.checkout ? `checkout there: ${there.checkout} (your working directory is ${there.cwd})` : `directory there: ${there.cwd}`}`);
     } catch {
     }
   }
   return lines.join("\n");
 }
-async function pickOne(registry, chatId, name) {
-  const all = registry.all();
+async function pickOne(all, chatId, name) {
   if (!all.length) throw new ToolRefusal("No machines are paired. The user pairs one in Settings → Remote hosts.");
   if (name) return byName(all, name);
   const mine = await chatsMachines(all, chatId);
   if (mine.length === 1) return mine[0];
   if (!mine.length && all.length === 1) return all[0];
-  const among = (mine.length ? mine : all).map((e) => e.host.label).join(", ");
+  const among = (mine.length ? mine : all).map((e) => e.label).join(", ");
   throw new ToolRefusal(
     mine.length ? `This chat uses more than one machine (${among}); say which with \`host\`.` : `This chat hasn't used a machine yet, and more than one is paired (${among}); say which with \`host\`.`
   );
 }
 async function chatsMachines(all, chatId) {
-  const known = await Promise.all(all.map((e) => e.engine.knowsChat(chatId).catch(() => false)));
+  const known = await Promise.all(all.map((m) => m.ownChat ? true : m.engine?.knowsChat(chatId).catch(() => false) ?? false));
   return all.filter((_, i) => known[i]);
 }
 function byName(all, name) {
   const n = name.trim().toLowerCase();
-  const e = all.find((x) => x.host.slug === n || x.host.label.toLowerCase() === n || backendId(x.host.slug) === n);
-  if (!e) throw new ToolRefusal(`No paired machine is called ${name}. Paired: ${all.map((x) => x.host.label).join(", ")}.`);
-  return e;
+  const m = all.find((x) => x.slug === n || x.label.toLowerCase() === n || x.id === n);
+  if (!m) {
+    const names = all.map((x) => x.label).join(", ");
+    throw new ToolRefusal(
+      all.some((x) => x.ownChat) ? `No machine is called ${name}. This chat can use: ${names}.` : `No paired machine is called ${name}. Paired: ${names}.`
+    );
+  }
+  return m;
 }
 function text(v, field) {
   if (typeof v !== "string") throw new ToolRefusal(`\`${field}\` must be a string.`);
@@ -26790,6 +27687,7 @@ class HostRegistry {
       ...reservedPorts ? { reservedPorts } : {},
       ...runs ? { runs, where: (backend) => this.labelOf(backend) } : {},
       ...this.deps.lockWaitMs !== void 0 ? { lockWaitMs: this.deps.lockWaitMs } : {},
+      ...this.deps.mine ? { mine: this.deps.mine } : {},
       ...approvals ? { approvals } : {},
       ...toolsOf(ctx) ? { agentTools: true } : {},
       elevateKey: async () => (await ctx.secrets?.get(elevateSecretName(host.slug)))?.trim() || void 0,
@@ -26806,10 +27704,18 @@ class HostRegistry {
     entry.link.start();
     ctx.log.info(`remote-host: registered ${id} (${host.label})`);
   }
-  /** A location's name, by backend id: one of these machines by its label, anything else by its id. */
+  /** A location's name, by backend id: one of these machines by its label, a provisioned backend by its own, anything else by its id. */
   labelOf(backend) {
+    return this.label(backend) ?? this.deps.otherLabel?.(backend) ?? backend;
+  }
+  /** A paired machine's label, by its backend id. */
+  label(backend) {
     for (const e of this.entries.values()) if (backendId(e.host.slug) === backend) return e.host.label;
-    return backend;
+    return void 0;
+  }
+  /** Whether `backend` is one of the paired machines. */
+  isPaired(backend) {
+    return this.label(backend) !== void 0;
   }
   get(slug) {
     return this.entries.get(slug);
@@ -27062,13 +27968,35 @@ const server = definePlugin({
       if (!ctx.settings.set) throw new Error("this Dispatch cannot store plugin settings (ctx.settings.set); update Dispatch");
       await ctx.settings.set({ hosts: next });
     };
+    const agent2 = bundledAgent();
+    const runtime = nodejsOrgRuntime();
+    let machines = void 0;
     const registry = new HostRegistry({
       ctx,
       instanceId,
       ...ctx.instance?.previousId ? { previousInstanceId: ctx.instance.previousId } : {},
-      agent: bundledAgent(),
-      runtime: nodejsOrgRuntime()
+      agent: agent2,
+      runtime,
+      mine: (backend) => machines.mine(backend),
+      otherLabel: (backend) => machines.serves(backend) ? machines.where(backend) : void 0
     });
+    const runs = runsOf(ctx);
+    const reservedPorts = reservedPortsOf(ctx);
+    const provides = ctx.provides;
+    machines = new MachinesService({
+      instanceId,
+      log: ctx.log,
+      ...ctx.kv ? { kv: ctx.kv } : {},
+      agent: agent2,
+      runtime,
+      ...runs ? { runs } : {},
+      ...reservedPorts ? { reservedPorts } : {},
+      ...toolsOf(ctx) ? { agentTools: true } : {},
+      where: (backend) => registry.label(backend),
+      paired: (backend) => registry.isPaired(backend),
+      ...typeof provides?.dependents === "function" ? { dependents: () => provides.dependents() } : {}
+    });
+    machines.serve(ctx);
     const pairing = new Pairing({
       hosts,
       saveHosts,
@@ -27093,9 +28021,15 @@ const server = definePlugin({
     const setups = new ElevationSetups();
     ctx.routes?.(defineRoutes({ ctx, instanceId, registry, pairing, setups, hosts, saveHosts }));
     const approvals = approvalsOf(ctx);
-    const offTools = registerTools(toolsOf(ctx), { registry, log: ctx.log, ...approvals ? { approvals } : {} });
+    const offTools = registerTools(toolsOf(ctx), {
+      registry,
+      log: ctx.log,
+      ...approvals ? { approvals } : {},
+      provisioned: (chatId) => machines.forChat(chatId).map((pm) => provisionedMachine(pm, chatId))
+    });
     live = {
       registry,
+      machines,
       pairing,
       setups,
       off: () => {
@@ -27111,7 +28045,9 @@ const server = definePlugin({
    * next reachable, so this returns at once.
    */
   reconcile(e) {
-    live?.registry.reconcile(new Set(e.chats.map((c) => c.id)));
+    const chats = new Set(e.chats.map((c) => c.id));
+    live?.registry.reconcile(chats);
+    void live?.machines.reconcile(chats);
   },
   /**
    * Uninstall: nothing will reconcile this instance's work again, so every
@@ -27130,6 +28066,7 @@ const server = definePlugin({
     l?.off();
     l?.pairing.clear();
     l?.setups.clear();
+    await l?.machines.dispose();
     await l?.registry.dispose();
   }
 });
