@@ -4,137 +4,17 @@
  * a status and a config), so "it was stopped" and "it was never touched" are
  * claims about that state, not about which calls were made.
  *
- * The lifecycle itself is remote-core's RemoteChats, tested there against a
- * fake provider. These run it end to end through the Proxmox provider: the
- * ownership checks, instance tags and pool listing are Proxmox's.
+ * The lifecycle itself is remote-core's MachineLifecycle, tested there
+ * against a fake provider. These run it end to end through the Proxmox
+ * provider and 0.2's wiring: spawns go through a fake remote-host that calls
+ * the plugin's real `provision`, as the real one does.
  */
-import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
-import { createTestContext } from "@dispatch/plugin-sdk/testing";
-import type { SshConnection } from "@dispatch-plugins/remote-core";
-import { ProxmoxTerminalBackend, describe as describeClone } from "../src/backend.js";
-import { ProxmoxError, type Proxmox } from "../src/proxmox.js";
-import { readSettings } from "../src/settings.js";
+import { describe, expect, it } from "vitest";
+import { describe as describeClone } from "../src/backend.js";
+import { INSTANCE, fakeProxmox, ours, rec, terminal } from "./fakes.js";
 
-interface Ct {
-  status: "running" | "stopped";
-  hostname: string;
-  description?: string;
-  template?: number;
-}
-
-function fakeProxmox(initial: Record<number, Ct> = {}) {
-  const cts = new Map<number, Ct>(Object.entries(initial).map(([k, v]) => [Number(k), { ...v }]));
-  const calls: string[] = [];
-  const state = { down: false, waited: 0 };
-  const call = async (method: string, path: string, params: Record<string, unknown> = {}) => {
-    if (state.down) throw new ProxmoxError(`Proxmox API unreachable (pve:8006): connect ECONNREFUSED`);
-    calls.push(`${method} ${path}`);
-    // Like the real token: no Pool.Audit, so only /cluster/resources lists the pool.
-    if (path.startsWith("/pools/")) throw new ProxmoxError("Permission check failed (/pool/dispatch-terminals, Pool.Audit)", 403);
-    if (path === "/cluster/resources") {
-      return [
-        ...[...cts.keys()].map((vmid) => ({ vmid, type: "lxc", pool: "dispatch-terminals" })),
-        { vmid: 9050, type: "lxc" }, // outside the pool: never listed as ours
-        { vmid: 115, type: "qemu", pool: "dispatch-terminals" },
-      ];
-    }
-    const m = path.match(/^\/nodes\/g\/lxc\/(\d+)(\/.*)?$/);
-    if (!m) return null;
-    const vmid = Number(m[1]);
-    const rest = m[2] ?? "";
-    if (rest === "/clone") {
-      cts.set(Number(params.newid), { status: "stopped", hostname: String(params.hostname), description: String(params.description) });
-      return "UPID:clone";
-    }
-    const ct = cts.get(vmid);
-    if (!ct) throw new ProxmoxError(`Configuration file 'nodes/g/lxc/${vmid}.conf' does not exist`, 500);
-    if (rest === "/config") return method === "GET" ? { hostname: ct.hostname, description: ct.description, template: ct.template } : null;
-    if (rest === "/status/current") return { status: ct.status };
-    if (rest === "/status/start") {
-      ct.status = "running";
-      return "UPID:start";
-    }
-    if (rest === "/status/shutdown" || rest === "/status/stop") {
-      ct.status = "stopped";
-      return "UPID:stop";
-    }
-    if (method === "DELETE" && rest === "") {
-      if (ct.status === "running" && !params.force) throw new ProxmoxError("CT is running", 500);
-      cts.delete(vmid);
-      return "UPID:destroy";
-    }
-    return null;
-  };
-  const api = {
-    call,
-    waitTask: async () => {
-      if (state.down) throw new ProxmoxError("Proxmox API unreachable");
-      state.waited++;
-    },
-    ipv4: async () => "10.0.12.200",
-    status: async (_n: string, vmid: number) => {
-      try {
-        return ((await call("GET", `/nodes/g/lxc/${vmid}/status/current`)) as { status: string }).status;
-      } catch (err) {
-        if (/does not exist/.test(String(err))) return undefined;
-        throw err;
-      }
-    },
-  } as unknown as Proxmox;
-  return { api, cts, calls, state };
-}
-
-function fakeConn(): SshConnection {
-  return Object.assign(new EventEmitter(), {
-    isOpen: true,
-    connect: async () => {},
-    exec: async () => ({ code: 0, stdout: "", stderr: "" }),
-    run: async () => "",
-    shell: async () =>
-      Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { write() {} }, kill() {} }),
-    forward: async () => ({ localPort: 45000, close: () => {} }),
-    close() {
-      (this as { isOpen: boolean }).isOpen = false;
-    },
-  }) as unknown as SshConnection;
-}
-
-const INSTANCE = "abc123abc123";
-
-/** A backend over `kv` — pass the previous run's kv to simulate a Dispatch restart. */
-function backend(
-  f: ReturnType<typeof fakeProxmox>,
-  kv: Record<string, unknown> = { instance: INSTANCE },
-  settings: Record<string, unknown> = {},
-) {
-  const t = createTestContext({ id: "proxmox-terminal", kv });
-  const b = new ProxmoxTerminalBackend({
-    ctx: t.ctx,
-    kv: t.ctx.kv,
-    settings: () => readSettings({ apiUrl: "https://pve:8006", node: "g", ...settings }),
-    token: async () => "u@pve!t=x",
-    sshAuth: async () => ({ privateKey: "k" }),
-    proxmox: () => f.api,
-    connect: () => fakeConn(),
-  });
-  return { b, t, kvNow: () => Object.fromEntries(t.kv) as Record<string, unknown> };
-}
-
-const ours = (chatId: string, status: Ct["status"] = "running"): Ct => ({
-  status,
-  hostname: `dt-${chatId}`,
-  description: describeClone(chatId, INSTANCE),
-});
-const rec = (vmid: number, extra: Record<string, unknown> = {}) => ({ vmid, hostname: "h", createdAt: 1, lastUsedAt: Date.now(), ...extra });
-// Not a git repo, so spawn fails fast right AFTER provisioning — which is all
-// these tests are about. Snapshotting a real repo costs seconds on Windows.
-const notARepo = mkdtempSync(join(tmpdir(), "pt-norepo-"));
-afterAll(() => rmSync(notARepo, { recursive: true, force: true }));
-const spawnInfo = (name = "main") => ({ chatId: "c1", name, cwd: notARepo, signal: new AbortController().signal });
+const backend = terminal;
+const spawnInfo = (name = "main") => ({ chatId: "c1", name, cwd: "/w", signal: new AbortController().signal });
 const changing = (calls: string[]) => calls.filter((c) => /^DELETE|status\/(stop|shutdown|start)/.test(c));
 
 describe("idle stop survives a restart", () => {
@@ -192,7 +72,8 @@ describe("idle stop survives a restart", () => {
 describe("destroy retries", () => {
   it("rejects when Proxmox is unreachable, keeps the destroy pending, and finishes it after a restart", async () => {
     const f = fakeProxmox({ 9002: ours("c1") });
-    const { b, kvNow } = backend(f, { instance: INSTANCE, "chat:c1": rec(9002) });
+    // An instance past its first 0.2 reconcile: the queue is worked from the boot sweep.
+    const { b, kvNow } = backend(f, { instance: INSTANCE, "migrated-destroys": true, "chat:c1": rec(9002) });
     f.state.down = true;
     await expect(b.onChatDeleted({ chatId: "c1" })).rejects.toThrow(/unreachable/);
     expect(kvNow()["destroy:9002"]).toMatchObject({ chatId: "c1", attempts: 1 });
@@ -289,9 +170,35 @@ describe("reconcile", () => {
 
   it("destroys a clone no terminal has used for destroyUnusedDays, though its chat lives on", async () => {
     const f = fakeProxmox({ 9002: ours("c1", "stopped") });
-    const { b } = backend(f, { instance: INSTANCE, "chat:c1": rec(9002, { lastUsedAt: Date.now() - 8 * 86_400_000 }) });
+    const { b } = backend(f, { instance: INSTANCE, "chat:c1": rec(9002, { layout: 2, lastUsedAt: Date.now() - 8 * 86_400_000 }) });
     await b.reconcile({ chats: ["c1"] });
     expect(f.cts.has(9002)).toBe(false);
+  });
+
+  it("never destroys an unrescued pre-0.2 container for being unused; deleting its chat still does", async () => {
+    const f = fakeProxmox({ 9002: ours("c1", "stopped") });
+    const { b } = backend(f, { instance: INSTANCE, "chat:c1": rec(9002, { lastUsedAt: Date.now() - 80 * 86_400_000 }) });
+    await b.reconcile({ chats: ["c1"] });
+    expect(f.cts.has(9002)).toBe(true);
+    await b.onChatDeleted({ chatId: "c1" });
+    expect(f.cts.has(9002)).toBe(false);
+  });
+
+  it("turns a destroy 0.1 queued for a chat that still exists back into its record, and keeps the container", async () => {
+    const f = fakeProxmox({ 9002: ours("c1", "stopped"), 9003: ours("gone", "stopped") });
+    const { b, kvNow } = backend(f, {
+      instance: INSTANCE,
+      "destroy:9002": { chatId: "c1", vmid: 9002, hostname: "dt-c1", attempts: 3, nextAt: 0, lastError: "unreachable" },
+      "destroy:9003": { chatId: "gone", vmid: 9003, hostname: "dt-gone", attempts: 1, nextAt: 0 },
+    });
+    await b.start(); // the boot sweep before reconcile holds the queue
+    expect(f.cts.has(9002)).toBe(true);
+    expect(f.cts.has(9003)).toBe(true);
+    await b.reconcile({ chats: ["c1"] });
+    expect(f.cts.has(9002)).toBe(true);
+    expect(f.cts.has(9003)).toBe(false);
+    expect(kvNow()["chat:c1"]).toMatchObject({ vmid: 9002 });
+    expect(kvNow()["migrated-destroys"]).toBe(true);
   });
 
   it("starts the unused clock at upgrade for a record that predates it", async () => {

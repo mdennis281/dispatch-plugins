@@ -101,8 +101,10 @@ export interface LeaseChat<R extends MachineRef> {
   record?: ChatRecord<R>;
   /**
    * Call the moment a new machine exists, so a failure after that still
-   * cleans it up. A ref naming a different machine starts a fresh record:
-   * fields kept for the old machine do not carry over.
+   * cleans it up. It always starts a fresh record (a new `createdAt`; fields
+   * kept for the old machine do not carry over), even when the new machine
+   * reuses the old one's key: a container re-created under the same vmid is
+   * not the one that was there.
    */
   remember(ref: R): Promise<void>;
 }
@@ -242,6 +244,8 @@ export class MachineLifecycle<R extends MachineRef> {
               throw new Error(`chat ${chatId}'s machine was being made while the chat was being cleaned up`);
             }
             st.ref = ref;
+            st.idleDeadline = undefined;
+            await this.write(st, async () => this.opts.kv?.delete(`chat:${chatId}`));
             await this.persist(st);
           },
         }),
@@ -554,11 +558,17 @@ export class MachineLifecycle<R extends MachineRef> {
 
   /**
    * Stop the chat's machine, unless a lease has happened since the stop was
-   * decided (`gen`). The next lease starts it again. Detaches first.
+   * decided (`gen`) or something runs there now. The next lease starts it
+   * again. Detaches first.
+   *
+   * Busy matters as well as the generation: an idle event the caller handles
+   * asynchronously can capture a generation AFTER a concurrent lease bumped
+   * it, and that stop would otherwise land on a machine in use. A busy
+   * machine keeps its deadline, and the sweep tries again once it is quiet.
    */
   private stopIdle(st: LifeState<R>, gen: number): Promise<void> {
     return this.serial(st, async () => {
-      if (st.generation !== gen || !st.ref) return;
+      if (st.generation !== gen || !st.ref || this.busy(st)) return;
       await this.detach(st, "stop");
       // Detaching may have yielded to a lease that queued behind us; it
       // bumped the generation, and the machine is about to be in use.
@@ -581,6 +591,15 @@ export class MachineLifecycle<R extends MachineRef> {
     await this.enqueueDestroy(await this.stateFor(chatId), "its chat was deleted");
     // A retry from core after an earlier failure: the record is all that is left.
     for (const p of pending) await this.attemptDestroy(p);
+  }
+
+  /**
+   * Destroy the chat's machine now, though the chat goes on (a human asked
+   * for it): queued and retried like any destroy, after any lease or stop in
+   * flight. The chat's next lease makes a new machine.
+   */
+  async destroyMachine(chatId: string, why: string): Promise<void> {
+    await this.enqueueDestroy(await this.stateFor(chatId), why);
   }
 
   /**

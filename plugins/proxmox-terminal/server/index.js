@@ -3,7 +3,7 @@ import { dirname as __pt_dirname } from "node:path";
 const __filename = __pt_fileURLToPath(import.meta.url);
 const __dirname = __pt_dirname(__filename);
 import { EventEmitter } from "node:events";
-import { createServer } from "node:net";
+import { createServer, connect } from "node:net";
 import require$$0$4 from "net";
 import require$$1$1 from "stream";
 import require$$0$3 from "path";
@@ -20,11 +20,11 @@ import require$$0$6 from "events";
 import require$$0$5 from "util";
 import require$$1$2 from "zlib";
 import { StringDecoder } from "node:string_decoder";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, rm, stat, copyFile, utimes, readFile } from "node:fs/promises";
-import { tmpdir, homedir } from "node:os";
-import { resolve, isAbsolute, join, basename } from "node:path";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import "node:path";
 import { request } from "node:https";
 function definePlugin(mod) {
   return mod;
@@ -2414,7 +2414,7 @@ function requireNaclFast() {
           sel25519(p[i], q[i], b);
         }
       }
-      function pack2(r, p) {
+      function pack(r, p) {
         var tx = gf(), ty = gf(), zi = gf();
         inv25519(zi, p[2]);
         M(tx, p[0], zi);
@@ -2454,7 +2454,7 @@ function requireNaclFast() {
         d[31] &= 127;
         d[31] |= 64;
         scalarbase(p, d);
-        pack2(pk, p);
+        pack(pk, p);
         for (i = 0; i < 32; i++) sk[i + 32] = pk[i];
         return 0;
       }
@@ -2503,7 +2503,7 @@ function requireNaclFast() {
         crypto_hash(r, sm.subarray(32), n + 32);
         reduce(r);
         scalarbase(p, r);
-        pack2(sm, p);
+        pack(sm, p);
         for (i = 32; i < 64; i++) sm[i] = sk[i];
         crypto_hash(h, sm, n + 64);
         reduce(h);
@@ -2559,7 +2559,7 @@ function requireNaclFast() {
         scalarmult(p, q, h);
         scalarbase(q, sm.subarray(32));
         add(p, q);
-        pack2(t, p);
+        pack(t, p);
         n -= 64;
         if (crypto_verify_32(sm, 0, t, 0)) {
           for (i = 0; i < n; i++) m[i] = 0;
@@ -6519,7 +6519,7 @@ function requireCrypto() {
     MAC_INFO,
     bindingAvailable: !!binding,
     init: (() => {
-      return new Promise(async (resolve2, reject) => {
+      return new Promise(async (resolve, reject) => {
         try {
           POLY1305_WASM_MODULE = await requirePoly1305()();
           POLY1305_RESULT_MALLOC = POLY1305_WASM_MODULE._malloc(16);
@@ -6531,7 +6531,7 @@ function requireCrypto() {
         } catch (ex) {
           return reject(ex);
         }
-        resolve2();
+        resolve();
       });
     })(),
     NullCipher,
@@ -6549,7 +6549,7 @@ function requireKeyParser() {
   const {
     createDecipheriv,
     createECDH,
-    createHash,
+    createHash: createHash2,
     createHmac,
     createSign,
     createVerify,
@@ -7237,11 +7237,11 @@ ${formatted}-----END ${type} KEY-----`;
               );
             }
             const ivSlice = bufferSlice(cipherIV, 0, 8);
-            let cipherKey = createHash("md5").update(passphrase).update(ivSlice).digest();
+            let cipherKey = createHash2("md5").update(passphrase).update(ivSlice).digest();
             while (cipherKey.length < encInfo.keyLen) {
               cipherKey = combineBuffers(
                 cipherKey,
-                createHash("md5").update(cipherKey).update(passphrase).update(ivSlice).digest()
+                createHash2("md5").update(cipherKey).update(passphrase).update(ivSlice).digest()
               );
             }
             if (cipherKey.length > encInfo.keyLen)
@@ -7406,8 +7406,8 @@ ${formatted}-----END ${type} KEY-----`;
       if (encrypted) {
         const encInfo = CIPHER_INFO[cipherName];
         let cipherKey = combineBuffers(
-          createHash("sha1").update(PPK_PP1).update(passphrase).digest(),
-          createHash("sha1").update(PPK_PP2).update(passphrase).digest()
+          createHash2("sha1").update(PPK_PP1).update(passphrase).digest(),
+          createHash2("sha1").update(PPK_PP2).update(passphrase).digest()
         );
         if (cipherKey.length > encInfo.keyLen)
           cipherKey = bufferSlice(cipherKey, 0, encInfo.keyLen);
@@ -7447,7 +7447,7 @@ ${formatted}-----END ${type} KEY-----`;
         passphrase = EMPTY_PASSPHRASE;
       const calcMAC = createHmac(
         "sha1",
-        createHash("sha1").update("putty-private-key-file-mac-key").update(passphrase).digest()
+        createHash2("sha1").update("putty-private-key-file-mac-key").update(passphrase).digest()
       ).update(macData).digest("hex");
       if (calcMAC !== mac) {
         if (encrypted) {
@@ -7789,7 +7789,7 @@ function requireAgent() {
   hasRequiredAgent = 1;
   const { Socket } = require$$0$4;
   const { Duplex } = require$$1$1;
-  const { resolve: resolve2 } = require$$0$3;
+  const { resolve } = require$$0$3;
   const { readFile: readFile2 } = require$$1;
   const { execFile: execFile2, spawn: spawn2 } = require$$4;
   const { isParsedKey, parseKey } = requireKeyParser();
@@ -7925,7 +7925,7 @@ function requireAgent() {
     const RET_ERR_BINSTDIN = 13;
     const RET_ERR_BINSTDOUT = 14;
     const RET_ERR_BADLEN = 15;
-    const EXEPATH = resolve2(__dirname, "..", "util/pagent.exe");
+    const EXEPATH = resolve(__dirname, "..", "util/pagent.exe");
     const ERROR = {
       [RET_ERR_BADARGS]: new Error("Invalid pagent.exe arguments"),
       [RET_ERR_UNAVAILABLE]: new Error("Pageant is not running"),
@@ -9770,7 +9770,7 @@ function requireKex() {
     createDiffieHellman,
     createDiffieHellmanGroup,
     createECDH,
-    createHash,
+    createHash: createHash2,
     createPublicKey,
     diffieHellman,
     generateKeyPairSync,
@@ -10196,7 +10196,7 @@ function requireKex() {
             DISCONNECT_REASON.KEY_EXCHANGE_FAILED
           );
         }
-        const hash = createHash(this.hashName);
+        const hash = createHash2(this.hashName);
         hashString(hash, isServer ? this._remoteIdentRaw : this._identRaw);
         hashString(hash, isServer ? this._identRaw : this._remoteIdentRaw);
         hashString(hash, isServer ? this._remoteKexinit : this._kexinit);
@@ -11204,9 +11204,9 @@ function requireKex() {
   function generateKEXVal(len, hashName, secret, exchangeHash, sessionID, char) {
     let ret;
     if (len) {
-      let digest = createHash(hashName).update(secret).update(exchangeHash).update(char).update(sessionID).digest();
+      let digest = createHash2(hashName).update(secret).update(exchangeHash).update(char).update(sessionID).digest();
       while (digest.length < len) {
-        const chunk = createHash(hashName).update(secret).update(exchangeHash).update(digest).digest();
+        const chunk = createHash2(hashName).update(secret).update(exchangeHash).update(digest).digest();
         const extended = Buffer.allocUnsafe(digest.length + chunk.length);
         extended.set(digest, 0);
         extended.set(chunk, digest.length);
@@ -16590,7 +16590,7 @@ function requireClient() {
   if (hasRequiredClient) return client;
   hasRequiredClient = 1;
   const {
-    createHash,
+    createHash: createHash2,
     getHashes,
     randomFillSync
   } = require$$0$2;
@@ -16812,7 +16812,7 @@ function requireClient() {
         }
         hostVerifier = (key, verify) => {
           if (hashAlgo)
-            key = createHash(hashAlgo).update(key).digest("hex");
+            key = createHash2(hashAlgo).update(key).digest("hex");
           const ret = hashCb(key, verify);
           if (ret !== void 0)
             verify(ret);
@@ -20140,7 +20140,7 @@ class RemoteShell extends EventEmitter {
     this.ch = ch;
     this.cwd = cwd;
     this.killer = killer;
-    this.ready = new Promise((resolve2, reject) => this.settle = { resolve: resolve2, reject });
+    this.ready = new Promise((resolve, reject) => this.settle = { resolve, reject });
     this.ready.catch(() => {
     });
     this.stdin = {
@@ -20233,10 +20233,20 @@ class RemoteShell extends EventEmitter {
     this.finish(null);
   }
 }
+function hostKeyFingerprint(key) {
+  return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
+}
 function trustProvisioner() {
   return () => true;
 }
+function pinnedHostKey(fingerprints) {
+  const want = new Set(typeof fingerprints === "string" ? [fingerprints] : fingerprints);
+  return (key) => want.has(hostKeyFingerprint(key));
+}
 const exits = /* @__PURE__ */ new WeakMap();
+function channelExit(ch) {
+  return exits.get(ch);
+}
 class SshConnection extends EventEmitter {
   constructor(target) {
     super();
@@ -20270,7 +20280,7 @@ class SshConnection extends EventEmitter {
    * reason to wait.
    */
   connectOnce() {
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve, reject) => {
       const client2 = new libExports.Client();
       const cfg = {
         host: this.target.host,
@@ -20302,7 +20312,7 @@ class SshConnection extends EventEmitter {
         });
         client2.on("error", () => {
         });
-        resolve2();
+        resolve();
       }).once("error", (err) => {
         client2.end();
         reject(err);
@@ -20316,7 +20326,7 @@ class SshConnection extends EventEmitter {
   /** Run a command to completion; optionally feed it stdin. */
   exec(command, opts = {}) {
     const client2 = this.requireClient();
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve, reject) => {
       client2.exec(command, (err, ch) => {
         if (err) return reject(err);
         const stdout = [];
@@ -20331,7 +20341,7 @@ class SshConnection extends EventEmitter {
         ch.on("exit", (c) => code = c);
         ch.on("close", () => {
           if (timer) clearTimeout(timer);
-          resolve2({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+          resolve({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
         });
         if (opts.stdin) {
           opts.stdin(ch).catch((e) => {
@@ -20351,11 +20361,11 @@ class SshConnection extends EventEmitter {
    */
   channel(command) {
     const client2 = this.requireClient();
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve, reject) => {
       client2.exec(command, (err, ch) => {
         if (err) return reject(err);
         ch.once("exit", (code, signal) => exits.set(ch, { code, ...signal ? { signal } : {} }));
-        resolve2(ch);
+        resolve(ch);
       });
     });
   }
@@ -20375,7 +20385,7 @@ class SshConnection extends EventEmitter {
     const client2 = this.requireClient();
     const cmd = remoteShellCommand(cwd, env);
     const host = this.target.host;
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve, reject) => {
       client2.exec(cmd, (err, ch) => {
         if (err) return reject(err);
         const sh = new RemoteShell(ch, cwd, (pid, signal) => this.signalSession(pid, signal));
@@ -20386,7 +20396,7 @@ class SshConnection extends EventEmitter {
         sh.ready.then(
           () => {
             clearTimeout(timer);
-            resolve2(sh);
+            resolve(sh);
           },
           (e) => {
             clearTimeout(timer);
@@ -20414,9 +20424,9 @@ class SshConnection extends EventEmitter {
    * (nothing listening, or a key whose `permitopen` doesn't cover it).
    */
   tcp(host, port) {
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve, reject) => {
       if (!this.isOpen || !this.client) return reject(new Error("not connected"));
-      this.client.forwardOut("127.0.0.1", 0, host, port, (err, stream) => err ? reject(err) : resolve2(stream));
+      this.client.forwardOut("127.0.0.1", 0, host, port, (err, stream) => err ? reject(err) : resolve(stream));
     });
   }
   /**
@@ -20424,7 +20434,7 @@ class SshConnection extends EventEmitter {
    * 127.0.0.1:<remotePort> on the machine. Resolves with the local port.
    */
   forward(remotePort, remoteHost = "127.0.0.1") {
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve, reject) => {
       const server2 = createServer((sock) => {
         if (!this.isOpen) return sock.destroy();
         this.tcp(remoteHost, remotePort).then(
@@ -20440,7 +20450,7 @@ class SshConnection extends EventEmitter {
       server2.on("error", reject);
       server2.listen(0, "127.0.0.1", () => {
         const { port } = server2.address();
-        resolve2({ localPort: port, close: () => server2.close() });
+        resolve({ localPort: port, close: () => server2.close() });
       });
     });
   }
@@ -20465,7 +20475,6 @@ function toSsh2(verifier) {
     return void 0;
   });
 }
-const FIXED_DATE = "1700000000 +0000";
 function git(cwd, args, env = {}, input) {
   return new Promise((res, rej) => {
     const child = execFile(
@@ -20485,47 +20494,6 @@ function git(cwd, args, env = {}, input) {
     if (input !== void 0) child.stdin?.end(input);
   });
 }
-async function repoInfo(cwd) {
-  const root = await git(cwd, ["rev-parse", "--show-toplevel"]);
-  const head = await headOf(root);
-  const branch = await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => void 0);
-  const originUrl = await git(root, ["remote", "get-url", "origin"]).catch(() => void 0);
-  return { root: resolve(root), head, branch: branch || void 0, originUrl: originUrl || void 0 };
-}
-async function headOf(root) {
-  return await git(root, ["rev-parse", "-q", "--verify", "HEAD^{commit}"]).catch(() => "") || void 0;
-}
-async function snapshot(root) {
-  const realIndex = await git(root, ["rev-parse", "--git-path", "index"]);
-  const indexPath = isAbsolute(realIndex) ? realIndex : join(root, realIndex);
-  const dir = await mkdtemp(join(tmpdir(), "dispatch-snap-"));
-  const tmpIndex = join(dir, "index");
-  try {
-    await copyIndex(indexPath, tmpIndex);
-    const env = { GIT_INDEX_FILE: tmpIndex };
-    await git(root, ["add", "-A"], env);
-    const tree = await git(root, ["write-tree"], env);
-    const head = await headOf(root);
-    const parent = head ? ["-p", head] : [];
-    return await git(root, ["commit-tree", tree, ...parent, "-m", "dispatch: working-tree snapshot"], {
-      GIT_AUTHOR_NAME: "Dispatch",
-      GIT_AUTHOR_EMAIL: "dispatch@localhost",
-      GIT_COMMITTER_NAME: "Dispatch",
-      GIT_COMMITTER_EMAIL: "dispatch@localhost",
-      GIT_AUTHOR_DATE: FIXED_DATE,
-      GIT_COMMITTER_DATE: FIXED_DATE
-    });
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => {
-    });
-  }
-}
-async function copyIndex(from, to) {
-  const st = await stat(from).catch(() => void 0);
-  if (!st) return;
-  await copyFile(from, to);
-  await utimes(to, st.atime, st.mtime);
-}
 async function localHas(root, shas) {
   const asked = shas.filter((sha) => /^[0-9a-f]{40}$/.test(sha));
   if (!asked.length) return [];
@@ -20533,235 +20501,18 @@ async function localHas(root, shas) {
 `).join(""))).split("\n");
   return asked.filter((_, i) => / commit \d+$/.test(lines[i] ?? ""));
 }
-function pack(root, tip, exclude, sink) {
-  return new Promise((res, rej) => {
-    const child = spawn("git", ["pack-objects", "--revs", "--stdout", "-q"], {
-      cwd: root,
-      windowsHide: true,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
-    });
-    let bytes = 0;
-    let stderr = "";
-    child.stdout.on("data", (c) => {
-      bytes += c.length;
-    });
-    child.stdout.pipe(sink, { end: true });
-    child.stderr.on("data", (c) => stderr += c.toString());
-    child.on("error", rej);
-    child.on("close", (code) => code === 0 ? res(bytes) : rej(new Error(`git pack-objects: ${stderr.trim() || code}`)));
-    child.stdin.end([tip, ...exclude.map((s) => `^${s}`)].join("\n") + "\n");
-  });
-}
-function remotePathFor(localRoot, localCwd, remoteRoot) {
-  const norm = (p) => resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
-  const root = norm(localRoot);
-  const cwd = norm(localCwd);
-  const same = process.platform === "win32" ? cwd.toLowerCase() === root.toLowerCase() : cwd === root;
-  const inside = process.platform === "win32" ? cwd.toLowerCase().startsWith(root.toLowerCase() + "/") : cwd.startsWith(root + "/");
-  if (same || !inside) return remoteRoot;
-  return `${remoteRoot}/${cwd.slice(root.length + 1)}`;
-}
-class RemoteCheckouts {
-  constructor(opts) {
-    this.opts = opts;
-  }
-  repos = /* @__PURE__ */ new Map();
-  /** Serialises syncs: several shells in one chat share one checkout. */
-  syncChain = Promise.resolve();
-  /**
-   * The machine's copy of a local repo: seeded once, from GitHub when the
-   * repo's origin is a public GitHub repo (shallow, so the first pack is just
-   * the local delta), otherwise an empty repo the first pack fills.
-   *
-   * Checked again on every new connection. A connection after a drop may
-   * reach a different disk (a machine re-provisioned for the chat, or wiped),
-   * and what this process remembers — that the checkout exists, which
-   * snapshot it holds — is only true of the old one. Trusting it skipped the
-   * seed and the sync, and the next shell started in a directory that wasn't
-   * there.
-   */
-  ensure(root, local) {
-    const conn = this.opts.conn();
-    const existing = this.repos.get(root);
-    if (existing?.seeded && existing.on === conn) return existing.seeded.then(() => existing);
-    const remote = existing?.remote ?? `${this.opts.workDir()}/${safeName(basename(root))}`;
-    const entry = existing ?? { remote };
-    entry.on = conn;
-    this.repos.set(root, entry);
-    entry.seeded = (async () => {
-      const [mark, head] = (await conn.exec(`test -d ${sq(remote)}/.git && echo yes && git -C ${sq(remote)} rev-parse -q --verify HEAD`)).stdout.trim().split(/\s+/);
-      if (entry.lastSynced && head !== entry.lastSynced) entry.lastSynced = void 0;
-      if (mark === "yes") return;
-      const https = githubHttps(local.originUrl);
-      if (https) {
-        const branchArg = local.branch ? `--branch ${sq(local.branch)} ` : "";
-        const r = await conn.exec(
-          `mkdir -p ${sq(this.opts.workDir())} && GIT_TERMINAL_PROMPT=0 git clone -q --depth 50 --single-branch ${branchArg}${sq(https)} ${sq(remote)}`,
-          { timeoutMs: 3e5 }
-        );
-        if (r.code !== 0 && local.branch) {
-          await conn.exec(`rm -rf ${sq(remote)}`);
-          await conn.exec(`GIT_TERMINAL_PROMPT=0 git clone -q --depth 50 ${sq(https)} ${sq(remote)}`, { timeoutMs: 3e5 });
-        }
-      }
-      await conn.run(`mkdir -p ${sq(remote)} && cd ${sq(remote)} && (test -d .git || git init -q)`);
-    })().catch((err) => {
-      this.repos.delete(root);
-      throw err;
-    });
-    return entry.seeded.then(() => entry);
-  }
-  /**
-   * Bring the machine's checkout to the local worktree's current state.
-   * Cheap when nothing changed: the snapshot sha is stable, and an unchanged
-   * one is a no-op.
-   */
-  sync(root) {
-    const run = this.syncChain.then(async () => {
-      const entry = this.repos.get(root);
-      const conn = this.opts.conn();
-      if (!entry || !conn?.isOpen) return;
-      const snap = await snapshot(root);
-      if (snap === entry.lastSynced) return;
-      const remote = sq(entry.remote);
-      const refs = await conn.exec(`cd ${remote} && git for-each-ref --format='%(objectname)' && git rev-parse -q --verify HEAD`);
-      const exclude = await localHas(root, [...new Set(refs.stdout.split(/\s+/).filter(Boolean))]);
-      const r = await conn.exec(`cd ${remote} && git index-pack --stdin >/dev/null`, {
-        stdin: async (ch) => {
-          await pack(root, snap, exclude, ch);
-        },
-        timeoutMs: 6e5
-      });
-      if (r.code !== 0) throw new Error(`index-pack on the remote failed: ${r.stderr.trim()}`);
-      await conn.run(`cd ${remote} && git update-ref refs/dispatch/snapshot ${snap} && git checkout -q --force --detach ${snap}`);
-      entry.lastSynced = snap;
-    });
-    this.syncChain = run.catch(() => {
-    });
-    return run;
-  }
-  /**
-   * Re-sync before every command. Dispatch writes each command and then its
-   * sentinel probe as two writes; the probe (`__cm_ec=…`) needs no sync. Writes
-   * stay in order on one promise chain. A failed sync is said ON the terminal's
-   * stderr and the command still runs, against the last good snapshot — a
-   * silent stale checkout would be worse than a visible one.
-   */
-  syncBeforeEachCommand(root, h) {
-    let chain = Promise.resolve();
-    const stderr = h.stderr;
-    const write = (chunk) => {
-      const isProbe = chunk.startsWith("__cm_ec=");
-      chain = chain.then(async () => {
-        if (!isProbe) {
-          await this.sync(root).catch((err) => {
-            stderr.emit(
-              "data",
-              `[${this.opts.label}] could not sync your local changes (${err instanceof Error ? err.message : String(err)}); this command runs against the last synced snapshot.
-`
-            );
-          });
-        }
-        h.stdin.write(chunk);
-      });
-    };
-    return {
-      stdin: { write, end: () => void chain.then(() => h.stdin.end?.()), on: (e, l) => h.stdin.on?.(e, l) },
-      stdout: h.stdout,
-      stderr: h.stderr,
-      kill: (sig) => h.kill(sig),
-      on: ((e, l) => h.on(e, l)),
-      cwd: h.cwd
-    };
-  }
-}
-function safeName(s) {
-  return s.replace(/[^A-Za-z0-9._-]/g, "_") || "repo";
-}
-function githubHttps(url) {
-  if (!url) return void 0;
-  const m = url.match(/^https?:\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i) ?? url.match(/^(?:ssh:\/\/)?git@github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
-  return m ? `https://github.com/${m[1]}/${m[2]}.git` : void 0;
-}
-class PortWatch {
-  constructor(opts) {
-    this.opts = opts;
-  }
-  timer;
-  forwards = /* @__PURE__ */ new Map();
-  start() {
-    if (this.timer) return;
-    const { conn: connOf, publish, log, chatId } = this.opts;
-    const probe = this.opts.probe ?? "ss -Htln 2>/dev/null";
-    const parse = this.opts.parse ?? parseListeners;
-    const tick = async () => {
-      const conn = connOf();
-      if (!conn?.isOpen) return;
-      const r = await conn.exec(probe, { timeoutMs: 1e4 }).catch(() => void 0);
-      if (!r || r.code !== 0) return;
-      const ports = parse(r.stdout);
-      for (const [port, host] of ports) {
-        if (this.forwards.has(port)) continue;
-        try {
-          const fwd = await conn.forward(port, host);
-          const withdraw = publish({ remotePort: port, url: `http://127.0.0.1:${fwd.localPort}` });
-          this.forwards.set(port, { close: fwd.close, withdraw });
-          log.info(`forwarding ${this.opts.host()}:${port} → 127.0.0.1:${fwd.localPort}`);
-        } catch (err) {
-          log.warn(`could not forward port ${port} for chat ${chatId}: ${String(err)}`);
-        }
-      }
-      for (const [port, f] of this.forwards) {
-        if (!ports.has(port)) {
-          f.withdraw();
-          f.close();
-          this.forwards.delete(port);
-        }
-      }
-    };
-    this.timer = setInterval(() => void tick(), this.opts.intervalMs ?? 3e3);
-    this.timer.unref?.();
-    void tick();
-  }
-  /** Stop polling and withdraw every forward. */
-  stop() {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = void 0;
-    for (const f of this.forwards.values()) {
-      f.withdraw();
-      f.close();
-    }
-    this.forwards.clear();
-  }
-}
-function parseListeners(out) {
-  const ports = /* @__PURE__ */ new Map();
-  for (const line of out.split("\n")) {
-    const cols = line.trim().split(/\s+/);
-    const local = cols[3];
-    if (!local) continue;
-    const cut = local.lastIndexOf(":");
-    const port = Number(local.slice(cut + 1));
-    if (!Number.isInteger(port) || port < 1024 || port > 65535) continue;
-    const addr = local.slice(0, cut).replace(/^\[|\]$/g, "").replace(/%.*$/, "");
-    const host = addr === "*" || addr === "0.0.0.0" || addr === "::" ? "127.0.0.1" : addr;
-    const prev = ports.get(port);
-    if (!prev || host === "127.0.0.1") ports.set(port, host);
-  }
-  return ports;
-}
 function withDeadline(p, ms, signal) {
-  return new Promise((resolve2) => {
-    const t = setTimeout(() => resolve2(void 0), ms);
-    signal?.addEventListener("abort", () => resolve2(void 0), { once: true });
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(void 0), ms);
+    signal?.addEventListener("abort", () => resolve(void 0), { once: true });
     void p.then(
       (v) => {
         clearTimeout(t);
-        resolve2(v);
+        resolve(v);
       },
       () => {
         clearTimeout(t);
-        resolve2(void 0);
+        resolve(void 0);
       }
     );
   });
@@ -20772,11 +20523,12 @@ function errText(err) {
 const SWEEP_MS = 6e4;
 const RETRY_BASE_MS = 3e4;
 const RETRY_MAX_MS = 30 * 6e4;
-class RemoteChats {
+class MachineLifecycle {
   constructor(opts) {
     this.opts = opts;
     this.provider = opts.provider;
     this.log = opts.log;
+    this.revived = !opts.reviveLiveDestroys;
   }
   chats = /* @__PURE__ */ new Map();
   provider;
@@ -20785,67 +20537,102 @@ class RemoteChats {
   sweepTimer;
   sweepChain = Promise.resolve();
   destroying = /* @__PURE__ */ new Map();
-  /** The chat's live state in this process, if any. */
-  peek(chatId) {
-    return this.chats.get(chatId);
+  /** Set once the revive pass is known done (or not asked for). */
+  revived;
+  /** The chat's machine, as this process knows it. */
+  refOf(chatId) {
+    return this.chats.get(chatId)?.ref;
   }
-  /* --------------------------------------------------------------- spawn */
+  /** The chat's stored record, caller fields included. */
+  async record(chatId) {
+    return this.opts.kv?.get(`chat:${chatId}`);
+  }
+  /* --------------------------------------------------------------- lease */
   /**
-   * A shell on the chat's machine, in the remote twin of `info.cwd`, with the
-   * local worktree synced in before it starts and before every command.
+   * The chat is about to use its machine: bump its generation (so a stop
+   * decided before now is dropped), clear any idle deadline, mark it used,
+   * then run `up` on the chat's op chain — after any stop or destroy already
+   * in flight for the chat, and before any decided later. `up` brings the machine up (or finds it
+   * already up) and returns whatever the caller needs to reach it. The chat
+   * counts as busy until `up` settles.
    */
-  async spawn(info) {
-    const st = await this.stateFor(info.chatId);
+  async lease(chatId, up) {
+    const st = await this.stateFor(chatId);
     st.generation++;
-    if (st.idleTimer) clearTimeout(st.idleTimer);
-    st.idleTimer = void 0;
-    st.idleDeadline = void 0;
+    st.leased = true;
+    st.leasing++;
+    try {
+      if (st.idleTimer) clearTimeout(st.idleTimer);
+      st.idleTimer = void 0;
+      st.idleDeadline = void 0;
+      st.lastUsedAt = Date.now();
+      const out = await this.serial(
+        st,
+        async () => up({
+          chatId,
+          ref: st.ref,
+          record: await this.record(chatId),
+          remember: async (ref) => {
+            if (st.gone) {
+              await this.recordDestroy({ chatId, ...ref, attempts: 0, nextAt: 0 });
+              throw new Error(`chat ${chatId}'s machine was being made while the chat was being cleaned up`);
+            }
+            st.ref = ref;
+            st.idleDeadline = void 0;
+            await this.write(st, async () => this.opts.kv?.delete(`chat:${chatId}`));
+            await this.persist(st);
+          }
+        })
+      );
+      await this.persist(st);
+      return out;
+    } finally {
+      st.leasing--;
+    }
+  }
+  /** The chat used its machine (a command ran): restart its unused clock. */
+  async touch(chatId) {
+    const st = this.chats.get(chatId);
+    if (!st?.ref) return;
     st.lastUsedAt = Date.now();
-    await this.ensureReady(st, info.signal);
     await this.persist(st);
-    const local = await repoInfo(info.cwd);
-    const repo = await st.checkouts.ensure(local.root, local);
-    await st.checkouts.sync(local.root);
-    const conn = st.conn;
-    const handle = await conn.shell(remotePathFor(local.root, info.cwd, repo.remote), {
-      TERM: "dumb",
-      FORCE_COLOR: "0",
-      DISPATCH_TERMINAL: this.opts.backendId
+  }
+  /**
+   * Merge `fields` into the chat's stored record. Only while the record names
+   * `ref` (when given): a write meant for a machine the chat no longer has is
+   * dropped. Resolves false when nothing was written.
+   */
+  async patch(chatId, fields, ref) {
+    const kv = this.opts.kv;
+    const st = this.chats.get(chatId) ?? (await this.record(chatId) ? await this.stateFor(chatId) : void 0);
+    if (!kv || !st?.ref) return false;
+    return this.write(st, async () => {
+      const prev = await kv.get(`chat:${chatId}`);
+      if (!prev || !this.sameMachine(prev, st.ref)) return false;
+      if (ref && !this.sameMachine(prev, ref)) return false;
+      await kv.set(`chat:${chatId}`, { ...prev, ...fields });
+      return true;
     });
-    st.shells.add(handle);
-    handle.on("exit", () => st.shells.delete(handle));
-    st.ports.start();
-    return st.checkouts.syncBeforeEachCommand(local.root, handle);
   }
   /* --------------------------------------------------------- chat state */
   async stateFor(chatId) {
     let st = this.chats.get(chatId);
     if (st) return st;
-    const rec = await this.opts.kv?.get(`chat:${chatId}`);
+    const rec = await this.record(chatId);
     const raced = this.chats.get(chatId);
     if (raced) return raced;
-    const fresh = {
+    st = {
       chatId,
       ref: rec ? this.provider.refOf(rec) : void 0,
-      checkouts: new RemoteCheckouts({
-        conn: () => fresh.conn,
-        workDir: () => this.opts.policy().workDir,
-        label: this.opts.label
-      }),
-      ports: new PortWatch({
-        conn: () => fresh.conn,
-        publish: (p) => this.opts.publishPort({ chatId, ...p }),
-        log: this.log,
-        chatId,
-        host: () => fresh.ref ? this.provider.name(fresh.ref) : chatId
-      }),
-      shells: /* @__PURE__ */ new Set(),
       idleDeadline: rec?.idleDeadline,
       lastUsedAt: rec?.lastUsedAt,
       generation: 0,
-      opChain: Promise.resolve()
+      leasing: 0,
+      leased: false,
+      gone: false,
+      opChain: Promise.resolve(),
+      writeChain: Promise.resolve()
     };
-    st = fresh;
     this.chats.set(chatId, st);
     if (rec && rec.lastUsedAt === void 0) {
       st.lastUsedAt = Date.now();
@@ -20853,17 +20640,37 @@ class RemoteChats {
     }
     return st;
   }
-  /** Write the chat's record back to kv (only once it has a machine). */
-  async persist(st) {
+  sameMachine(rec, ref) {
+    const had = this.provider.refOf(rec);
+    return !!had && this.provider.keyOf(had) === this.provider.keyOf(ref);
+  }
+  /**
+   * Write the chat's record back to kv (only once it has a machine), merged
+   * over what is stored: fields other code keeps there survive. A record for
+   * a different machine is replaced, not merged.
+   */
+  persist(st) {
     const kv = this.opts.kv;
-    if (!st.ref || !kv) return;
-    const prev = await kv.get(`chat:${st.chatId}`);
-    await kv.set(`chat:${st.chatId}`, {
-      ...st.ref,
-      createdAt: prev?.createdAt ?? Date.now(),
-      idleDeadline: st.idleDeadline,
-      lastUsedAt: st.lastUsedAt
+    if (!st.ref || !kv || st.gone) return Promise.resolve();
+    return this.write(st, async () => {
+      const ref = st.ref;
+      if (!ref || st.gone) return;
+      const stored = await kv.get(`chat:${st.chatId}`);
+      const prev = stored && this.sameMachine(stored, ref) ? stored : void 0;
+      await kv.set(`chat:${st.chatId}`, {
+        ...prev,
+        ...ref,
+        createdAt: prev?.createdAt ?? Date.now(),
+        idleDeadline: st.idleDeadline,
+        lastUsedAt: st.lastUsedAt
+      });
     });
+  }
+  write(st, fn) {
+    const run = st.writeChain.then(fn);
+    st.writeChain = run.catch(() => {
+    });
+    return run;
   }
   /** Run one machine operation for a chat, after any already in flight. */
   serial(st, fn) {
@@ -20872,39 +20679,21 @@ class RemoteChats {
     });
     return run;
   }
-  /** Make sure the chat's machine exists, is running, and has an open SSH connection. */
-  ensureReady(st, signal) {
-    if (st.conn?.isOpen) return Promise.resolve();
-    if (!st.ready) {
-      st.ready = this.serial(st, () => st.conn?.isOpen ? Promise.resolve() : this.bringUp(st, signal)).finally(() => {
-        st.ready = void 0;
-      });
+  busy(st) {
+    if (st.leasing > 0) return true;
+    try {
+      return this.opts.busy?.(st.chatId) ?? false;
+    } catch (err) {
+      this.log.warn(`busy check for chat ${st.chatId}: ${errText(err)}`);
+      return true;
     }
-    return st.ready;
   }
-  async bringUp(st, signal) {
-    const conn = await this.provider.bringUp(
-      {
-        chatId: st.chatId,
-        ref: st.ref,
-        remember: async (ref) => {
-          st.ref = ref;
-          await this.persist(st);
-        }
-      },
-      signal
-    );
-    conn.on("close", () => {
-      if (st.conn === conn) this.dropConnection(st);
-    });
-    st.conn = conn;
-  }
-  dropConnection(st) {
-    st.ports.stop();
-    for (const h of [...st.shells]) h.kill();
-    st.shells.clear();
-    st.conn?.close();
-    st.conn = void 0;
+  async detach(st, why) {
+    try {
+      await this.opts.detach?.(st.chatId, why);
+    } catch (err) {
+      this.log.warn(`letting go of chat ${st.chatId}'s machine (${why}): ${errText(err)}`);
+    }
   }
   /* ----------------------------------------------------------- lifecycle */
   /**
@@ -20943,9 +20732,10 @@ class RemoteChats {
    *
    * - `adopt`: also ask the provider for machines tagged with this instance's
    *   id that kv has no record of, and take them back.
-   * - `boot`: a running machine with no live shell and no idle deadline is one
-   *   whose chat was busy when Dispatch died without a clean shutdown —
-   *   nothing will ever fire onChatIdle for it again, so stop it now.
+   * - `boot`: a running machine with no idle deadline, not busy and not leased
+   *   by this process, is one whose chat was busy when Dispatch died without a
+   *   clean shutdown — nothing will ever fire onChatIdle for it again, so stop
+   *   it now.
    * - `liveChats`: every chat that still exists. A machine for any other chat
    *   is destroyed.
    */
@@ -20959,34 +20749,68 @@ class RemoteChats {
     const kv = this.opts.kv;
     if (!this.provider.configured() || !kv) return;
     for (const key of await kv.list("chat:")) await this.stateFor(key.slice("chat:".length));
+    if (!this.revived) {
+      if (opts.liveChats) await this.reviveLiveDestroys(opts.liveChats);
+      else if (await kv.get(this.opts.reviveLiveDestroys.marker)) this.revived = true;
+    }
     if (opts.adopt) await this.adopt().catch((err) => this.log.warn(`re-adopting machines: ${errText(err)}`));
     const now = Date.now();
     for (const key of await kv.list("destroy:")) {
       const p = await kv.get(key);
       if (!p) continue;
       if (!this.provider.refOf(p)) await kv.delete(key);
-      else if (p.nextAt <= now) await this.attemptDestroy(p).catch(() => {
+      else if (this.revived && p.nextAt <= now) await this.attemptDestroy(p).catch(() => {
       });
     }
     const policy = this.opts.policy();
     const unusedMs = policy.destroyUnusedDays > 0 ? policy.destroyUnusedDays * 864e5 : 0;
     for (const st of [...this.chats.values()]) {
       if (!st.ref) continue;
-      const busy = st.shells.size > 0 || !!st.ready;
+      const busy = this.busy(st);
       if (opts.liveChats && !opts.liveChats.has(st.chatId)) {
         await this.enqueueDestroy(st, "its chat no longer exists").catch(() => {
         });
-      } else if (unusedMs && !busy && (st.lastUsedAt ?? now) < now - unusedMs) {
-        await this.enqueueDestroy(st, `unused for ${policy.destroyUnusedDays} days`).catch(() => {
+      } else if (unusedMs && !busy && (st.lastUsedAt ?? now) < now - unusedMs && await this.mayExpire(st)) {
+        await this.enqueueDestroy(st, `unused for ${policy.destroyUnusedDays} days`, st.generation).catch(() => {
         });
       } else if (st.idleDeadline !== void 0 && st.idleDeadline <= now) {
         await this.stopIdle(st, st.generation).catch((err) => this.log.warn(`stopping ${this.provider.name(st.ref)}: ${errText(err)}`));
       } else if (st.idleDeadline !== void 0) {
         this.armIdleTimer(st);
-      } else if (opts.boot && !busy && !st.conn) {
+      } else if (opts.boot && !busy && !st.leased) {
         await this.stopIdle(st, st.generation).catch((err) => this.log.warn(`stopping ${this.provider.name(st.ref)}: ${errText(err)}`));
       }
     }
+  }
+  async mayExpire(st) {
+    if (!this.opts.mayExpire) return true;
+    const rec = await this.record(st.chatId);
+    return !!rec && this.opts.mayExpire(rec);
+  }
+  /** See {@link MachineLifecycleOptions.reviveLiveDestroys}. */
+  async reviveLiveDestroys(live) {
+    const kv = this.opts.kv;
+    const marker = this.opts.reviveLiveDestroys.marker;
+    if (await kv.get(marker)) {
+      this.revived = true;
+      return;
+    }
+    for (const key of await kv.list("destroy:")) {
+      const p = await kv.get(key);
+      const ref = p ? this.provider.refOf(p) : void 0;
+      if (!p || !ref || !live.has(p.chatId)) continue;
+      const st = await this.stateFor(p.chatId);
+      if (st.ref && !this.sameMachine(st.ref, ref)) {
+        continue;
+      }
+      this.log.info(`keeping ${this.provider.name(ref)} for chat ${p.chatId}: its destroy was queued by an older version and the chat still exists`);
+      st.ref = ref;
+      st.lastUsedAt = Date.now();
+      await this.persist(st);
+      await kv.delete(key);
+    }
+    await kv.set(marker, true);
+    this.revived = true;
   }
   /** Take back machines tagged with this instance whose kv record was lost. */
   async adopt() {
@@ -21009,7 +20833,7 @@ class RemoteChats {
   }
   onChatIdle({ chatId }) {
     return (async () => {
-      const st = this.chats.get(chatId) ?? (await this.opts.kv?.get(`chat:${chatId}`) ? await this.stateFor(chatId) : void 0);
+      const st = this.chats.get(chatId) ?? (await this.record(chatId) ? await this.stateFor(chatId) : void 0);
       if (!st?.ref) return;
       const minutes = this.opts.policy().idleStopMinutes;
       if (minutes < 0) return;
@@ -21032,13 +20856,20 @@ class RemoteChats {
     st.idleTimer.unref?.();
   }
   /**
-   * Stop the chat's machine, unless a spawn has happened since the stop was
-   * decided (`gen`). The next spawn starts it again. Ends its shells first.
+   * Stop the chat's machine, unless a lease has happened since the stop was
+   * decided (`gen`) or something runs there now. The next lease starts it
+   * again. Detaches first.
+   *
+   * Busy matters as well as the generation: an idle event the caller handles
+   * asynchronously can capture a generation AFTER a concurrent lease bumped
+   * it, and that stop would otherwise land on a machine in use. A busy
+   * machine keeps its deadline, and the sweep tries again once it is quiet.
    */
   stopIdle(st, gen) {
     return this.serial(st, async () => {
-      if (st.generation !== gen || !st.ref) return;
-      this.dropConnection(st);
+      if (st.generation !== gen || !st.ref || this.busy(st)) return;
+      await this.detach(st, "stop");
+      if (st.generation !== gen) return;
       await this.provider.stop(st.chatId, st.ref);
       st.idleDeadline = void 0;
       await this.persist(st);
@@ -21053,27 +20884,48 @@ class RemoteChats {
    */
   async onChatDeleted({ chatId }) {
     const pending = await this.pendingFor(chatId);
-    const st = await this.stateFor(chatId);
-    if (st.ref) await this.enqueueDestroy(st, "its chat was deleted");
-    else this.forget(st);
+    await this.enqueueDestroy(await this.stateFor(chatId), "its chat was deleted");
     for (const p of pending) await this.attemptDestroy(p);
   }
-  /** Forget the chat's machine and destroy it: pending in kv first, then one attempt now. */
-  async enqueueDestroy(st, why) {
-    const ref = st.ref;
-    const p = { chatId: st.chatId, ...ref, attempts: 0, nextAt: 0 };
-    this.log.info(`destroying ${this.provider.name(ref)} (chat ${p.chatId}): ${why}`);
-    await this.recordDestroy(p);
-    this.forget(st);
-    await this.opts.kv?.delete(`chat:${st.chatId}`);
-    await this.attemptDestroy(p);
+  /**
+   * Destroy the chat's machine now, though the chat goes on (a human asked
+   * for it): queued and retried like any destroy, after any lease or stop in
+   * flight. The chat's next lease makes a new machine.
+   */
+  async destroyMachine(chatId, why) {
+    await this.enqueueDestroy(await this.stateFor(chatId), why);
   }
-  forget(st) {
+  /**
+   * Forget the chat's machine and destroy it: pending in kv first, then one
+   * attempt now. The forgetting runs on the chat's op chain, after any lease
+   * or stop in flight, so neither can write the record back afterwards; the
+   * provider call runs after it, off the chain. With `gen`, a lease since
+   * then cancels it: the machine is in use again.
+   */
+  async enqueueDestroy(st, why, gen) {
+    const p = await this.serial(st, async () => {
+      if (gen !== void 0 && st.generation !== gen) return void 0;
+      const ref = st.ref;
+      if (!ref) {
+        await this.forget(st, "destroy");
+        return void 0;
+      }
+      const pending = { chatId: st.chatId, ...ref, attempts: 0, nextAt: 0 };
+      this.log.info(`destroying ${this.provider.name(ref)} (chat ${st.chatId}): ${why}`);
+      await this.recordDestroy(pending);
+      await this.forget(st, "destroy");
+      await this.write(st, async () => this.opts.kv?.delete(`chat:${st.chatId}`));
+      return pending;
+    });
+    if (p) await this.attemptDestroy(p);
+  }
+  async forget(st, why) {
+    st.gone = true;
     st.generation++;
     if (st.idleTimer) clearTimeout(st.idleTimer);
     st.idleTimer = void 0;
-    this.dropConnection(st);
     if (this.chats.get(st.chatId) === st) this.chats.delete(st.chatId);
+    await this.detach(st, why);
   }
   keyOfPending(p) {
     return this.provider.keyOf(this.provider.refOf(p));
@@ -21129,8 +20981,8 @@ class RemoteChats {
   /**
    * Timed shutdown (core hook).
    * - `restart`: leave machines running — they are reused when Dispatch is
-   *   back. Busy chats get an idle deadline written down, so one whose chat
-   *   never comes back is still stopped by the boot sweep in time.
+   *   back. Chats leased here get an idle deadline written down, so one whose
+   *   chat never comes back is still stopped by the boot sweep in time.
    * - `stop` / `disable`: nothing will manage the machines for a while, so
    *   ask the provider to stop each one, without waiting for it to finish.
    * - `uninstall`: destroy every machine this instance made, waiting as long
@@ -21145,7 +20997,7 @@ class RemoteChats {
     if (!this.provider.configured() || !kv) return this.closeAll();
     for (const key of await kv.list("chat:")) await this.stateFor(key.slice("chat:".length)).catch(() => void 0);
     const chats = [...this.chats.values()].filter((st) => st.ref);
-    this.closeAll();
+    await this.closeAll();
     await this.provider.preflight?.();
     if (e.reason === "uninstall") {
       await this.adopt().catch(() => {
@@ -21175,38 +21027,38 @@ class RemoteChats {
     await withDeadline(Promise.allSettled(chats.map((st) => release(st.chatId, st.ref, reason))), left(), e.signal);
   }
   /**
-   * A chat busy at shutdown has no idle deadline, and nothing will fire
-   * onChatIdle for it after the restart. Give it one now, so the boot sweep
-   * leaves it running for a normal idle period — reusable if the chat comes
-   * back — rather than treating it like a crash's leftovers.
+   * A chat leased in this process with no idle deadline may be busy now, and
+   * nothing will fire onChatIdle for it after the restart. Give it one, so
+   * the boot sweep leaves it running for a normal idle period — reusable if
+   * the chat comes back — rather than treating it like a crash's leftovers.
    */
   async noteDeadlines() {
     const minutes = this.opts.policy().idleStopMinutes;
     if (minutes < 0) return;
     for (const st of this.chats.values()) {
-      if (!st.ref || st.idleDeadline !== void 0 || !st.conn) continue;
+      if (!st.ref || st.idleDeadline !== void 0 || !st.leased) continue;
       st.idleDeadline = Date.now() + minutes * 6e4;
       await this.persist(st);
     }
   }
-  closeAll() {
+  async closeAll() {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = void 0;
     for (const st of this.chats.values()) {
       if (st.idleTimer) clearTimeout(st.idleTimer);
       st.idleTimer = void 0;
-      this.dropConnection(st);
+      await this.detach(st, "close");
     }
   }
   /**
    * Plugin switched off, or Dispatch shutting down on a core without
-   * onShutdown: close connections, leave machines as they are. The idle
+   * onShutdown: let go of everything, leave machines as they are. The idle
    * deadlines written here are what lets the next load stop them on time.
    */
   async dispose() {
     await this.noteDeadlines().catch(() => {
     });
-    this.closeAll();
+    await this.closeAll();
     this.chats.clear();
   }
 }
@@ -21254,6 +21106,523 @@ function coerceSettings(defaults, raw) {
   }
   return out;
 }
+const BACKEND_ID = "proxmox";
+const LABEL = "Proxmox container";
+class ProxmoxForwarder {
+  constructor(o) {
+    this.o = o;
+  }
+  id = BACKEND_ID;
+  label = LABEL;
+  shell = "bash";
+  /** A Proxmox chat's command must never run in a local Windows shell against a different tree. */
+  fallback = "refuse";
+  async dispose() {
+    await this.o.dispose?.();
+  }
+  get spawnTimeoutMs() {
+    return Math.max(30, this.o.settings().spawnTimeoutSeconds) * 1e3;
+  }
+  refusal() {
+    return new Error(this.o.link.reason() || "Remote host went away during the call");
+  }
+  async spawn(info) {
+    const p = this.o.link.get();
+    if (!p) throw this.refusal();
+    const h = await p.backend.spawn(info);
+    if (!h) throw this.refusal();
+    return h;
+  }
+  async spawnProcess(info) {
+    const p = this.o.link.get();
+    if (!p) throw this.refusal();
+    if (!p.backend.spawnProcess) throw new Error("this Remote host cannot run processes on a machine; update it");
+    const h = await p.backend.spawnProcess(info);
+    if (!h) throw this.refusal();
+    return h;
+  }
+  async beforeRun(info) {
+    const p = this.o.link.get();
+    if (!p) return { refuse: this.o.link.reason() };
+    await this.o.life.touch(info.chatId).catch((err) => this.o.log.warn(`touching chat ${info.chatId}: ${String(err)}`));
+    const r = await p.backend.beforeRun?.(info);
+    if (!this.o.link.get()) return { refuse: this.o.link.reason() };
+    return r;
+  }
+  async afterRun(info) {
+    return this.o.link.get()?.backend.afterRun?.(info);
+  }
+  agentNote(info) {
+    const p = this.o.link.get();
+    let machine;
+    if (p) {
+      try {
+        machine = p.backend.agentNote?.(info) ?? void 0;
+      } catch {
+        machine = void 0;
+      }
+    }
+    const own = [
+      `- This terminal's machine is a per-chat Proxmox container (Debian; you are root). It stops when the chat goes idle — the next command starts it again, possibly on a new address — and is destroyed when the chat is deleted. Only installs and build output live only there.`
+    ];
+    if (!p) own.unshift(`- Terminal commands are refused right now: ${this.o.link.reason()}.`);
+    return [machine, ...own].filter(Boolean).join("\n");
+  }
+  async onChatIdle(e) {
+    await this.o.link.quietly(`ending chat ${e.chatId}'s sessions`, (p) => p.endChat(e.chatId));
+    await this.o.life.onChatIdle(e);
+  }
+  async onChatDeleted(e) {
+    await this.o.link.quietly(`forgetting chat ${e.chatId}`, (p) => p.forgetChat(e.chatId));
+    await this.o.life.onChatDeleted(e);
+  }
+}
+const MB = 1024 * 1024;
+const DEFAULT_CAPS = { fileBytes: 50 * MB, totalBytes: 500 * MB, files: 2e4, packBytes: 1024 * MB };
+const RESCUE_BUDGET_MS = 10 * 6e4;
+const PATHS_KEPT = 50;
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const FIXED_DATE = "1700000000 +0000";
+const IDENTITY = {
+  GIT_AUTHOR_NAME: "Dispatch",
+  GIT_AUTHOR_EMAIL: "dispatch@localhost",
+  GIT_COMMITTER_NAME: "Dispatch",
+  GIT_COMMITTER_EMAIL: "dispatch@localhost"
+};
+const SHA = /^[0-9a-f]{40}$/;
+class LegacyRescue {
+  constructor(opts) {
+    this.opts = opts;
+    this.caps = { ...DEFAULT_CAPS, ...opts.caps };
+  }
+  jobs = /* @__PURE__ */ new Map();
+  live = /* @__PURE__ */ new Map();
+  caps;
+  /**
+   * Run the chat's rescue, or join the run already going. Resolves when every
+   * legacy checkout is saved and moved aside (or kept); rejects on any
+   * failure, with the reason — the next run carries on from what is done.
+   */
+  run(job) {
+    const inflight = this.jobs.get(job.chatId);
+    if (inflight) return inflight;
+    const p = this.execute(job).finally(() => {
+      this.jobs.delete(job.chatId);
+      this.live.delete(job.chatId);
+    });
+    this.jobs.set(job.chatId, p);
+    return p;
+  }
+  /** A run is going for the chat right now. */
+  running(chatId) {
+    return this.jobs.has(chatId);
+  }
+  /** What the chat's run is doing, for a refusal: "rescuing the old container: copying repo, 120 MB". */
+  describe(chatId) {
+    const l = this.live.get(chatId);
+    if (!l) return "rescuing the old container";
+    const what = l.d ? `${l.step} ${l.d}` : l.step;
+    return `rescuing the old container: ${what}${l.bytes ? `, ${Math.round(l.bytes / MB)} MB` : ""}`;
+  }
+  /** The stored state of the chat's rescue, if one ever ran. */
+  async state(chatId) {
+    return this.opts.kv?.get(`rescue:${chatId}`);
+  }
+  /* ---------------------------------------------------------------- run */
+  async execute(job) {
+    const key = `rescue:${job.chatId}`;
+    const kv = this.opts.kv;
+    const prior = await kv?.get(key);
+    const state = prior && prior.vmid === job.vmid ? { ...prior, phase: "running", updatedAt: Date.now() } : { vmid: job.vmid, phase: "running", startedAt: Date.now(), updatedAt: Date.now(), entries: {}, failures: prior?.failures ?? 0 };
+    const save = async () => {
+      state.updatedAt = Date.now();
+      await kv?.set(key, state);
+    };
+    await save();
+    const budgetMs = this.opts.budgetMs ?? RESCUE_BUDGET_MS;
+    const deadline = Date.now() + budgetMs;
+    const budget = new AbortController();
+    const timer = setTimeout(() => budget.abort(), budgetMs);
+    timer.unref?.();
+    let remote;
+    try {
+      this.live.set(job.chatId, { step: "connecting" });
+      remote = await job.connect();
+      const ctx = { job, remote, state, save, signal: budget.signal, deadline };
+      const present = await this.listCheckouts(ctx);
+      for (const d of present) {
+        this.checkBudget(ctx);
+        await this.rescueOne(ctx, d);
+      }
+      for (const e of Object.values(state.entries)) if (e.state === "rescued" && !present.includes(e.d)) e.state = "moved";
+      state.phase = "done";
+      state.failures = 0;
+      state.lastError = void 0;
+      await save();
+      const entries = Object.values(state.entries).sort((a, b) => a.d.localeCompare(b.d));
+      return { entries, notice: noticeFor(job, entries), notices: noticesFor(job, entries) };
+    } catch (err) {
+      const why = budget.signal.aborted ? `it ran over its ${Math.round((this.opts.budgetMs ?? RESCUE_BUDGET_MS) / 6e4)}-minute budget` : errText(err);
+      state.phase = "failed";
+      state.failures++;
+      state.lastError = why;
+      await save().catch(() => {
+      });
+      this.opts.log.warn(`rescuing chat ${job.chatId}'s container ${job.vmid} failed (attempt ${state.failures}): ${why}`);
+      throw new Error(`could not rescue the old checkouts on container ${job.vmid}: ${why}`);
+    } finally {
+      clearTimeout(timer);
+      remote?.close?.();
+    }
+  }
+  checkBudget(ctx) {
+    if (ctx.signal.aborted) throw new Error("budget");
+  }
+  async step(ctx, step, d) {
+    this.checkBudget(ctx);
+    await this.opts.afterStep?.(step, d);
+  }
+  timeout(ctx, ms = 12e4) {
+    return Math.max(1e3, Math.min(ms, ctx.deadline - Date.now() + 1e3));
+  }
+  /** The git checkouts directly under workDir, by directory name. */
+  async listCheckouts(ctx) {
+    this.live.set(ctx.job.chatId, { step: "looking" });
+    const w = sq(ctx.job.workDir);
+    const r = await ctx.remote.exec(
+      `[ -d ${w} ] || exit 0; cd ${w} && for d in * .[!.]* ..?*; do [ -d "$d/.git" ] && [ ! -L "$d" ] && printf '%s\\0' "$d"; done; exit 0`,
+      { timeoutMs: this.timeout(ctx) }
+    );
+    if (r.code !== 0) throw new Error(`listing ${ctx.job.workDir}: ${r.stderr.trim()}`);
+    return r.stdout.split("\0").filter(Boolean).sort();
+  }
+  async rescueOne(ctx, d) {
+    const { job, remote, state } = ctx;
+    const dir = sq(`${job.workDir}/${d}`);
+    const sh = async (cmd, opts = {}) => {
+      const env = Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${sq(v)}`).join(" ");
+      const r2 = await remote.exec(`cd ${dir} && ${env ? `export ${env} && ` : ""}${cmd}`, { input: opts.input, timeoutMs: this.timeout(ctx, opts.ms) });
+      if (r2.code !== 0) throw new Error(`on the container, in ${d}: ${r2.stderr.trim() || `exit ${r2.code}`}`);
+      return r2.stdout;
+    };
+    const setLive = (step, bytes) => this.live.set(job.chatId, { step, d, bytes });
+    setLive("inspecting");
+    const info = parseInfo(
+      await sh(
+        [
+          `echo "base=$(git rev-parse -q --verify 'refs/dispatch/snapshot^{commit}')"`,
+          `echo "base1=$(git rev-parse -q --verify 'refs/dispatch/snapshot^1' 2>/dev/null)"`,
+          `echo "head=$(git rev-parse -q --verify 'HEAD^{commit}')"`,
+          `echo "refs=$(git for-each-ref --format='%(objectname)' | tr '\\n' ' ')"`,
+          `echo "shallow=$(cat "$(git rev-parse --git-dir)/shallow" 2>/dev/null | tr '\\n' ' ')"`,
+          `echo "date=$( (git log -1 --format=%cd --date=raw refs/dispatch/snapshot || git log -1 --format=%cd --date=raw HEAD) 2>/dev/null)"`
+        ].join("; ")
+      )
+    );
+    await this.step(ctx, "inspect", d);
+    setLive("matching");
+    const asked = uniq([info.base, info.base1, info.head, ...info.refs]);
+    const marks = uniq(info.base ? [info.base, info.base1] : [info.head]);
+    let repo;
+    let has = [];
+    for (const cand of job.candidates) {
+      const h = await localHas(cand, asked).catch(() => []);
+      if (marks.some((m) => h.includes(m))) {
+        repo = cand;
+        has = h;
+        break;
+      }
+    }
+    if (!repo) {
+      state.entries[d] = {
+        d,
+        state: "kept",
+        reason: info.base || info.head ? "it matches none of this chat's repositories" : "it holds no commit to match it by"
+      };
+      await ctx.save();
+      await this.step(ctx, "attribute", d);
+      return;
+    }
+    await this.step(ctx, "attribute", d);
+    setLive("snapshotting");
+    const untracked = parseSizes(
+      await sh(`git ls-files -o --exclude-standard -z | xargs -0 -r stat --printf='%s\\t%n\\0' --`, { ms: 3e5 })
+    );
+    const { take, left } = this.capped(untracked);
+    const add = take.length ? `git --literal-pathspecs add --pathspec-from-file=- --pathspec-file-nul && ` : "";
+    const tree = (await sh(
+      `gd=$(git rev-parse --git-dir) && idx="$gd/dispatch-rescue-index" && rm -f "$idx" && { [ ! -f "$gd/index" ] || cp -p "$gd/index" "$idx"; } && export GIT_INDEX_FILE="$idx" && git add -u && ${add}git write-tree; rc=$?; rm -f "$idx"; exit $rc`,
+      { input: take.length ? take.map((f) => f.path).join("\0") + "\0" : void 0, ms: 6e5 }
+    )).trim();
+    if (!SHA.test(tree)) throw new Error(`write-tree gave ${JSON.stringify(tree)}`);
+    const from = info.base ?? info.head ?? EMPTY_TREE;
+    const paths = parseNameStatus(await sh(`git diff-tree -r --no-renames --name-status -z ${from} ${tree}`, { ms: 3e5 }));
+    const commits = info.base && info.head && info.head !== info.base ? Number((await sh(`git rev-list --count ${info.base}..${info.head}`)).trim()) || 0 : 0;
+    await this.step(ctx, "snapshot", d);
+    const entry = {
+      d,
+      state: "rescued",
+      repo,
+      pathCount: paths.length,
+      paths: paths.slice(0, PATHS_KEPT),
+      commits,
+      excludedCount: left.length,
+      excluded: left.slice(0, PATHS_KEPT)
+    };
+    if (paths.length > 0 || commits > 0) {
+      setLive("saving");
+      const exclude = has;
+      const parent = info.head && await this.completeOver(sh, info, exclude) ? info.head : void 0;
+      const message = `dispatch rescue: chat ${job.chatId}, container ${job.vmid}, ${d}
+
+last sync ${info.base ?? "none"}
+container HEAD ${info.head ?? "none"}` + (parent ? "" : "\n(no parent: the container's history is not all in your repository)");
+      const date = info.date ?? FIXED_DATE;
+      const commit = (await sh(`git commit-tree ${tree}${parent ? ` -p ${parent}` : ""} -F -`, {
+        input: message,
+        env: { ...IDENTITY, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }
+      })).trim();
+      if (!SHA.test(commit)) throw new Error(`commit-tree gave ${JSON.stringify(commit)}`);
+      await sh(`git update-ref refs/dispatch/rescue ${commit}`);
+      await this.step(ctx, "commit", d);
+      const ref = rescueRef(job.chatId, job.vmid, d);
+      const current = await git(repo, ["rev-parse", "-q", "--verify", `${ref}^{commit}`]).catch(() => "");
+      if (current !== commit || !await this.complete(repo, commit, exclude)) {
+        setLive("copying", 0);
+        await this.transfer(ctx, dir, repo, commit, exclude, (b) => setLive("copying", b));
+        if (!await this.complete(repo, commit, exclude)) throw new Error(`the copy of ${d} arrived incomplete`);
+        await git(repo, ["update-ref", ref, commit]);
+      }
+      entry.ref = ref;
+      entry.commit = commit;
+      entry.diffFrom = info.base && (await localHas(repo, [info.base])).length ? info.base : "HEAD";
+      state.entries[d] = entry;
+      await ctx.save();
+      await this.step(ctx, "transfer", d);
+    } else {
+      state.entries[d] = entry;
+      await ctx.save();
+    }
+    setLive("moving aside");
+    const src = sq(`${job.workDir}/${d}`);
+    const aside = sq(`${job.workDir}.pre-0.2`);
+    const dst = `${job.workDir}.pre-0.2/${d}`;
+    const r = await remote.exec(
+      `if [ -e ${src} ]; then mkdir -p ${aside} && dst=${sq(dst)} && { [ ! -e "$dst" ] || dst="$dst.$(date +%s)"; } && mv ${src} "$dst"; fi`,
+      { timeoutMs: this.timeout(ctx) }
+    );
+    if (r.code !== 0) throw new Error(`moving ${d} aside: ${r.stderr.trim()}`);
+    entry.state = "moved";
+    state.entries[d] = entry;
+    await ctx.save();
+    await this.step(ctx, "move", d);
+  }
+  /** Untracked files, in path order, split into what is taken and what the caps leave out. */
+  capped(files) {
+    const take = [];
+    const left = [];
+    let total = 0;
+    for (const f of [...files].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)) {
+      if (f.path.endsWith("/") || f.bytes > this.caps.fileBytes || total + f.bytes > this.caps.totalBytes || take.length >= this.caps.files) {
+        left.push(f);
+        continue;
+      }
+      take.push(f);
+      total += f.bytes;
+    }
+    return { take, left };
+  }
+  /**
+   * Would a commit on the container's HEAD arrive whole? Every commit the pack
+   * brings must have each parent either in the pack or in the local repo, and
+   * none may be a shallow boundary (its parent isn't on the container at all).
+   */
+  async completeOver(sh, info, exclude) {
+    const lines = (await sh(`git rev-list --parents ${info.head}${exclude.map((x) => ` ^${x}`).join("")}`, { ms: 3e5 })).split("\n").filter(Boolean).map((l) => l.split(" "));
+    const inPack = new Set(lines.map((l) => l[0]));
+    const local = new Set(exclude);
+    const shallow = new Set(info.shallow);
+    for (const [c, ...parents] of lines) {
+      if (shallow.has(c)) return false;
+      if (parents.some((p) => !inPack.has(p) && !local.has(p))) return false;
+    }
+    return true;
+  }
+  /** Does the local repo have `commit` and everything it reaches (past what it already had)? */
+  async complete(repo, commit, exclude) {
+    const out = await git(repo, ["rev-list", "--objects", "--missing=print", commit, ...exclude.map((x) => `^${x}`)]).catch(() => void 0);
+    return out !== void 0 && !out.split("\n").some((l) => l.startsWith("?"));
+  }
+  /** Pack `commit` there (thin, minus `exclude`) straight into the local repo's object store. */
+  async transfer(ctx, dir, repo, commit, exclude, onBytes) {
+    const local = spawn("git", ["index-pack", "--stdin", "--fix-thin"], {
+      cwd: repo,
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      stdio: ["pipe", "ignore", "pipe"]
+    });
+    let localErr = "";
+    local.stderr.on("data", (c) => localErr += c.toString());
+    local.stdin.on("error", () => {
+    });
+    const localDone = new Promise((res, rej) => {
+      local.on("error", rej);
+      local.on("close", res);
+    });
+    let tooBig = false;
+    const stop = new AbortController();
+    const signal = AbortSignal.any([stop.signal, ctx.signal]);
+    const revs = [commit, ...exclude.map((x) => `^${x}`)].join(" ");
+    const r = await ctx.remote.pipe(`cd ${dir} && printf '%s\\n' ${revs} | git pack-objects --revs --stdout --thin -q`, local.stdin, {
+      timeoutMs: this.timeout(ctx, 36e5),
+      signal,
+      onBytes: (total) => {
+        onBytes(total);
+        if (total > this.caps.packBytes && !tooBig) {
+          tooBig = true;
+          stop.abort();
+          local.kill();
+        }
+      }
+    }).catch((err) => {
+      local.kill();
+      throw err;
+    });
+    const code = await localDone;
+    if (tooBig) throw new Error(`the copy of what changed there is over ${Math.round(this.caps.packBytes / MB)} MB`);
+    if (r.code !== 0) throw new Error(`pack-objects on the container: ${r.stderr.trim() || `exit ${r.code}`}`);
+    if (code !== 0) throw new Error(`index-pack here: ${localErr.trim() || `exit ${code}`}`);
+  }
+}
+function parseInfo(out) {
+  const kv = /* @__PURE__ */ new Map();
+  for (const line of out.split("\n")) {
+    const i = line.indexOf("=");
+    if (i > 0) kv.set(line.slice(0, i), line.slice(i + 1).trim());
+  }
+  const sha = (k) => SHA.test(kv.get(k) ?? "") ? kv.get(k) : void 0;
+  const list = (k) => (kv.get(k) ?? "").split(/\s+/).filter((s) => SHA.test(s));
+  const date = kv.get("date");
+  return {
+    base: sha("base"),
+    base1: sha("base1"),
+    head: sha("head"),
+    refs: list("refs"),
+    shallow: list("shallow"),
+    date: date && /^\d+ [+-]\d{4}$/.test(date) ? date : void 0
+  };
+}
+function parseSizes(out) {
+  return out.split("\0").filter(Boolean).map((rec) => {
+    const tab = rec.indexOf("	");
+    return { bytes: Number(rec.slice(0, tab)) || 0, path: rec.slice(tab + 1) };
+  });
+}
+function parseNameStatus(out) {
+  const parts = out.split("\0");
+  const res = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    if (!parts[i]) break;
+    res.push({ status: parts[i], path: parts[i + 1] });
+  }
+  return res;
+}
+function uniq(xs) {
+  return [...new Set(xs.filter((x) => !!x))];
+}
+function component(s) {
+  const c = s.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.\.+/g, "_").replace(/^\./, "_").replace(/\.lock$/, "_lock").replace(/\.$/, "_");
+  return c || "_";
+}
+function rescueRef(chatId, vmid, d) {
+  return `refs/dispatch/rescue/proxmox/${component(chatId)}/${vmid}/${component(d)}`;
+}
+const STATUS = { M: "modified", A: "new", D: "deleted", T: "type changed" };
+const NOTICE_MAX = 480;
+const NOTICES_MAX = 5;
+function noticesFor(job, entries) {
+  const out = [];
+  for (const e of entries) {
+    if (e.state === "kept") {
+      out.push(fit(
+        (short) => short ? `Old checkout \`${job.workDir}/${e.d}\` was left on the container as it is: ${e.reason}.` : `The old checkout \`${job.workDir}/${e.d}\` on this chat's container was left where it is: ${e.reason}. Nothing in it was copied or changed.`
+      ));
+      continue;
+    }
+    if (e.ref) {
+      const ref = e.ref;
+      out.push(fit((short, n) => {
+        const shown = (e.paths ?? []).slice(0, n).map((p) => `\`${p.path}\` (${STATUS[p.status] ?? p.status})`);
+        const more = (e.pathCount ?? 0) - shown.length;
+        const list = shown.length ? ` (${shown.join(", ")}${more > 0 ? `, +${more} more` : ""})` : "";
+        const what = e.pathCount ? `${e.pathCount} unsynced path${e.pathCount === 1 ? "" : "s"}${list}` : "its state";
+        const commits = e.commits ? `, and ${e.commits} commit${e.commits === 1 ? "" : "s"} made there` : "";
+        const from = /^[0-9a-f]{40}$/.test(e.diffFrom ?? "") ? e.diffFrom.slice(0, 12) : e.diffFrom ?? "HEAD";
+        const how = short ? `saved as \`${ref}\` (\`git diff ${from} ${ref} --stat\`).` : `saved in a ref: \`git diff ${from} ${ref} --stat\` to look, \`git checkout ${ref} -- <path>\` to take one, \`git update-ref -d ${ref}\` when done.`;
+        return `Checkout \`${e.d}\` on the container had ${what}${commits} before 0.2's sync; nothing here changed. They are ${how}`;
+      }, (e.paths ?? []).length));
+    }
+    if (e.excludedCount) out.push(fit((short, n) => `Checkout \`${e.d}\`: left out by the size caps:${leftOut(job, e, short ? Math.min(n, 2) : n)}`, 5));
+  }
+  if (out.length > NOTICES_MAX) {
+    const rest = out.length - (NOTICES_MAX - 1);
+    out.splice(NOTICES_MAX - 1, rest, `…and ${rest} more notes on the old checkouts: Settings → Proxmox containers, or \`git for-each-ref refs/dispatch/rescue/\`.`);
+  }
+  return out;
+}
+function fit(build, items = 0) {
+  for (const short of [false, true]) {
+    for (let n = Math.min(items, 10); n >= 0; n--) {
+      const s2 = build(short, n);
+      if (s2.length <= NOTICE_MAX) return s2;
+    }
+  }
+  const s = build(true, 0);
+  return s.length <= NOTICE_MAX ? s : `${s.slice(0, NOTICE_MAX - 1)}…`;
+}
+function noticeFor(job, entries) {
+  const all = noticesFor(job, entries);
+  return all.length ? all.join("\n\n") : void 0;
+}
+function leftOut(job, e, max = 5) {
+  const shown = (e.excluded ?? []).slice(0, max).map((f) => f.path.endsWith("/") ? `\`${f.path}\` (a nested repository)` : `\`${f.path}\` (${Math.max(1, Math.round(f.bytes / MB))} MB)`);
+  const more = (e.excludedCount ?? 0) - shown.length;
+  return ` ${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}. They stay in the container's \`${job.workDir}.pre-0.2/${e.d}\` until the container is destroyed.`;
+}
+function sshRescueRemote(conn) {
+  return {
+    exec: (cmd, opts = {}) => conn.exec(cmd, {
+      timeoutMs: opts.timeoutMs,
+      stdin: opts.input === void 0 ? void 0 : async (ch) => {
+        ch.end(opts.input);
+      }
+    }),
+    pipe: async (cmd, sink, opts) => {
+      if (opts.signal?.aborted) throw new Error("aborted");
+      const ch = await conn.channel(cmd);
+      return new Promise((resolve, reject) => {
+        opts.signal?.addEventListener("abort", () => ch.close(), { once: true });
+        let bytes = 0;
+        let stderr = "";
+        const timer = setTimeout(() => {
+          ch.close();
+          reject(new Error(`timed out after ${opts.timeoutMs}ms: ${cmd.slice(0, 80)}`));
+        }, opts.timeoutMs);
+        ch.on("data", (c) => {
+          bytes += c.length;
+          opts.onBytes?.(bytes);
+        });
+        ch.stderr.on("data", (c) => stderr += c.toString());
+        ch.pipe(sink);
+        ch.on("close", () => {
+          clearTimeout(timer);
+          resolve({ code: channelExit(ch)?.code ?? null, stderr });
+        });
+        ch.end();
+      });
+    }
+  };
+}
 class ProxmoxError extends Error {
   constructor(message, status) {
     super(message);
@@ -21274,7 +21643,7 @@ class Proxmox {
     const base = new URL(this.opts.apiUrl.replace(/\/+$/, "") + "/api2/json" + path);
     const body = method === "GET" || method === "DELETE" ? void 0 : form.toString();
     if (!body && form.toString()) base.search = form.toString();
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve, reject) => {
       const req = request(
         base,
         {
@@ -21305,7 +21674,7 @@ class Proxmox {
               return;
             }
             try {
-              resolve2(JSON.parse(text).data);
+              resolve(JSON.parse(text).data);
             } catch {
               reject(new ProxmoxError(`Proxmox ${method} ${path}: unreadable response`));
             }
@@ -21356,14 +21725,19 @@ class Proxmox {
       const s = await this.call("GET", `/nodes/${encodeURIComponent(node)}/lxc/${vmid}/status/current`);
       return s.status;
     } catch (err) {
-      if (err instanceof ProxmoxError && /does not exist|no such|not found/i.test(err.message)) return void 0;
+      if (isGone(err, vmid)) return void 0;
       throw err;
     }
   }
 }
+function isGone(err, vmid) {
+  if (!(err instanceof ProxmoxError)) return false;
+  if (/does not exist|no such|not found/i.test(err.message)) return true;
+  return err.status === 403 && err.message.includes(`(/vms/${vmid},`);
+}
 function sleep(ms, signal) {
-  return new Promise((resolve2, reject) => {
-    const t = setTimeout(resolve2, ms);
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
     signal?.addEventListener(
       "abort",
       () => {
@@ -21374,81 +21748,503 @@ function sleep(ms, signal) {
     );
   });
 }
-const BACKEND_ID = "proxmox";
-const DESTROY_WAIT_MS = 45e3;
-class ProxmoxTerminalBackend {
-  constructor(deps) {
-    this.deps = deps;
-    this.chats = new RemoteChats({
-      backendId: BACKEND_ID,
-      label: "proxmox-terminal",
-      provider: new ProxmoxProvider(deps, () => this.chats.instanceId()),
-      kv: deps.kv,
-      log: deps.ctx.log,
-      publishPort: (p) => deps.ctx.terminals.publishPort(BACKEND_ID, p),
-      policy: () => {
-        const s = deps.settings();
-        return { idleStopMinutes: s.idleStopMinutes, destroyUnusedDays: s.destroyUnusedDays, workDir: s.workDir };
-      }
+const MACHINES = { plugin: "remote-host", name: "machines", major: 1 };
+const NEEDS_NEWER_DISPATCH = "proxmox-terminal 0.2 needs a newer Dispatch (one with plugin dependencies) to run terminals; until then they are refused";
+function reasonFor(s) {
+  const detail = s?.detail ? ` (${s.detail})` : "";
+  switch (s?.state) {
+    case "missing":
+      return "Remote host is not installed. proxmox-terminal needs it to run terminals: install it from the same collection";
+    case "invalid":
+      return `Remote host's install is not usable${detail}. proxmox-terminal needs it to run terminals`;
+    case "disabled":
+      return "Remote host is switched off. proxmox-terminal needs it to run terminals";
+    case "incompatible":
+      return `This Remote host does not offer what proxmox-terminal needs (machines v1)${detail}. Update Remote host`;
+    case "failed":
+      return `Remote host failed to start${detail}. proxmox-terminal needs it to run terminals`;
+    case "ok":
+      return "Remote host went away";
+    default:
+      return `Remote host is unavailable: ${s?.state ?? "unknown"}${detail}. proxmox-terminal needs it to run terminals`;
+  }
+}
+class RemoteHostLink {
+  constructor(o) {
+    this.o = o;
+  }
+  provisioned;
+  why = "Remote host has not been looked up yet";
+  /** Look remote-host up and make this plugin's provisioned backend. Once, from activate. Never throws. */
+  connect() {
+    const deps = this.o.deps();
+    if (!deps) {
+      this.why = NEEDS_NEWER_DISPATCH;
+      return;
+    }
+    let api;
+    try {
+      api = deps.get(MACHINES.plugin, MACHINES.name, MACHINES.major);
+    } catch (err) {
+      this.why = `Remote host could not be reached: ${errText(err)}`;
+      return;
+    }
+    if (!api) {
+      this.why = reasonFor(safeState(deps));
+      return;
+    }
+    try {
+      this.provisioned = api.createProvisionedBackend(this.o.options());
+    } catch (err) {
+      this.why = `Remote host refused proxmox-terminal's machines: ${errText(err)}`;
+      return;
+    }
+    this.why = "";
+    deps.onLost(MACHINES.plugin, () => {
+      this.provisioned = void 0;
+      this.why = reasonFor(safeState(deps));
+      this.o.log.warn(`remote-host went away: ${this.why}; terminals are refused, containers are still managed`);
+      this.o.changed();
     });
   }
-  id = BACKEND_ID;
-  label = "Proxmox container";
-  shell = "bash";
+  /** The provisioned backend while remote-host is there. */
+  get() {
+    return this.provisioned;
+  }
+  /** Why terminals are refused; empty while remote-host is there. */
+  reason() {
+    return this.provisioned ? "" : this.why;
+  }
   /**
-   * When a container can't be brought up, Dispatch refuses the terminal (with
-   * the reason) instead of running it locally. A local fallback runs Linux
-   * commands in a Windows shell against a different tree. Shipped ahead of
-   * 0.2, so every instance remembers "refuse" for `proxmox` before 0.2 exists.
+   * A best-effort call into remote-host: never throws, and does nothing while
+   * it is away. An inert call (after revocation) just returns undefined.
    */
-  fallback = "refuse";
-  chats;
-  get spawnTimeoutMs() {
-    return Math.max(30, this.deps.settings().spawnTimeoutSeconds) * 1e3;
+  async quietly(what, fn) {
+    const p = this.provisioned;
+    if (!p) return;
+    try {
+      await fn(p);
+    } catch (err) {
+      this.o.log.warn(`remote-host ${what}: ${errText(err)}`);
+    }
   }
+}
+function safeState(deps) {
+  try {
+    return deps.state(MACHINES.plugin);
+  } catch {
+    return void 0;
+  }
+}
+const DEFAULTS = {
+  apiUrl: "",
+  node: "pve",
+  templateVmid: 9e3,
+  pool: "dispatch-terminals",
+  bridge: "vmbr0",
+  cores: 2,
+  memory: 4096,
+  vmidStart: 9001,
+  vmidEnd: 9099,
+  idleStopMinutes: 30,
+  destroyUnusedDays: 7,
+  sshUser: "root",
+  sshKeyPath: "",
+  workDir: "/root/work",
+  templateHostKey: "",
+  spawnTimeoutSeconds: 240,
+  caCert: "",
+  insecureTls: false
+};
+function templateHostKeys(s) {
+  return s.templateHostKey.split(/[\s,]+/).filter(Boolean);
+}
+function readSettings(raw) {
+  return coerceSettings(DEFAULTS, raw);
+}
+const LAYOUT = 2;
+const DESTROY_WAIT_MS = 45e3;
+const PROBE_MS = 3e4;
+const PROBE_MISSES = 2;
+const SKIP_AFTER_FAILURES = 3;
+const RANGE_WARN = 0.8;
+class ActionError extends Error {
+  constructor(message, status = 409) {
+    super(message);
+    this.status = status;
+  }
+}
+class ProxmoxTerminal {
+  constructor(deps) {
+    this.deps = deps;
+    const log = deps.ctx.log;
+    this.provider = new ProxmoxProvider(deps, () => this.life.instanceId());
+    this.rescue = new LegacyRescue({ kv: deps.kv, log });
+    this.life = new MachineLifecycle({
+      provider: this.provider,
+      kv: deps.kv,
+      log,
+      policy: () => {
+        const s = deps.settings();
+        return { idleStopMinutes: s.idleStopMinutes, destroyUnusedDays: s.destroyUnusedDays };
+      },
+      busy: (chatId) => this.busy(chatId),
+      detach: (chatId, why) => this.detach(chatId, why),
+      // An unrescued pre-0.2 container may hold edits that never came back:
+      // never destroy it for being unused. Deleting its chat still does.
+      mayExpire: (rec) => rec.layout === LAYOUT,
+      // 0.1.x may have queued destroys (the TTL) for chats that still exist,
+      // under rules that let it destroy unrescued containers. Revive those.
+      reviveLiveDestroys: { marker: "migrated-destroys" }
+    });
+    this.link = new RemoteHostLink({
+      deps: () => deps.dependencies?.(),
+      options: () => this.provisionOptions(),
+      log,
+      changed: () => deps.statusChanged?.()
+    });
+    this.forwarder = new ProxmoxForwarder({
+      link: this.link,
+      life: this.life,
+      settings: deps.settings,
+      log,
+      dispose: () => this.dispose()
+    });
+  }
+  provider;
+  life;
+  rescue;
+  link;
+  /** What is registered as the `proxmox` terminal backend. */
+  forwarder;
+  /** For `ctx.terminals.setStatus("proxmox", …)`. */
+  status() {
+    if (!this.deps.settings().apiUrl) return { state: "offline", detail: "not set up: no Proxmox API URL (Settings → Plugins → Proxmox terminal)" };
+    const why = this.link.reason();
+    if (why) return { state: "offline", detail: why };
+    if (this.apiDown) return { state: "offline", detail: this.apiDown };
+    return { state: "online" };
+  }
+  /* ------------------------------------------------- is Proxmox there? */
+  apiDown;
+  misses = 0;
+  probeTimer;
+  probing;
+  /**
+   * Ask the Proxmox API whether it is there. Offline after {@link PROBE_MISSES}
+   * misses in a row (one slow answer is not an outage), online at the first
+   * answer. While offline core never calls spawn, so only this brings it back.
+   */
+  probe() {
+    this.probing ??= (async () => {
+      try {
+        if (!this.provider.configured()) return this.setApiDown(void 0);
+        await this.provider.ping();
+        this.misses = 0;
+        this.setApiDown(void 0);
+      } catch (err) {
+        this.misses++;
+        if (this.apiDown || this.misses >= PROBE_MISSES) this.setApiDown(`can't reach the Proxmox API: ${errText(err)}`);
+      }
+    })().finally(() => this.probing = void 0);
+    return this.probing;
+  }
+  setApiDown(why) {
+    if (why === this.apiDown) return;
+    if (why) this.deps.ctx.log.warn(`terminals are refused: ${why}`);
+    else if (this.apiDown) this.deps.ctx.log.info("the Proxmox API answers again");
+    this.apiDown = why;
+    this.deps.statusChanged?.();
+  }
+  /* ------------------------------------------------------------ Settings */
+  /** What the Settings pane shows: status, the host-key trust, the vmid range's use, and pre-0.2 containers. */
+  async overview() {
+    const s = this.deps.settings();
+    const size = s.vmidEnd - s.vmidStart + 1 - (s.templateVmid >= s.vmidStart && s.templateVmid <= s.vmidEnd ? 1 : 0);
+    let apiError;
+    const statuses = /* @__PURE__ */ new Map();
+    let used;
+    if (this.provider.configured()) {
+      try {
+        const cts = await this.provider.containers();
+        for (const c of cts) statuses.set(c.vmid, c.status);
+        used = cts.filter((c) => inRange(s, c.vmid)).length;
+      } catch (err) {
+        apiError = errText(err);
+      }
+    }
+    const legacy = [];
+    for (const { chatId, rec } of await this.records()) {
+      if (rec.layout === LAYOUT) continue;
+      const vmid = Number(rec.vmid);
+      const r = await this.rescue.state(chatId);
+      const mine = r?.vmid === vmid ? r : void 0;
+      const failures = mine?.failures ?? 0;
+      legacy.push({
+        chatId,
+        vmid,
+        hostname: String(rec.hostname ?? ""),
+        ...apiError || !this.provider.configured() ? {} : { status: statuses.get(vmid) ?? "gone" },
+        rescuing: this.rescue.running(chatId),
+        ...mine?.phase ? { phase: mine.phase } : {},
+        failures,
+        ...mine?.lastError ? { lastError: mine.lastError } : {},
+        canSkip: failures >= SKIP_AFTER_FAILURES
+      });
+    }
+    legacy.sort((a, b) => a.vmid - b.vmid);
+    return {
+      status: this.status(),
+      hostKeyPinned: templateHostKeys(s).length > 0,
+      templateVmid: s.templateVmid,
+      range: {
+        start: s.vmidStart,
+        end: s.vmidEnd,
+        size,
+        ...used !== void 0 ? { used } : {},
+        warn: used !== void 0 && size > 0 && used / size > RANGE_WARN
+      },
+      legacy,
+      ...apiError ? { apiError } : {}
+    };
+  }
+  /** Every `chat:<id>` record in kv. */
+  async records() {
+    const kv = this.deps.kv;
+    if (!kv) return [];
+    const out = [];
+    for (const key of await kv.list("chat:")) {
+      const rec = await kv.get(key);
+      if (rec && Number(rec.vmid) > 0) out.push({ chatId: key.slice("chat:".length), rec });
+    }
+    return out;
+  }
+  /** A pre-0.2 container of the chat's, for a Settings action; refused while its rescue runs. */
+  async legacyRecord(chatId) {
+    const rec = await this.life.record(chatId);
+    if (!rec || !(Number(rec.vmid) > 0)) throw new ActionError(`chat ${chatId} has no container`, 404);
+    if (rec.layout === LAYOUT) throw new ActionError(`chat ${chatId}'s container ${rec.vmid} has nothing left to rescue`);
+    if (this.rescue.running(chatId)) throw new ActionError(`${this.rescue.describe(chatId)}: wait for it to finish`);
+    return { vmid: Number(rec.vmid), hostname: String(rec.hostname ?? "") };
+  }
+  /**
+   * "Skip rescue": the chat's next command goes ahead on the old container
+   * without saving its pre-0.2 checkouts. They stay where they are on the
+   * container (remote-host works elsewhere on it) until it is destroyed, and
+   * from now on it can be destroyed for being unused, like any other.
+   */
+  async skipRescue(chatId) {
+    const ref = await this.legacyRecord(chatId);
+    const r = await this.rescue.state(chatId);
+    const failures = r?.vmid === ref.vmid ? r.failures ?? 0 : 0;
+    if (failures < SKIP_AFTER_FAILURES) {
+      throw new ActionError(`the rescue of container ${ref.vmid} has failed ${failures} time(s); Skip is offered after ${SKIP_AFTER_FAILURES}`);
+    }
+    if (!await this.life.patch(chatId, { layout: LAYOUT, rescueSkippedAt: Date.now() }, ref)) {
+      throw new ActionError(`chat ${chatId}'s container changed meanwhile; look again`);
+    }
+    await this.deps.kv?.delete(`rescue:${chatId}`);
+    this.deps.ctx.log.info(`chat ${chatId}: rescue of container ${ref.vmid} skipped (Settings); its old checkouts stay on it`);
+  }
+  /**
+   * "Destroy without rescue": the container and whatever it holds go now; the
+   * chat's next command gets a new one.
+   */
+  async destroyWithoutRescue(chatId) {
+    const ref = await this.legacyRecord(chatId);
+    if (this.busy(chatId)) throw new ActionError(`chat ${chatId} is using container ${ref.vmid} right now`);
+    await this.deps.kv?.delete(`rescue:${chatId}`);
+    try {
+      await this.life.destroyMachine(chatId, "destroyed without rescue (Settings)");
+    } catch (err) {
+      throw new ActionError(`container ${ref.vmid} is queued to be destroyed, and retried in the background; this attempt failed: ${errText(err)}`, 502);
+    }
+  }
+  /* ------------------------------------------------------- remote-host */
+  provisionOptions() {
+    const terminals = this.deps.ctx.terminals;
+    return {
+      id: BACKEND_ID,
+      label: LABEL,
+      io: {
+        publishPort: (p) => terminals.publishPort(BACKEND_ID, p),
+        updateBackend: (u) => terminals.updateBackend?.(BACKEND_ID, u)
+      },
+      provision: (req) => this.provision(req)
+    };
+  }
+  /**
+   * remote-host's way in: bring the chat's container up (cloning one the
+   * first time), rescue a pre-0.2 container's checkouts once, and say how to
+   * reach it. Runs as a lease, so no idle stop or boot sweep can stop the
+   * container under it.
+   */
+  provision(req) {
+    const s = this.deps.settings();
+    const pins = templateHostKeys(s);
+    return this.life.lease(req.chatId, async (chat) => {
+      const up = await this.provider.ensureUp(chat, req.signal);
+      const ref = { vmid: up.vmid, hostname: up.hostname };
+      const notices = [];
+      if (up.created) {
+        await this.life.patch(req.chatId, { layout: LAYOUT }, ref);
+      } else if ((await this.life.record(req.chatId))?.layout !== LAYOUT) {
+        const res = await this.rescueFor(req, up, s);
+        await this.life.patch(req.chatId, { layout: LAYOUT, rescue: res.entries.map(({ d, state, ref: r }) => ({ d, state, ref: r })) }, ref);
+        notices.push(...res.notices);
+      }
+      const rec = await this.life.record(req.chatId);
+      const machine = `${up.vmid}:${rec?.createdAt ?? 0}`;
+      if (rec?.machine !== machine) await this.life.patch(req.chatId, { machine }, ref);
+      return {
+        machine,
+        addresses: [up.ip],
+        user: s.sshUser,
+        auth: () => this.auth(),
+        hostKey: pins.length ? { pin: pins } : { trust: "provisioner" },
+        hostname: up.hostname,
+        notices
+      };
+    });
+  }
+  /** Read per connect; never kept. */
+  async auth() {
+    const a = await this.deps.sshAuth();
+    if (!a.privateKey && !a.password) {
+      throw new Error("no SSH credentials: set the sshKeyPath setting, or the PROXMOX_TERMINAL_SSH_KEY / _SSH_PASSWORD secret");
+    }
+    return { privateKey: a.privateKey, password: a.password };
+  }
+  /**
+   * The rescue of a pre-0.2 container, waited on for part of the spawn's
+   * budget. Still going after that: the spawn is refused with its progress
+   * and the job carries on; the next spawn picks up its result.
+   */
+  async rescueFor(req, up, s) {
+    const job = {
+      chatId: req.chatId,
+      vmid: up.vmid,
+      workDir: s.workDir,
+      candidates: [req.worktreePath, req.repoPath].filter((p) => !!p),
+      connect: () => this.rescueRemote(up.ip, s)
+    };
+    const run = this.rescue.run(job);
+    run.catch(() => {
+    });
+    const waitMs = Math.max(1e4, this.forwarder.spawnTimeoutMs - 9e4);
+    const done = await settleWithin(run, waitMs, req.signal).catch(async (err) => {
+      const n = (await this.rescue.state(req.chatId))?.failures ?? 1;
+      const next = n >= SKIP_AFTER_FAILURES ? `Settings → Proxmox containers now offers "Skip rescue" and "Destroy without rescue" for container ${up.vmid}, or the next command tries again` : "the next command tries again";
+      throw new Error(`${errText(err)} (attempt ${n}; the container is left as it is, and ${next})`);
+    });
+    if (done === PENDING) throw new Error(`${this.rescue.describe(req.chatId)}. It keeps going on its own: run the command again in a minute`);
+    return done;
+  }
+  async rescueRemote(ip, s) {
+    const pins = templateHostKeys(s);
+    const all = await this.auth();
+    const auth = pins.length ? all : { privateKey: all.privateKey };
+    if (!auth.privateKey && !auth.password) {
+      throw new Error(
+        "an SSH password is sent only to a container whose host key is pinned: set templateHostKey (see the README), or use an SSH key"
+      );
+    }
+    if (this.deps.rescueRemote) return this.deps.rescueRemote(ip, s, auth);
+    const conn = new SshConnection({
+      host: ip,
+      username: s.sshUser,
+      ...auth,
+      hostVerifier: pins.length ? pinnedHostKey(pins) : trustProvisioner(),
+      // A host offers one key per type: ask for the type the pin is (the template's ed25519 key).
+      ...pins.length ? { algorithms: { serverHostKey: ["ssh-ed25519"] } } : {}
+    });
+    await conn.connect(6e4);
+    return { ...sshRescueRemote(conn), close: () => conn.close() };
+  }
+  /**
+   * Something runs on the chat's container: a shell or a command remote-host
+   * holds there, a lease in flight (the lifecycle counts those itself), or
+   * the rescue. While remote-host is away nothing can run there.
+   */
+  busy(chatId) {
+    if (this.rescue.running(chatId)) return true;
+    const p = this.link.get();
+    if (!p) return false;
+    const ms = p.machines();
+    if (!Array.isArray(ms)) return false;
+    return ms.some((m) => m.chatId === chatId && (m.connected && m.shells > 0 || m.running));
+  }
+  /** The lifecycle is about to stop or destroy the chat's container: tell remote-host, best effort. */
+  async detach(chatId, why) {
+    if (why === "stop") return this.link.quietly(`ending chat ${chatId}'s sessions`, (p) => p.endChat(chatId));
+    if (why === "destroy") {
+      const machine = (await this.life.record(chatId))?.machine;
+      if (typeof machine === "string") await this.link.quietly(`forgetting machine ${machine}`, (p) => p.machineGone(machine));
+      else await this.link.quietly(`forgetting chat ${chatId}`, (p) => p.forgetChat(chatId));
+    }
+  }
+  /* --------------------------------------------- the backend's surface */
   spawn(info) {
-    return this.chats.spawn(info);
-  }
-  agentNote({ chatId }) {
-    const st = this.chats.peek(chatId);
-    const where = st ? `container ${st.ref?.hostname ?? hostnameFor(chatId)} (vmid ${st.ref?.vmid ?? 0})` : "a per-chat Proxmox container";
-    const workDir = this.deps.settings().workDir;
-    return [
-      `- Your terminal runs on ${where}: Debian Linux with its own git checkout of this repo under ${workDir}/.`,
-      `- Edit files LOCALLY as usual. Before every terminal command Dispatch snapshots your local worktree — committed, uncommitted and untracked files alike — and checks it out on the container. Never push to GitHub to get a change over, and don't edit files inside the container: the next command overwrites tracked files there.`,
-      `- Ignored directories (node_modules, dist, build output) are NOT synced; the container keeps its own. A Windows-built node_modules is useless on Linux, so run the install (e.g. \`pnpm install\`) in the terminal once per container, and again when dependencies change.`,
-      `- There is no GitHub token on the container, by design. Do git work locally.`,
-      `- The container stops when the chat goes idle (the next command restarts it) and is destroyed when the chat is deleted. Only installs and build output are lost; your code lives on the Dispatch host.`
-    ].join("\n");
+    return this.forwarder.spawn(info);
   }
   onChatIdle(e) {
-    return this.chats.onChatIdle(e);
+    return this.forwarder.onChatIdle(e);
   }
   onChatDeleted(e) {
-    return this.chats.onChatDeleted(e);
+    return this.forwarder.onChatDeleted(e);
   }
   /** This instance's id; every clone's description carries it. */
   instanceId() {
-    return this.chats.instanceId();
+    return this.life.instanceId();
   }
-  /** Called once from activate: the boot sweep, then one a minute. Never throws. */
+  /** Called once from activate: the boot sweep, then one a minute, and the API probe. Never throws. */
   start() {
-    return this.chats.start();
+    if (!this.probeTimer) {
+      this.probeTimer = setInterval(() => void this.probe(), PROBE_MS);
+      this.probeTimer.unref?.();
+      void this.probe();
+    }
+    return this.life.start();
+  }
+  stopProbe() {
+    if (this.probeTimer) clearInterval(this.probeTimer);
+    this.probeTimer = void 0;
   }
   sweep(opts) {
-    return this.chats.sweep(opts);
+    return this.life.sweep(opts);
   }
   /** Startup reconcile (core's module hook, forwarded by server.ts). */
   reconcile(e) {
-    return this.chats.reconcile(e);
+    return this.life.reconcile(e);
   }
-  /** Timed shutdown (core's module hook, forwarded by server.ts). */
-  onShutdown(e) {
-    return this.chats.onShutdown(e);
+  /** Timed shutdown (core's module hook). Uninstall: remote-host forgets this plugin's machines first. */
+  async onShutdown(e) {
+    this.stopProbe();
+    if (e.reason === "uninstall") await this.link.quietly("forgetting this plugin's machines", (p) => p.forgetAll());
+    return this.life.onShutdown(e);
   }
+  /** The backend was unregistered (the plugin switched off, or Dispatch stopping). */
   dispose() {
-    return this.chats.dispose();
+    this.stopProbe();
+    return this.life.dispose();
   }
+}
+const PENDING = Symbol("pending");
+function settleWithin(p, ms, signal) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => resolve(PENDING), ms);
+    signal?.addEventListener("abort", () => resolve(PENDING), { once: true });
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(t);
+        reject(err);
+      }
+    );
+  });
 }
 class ProxmoxProvider {
   constructor(deps, instanceId) {
@@ -21481,33 +22277,52 @@ class ProxmoxProvider {
   async preflight() {
     await this.api();
   }
-  async bringUp(chat, signal) {
+  /** One cheap call: is the API there, and does it take the token? */
+  async ping() {
+    await (await this.api()).call("GET", "/version");
+  }
+  /** The pool's containers with their status, from `/cluster/resources`. */
+  async containers() {
+    const s = this.deps.settings();
+    return (await this.poolResources(await this.api(), s)).map((m) => ({ vmid: m.vmid, status: m.status ?? "unknown" }));
+  }
+  /**
+   * Make sure the chat's container exists and runs, and return its address.
+   * A remembered vmid that no longer holds the chat's container is never
+   * reused: a new one is cloned. `created`: it was cloned just now, so it has
+   * no pre-0.2 checkouts to rescue.
+   */
+  async ensureUp(chat, signal) {
     const s = this.deps.settings();
     const api = await this.api();
     let vmid = chat.ref?.vmid ?? 0;
-    const hostname = chat.ref?.hostname ?? hostnameFor(chat.chatId);
+    const hostname = chat.ref?.hostname || hostnameFor(chat.chatId);
     let status = vmid ? await api.status(s.node, vmid) : void 0;
     if (status && await this.ownership(api, s, vmid, chat.chatId) !== "ours") {
       this.log.warn(`vmid ${vmid} no longer holds chat ${chat.chatId}'s container; making a new one`);
       status = void 0;
     }
+    let created = false;
     if (!status) {
       vmid = await this.cloneFor(api, s, chat, hostname, signal);
       status = "stopped";
+      created = true;
     }
-    if (status !== "running") {
-      this.log.info(`starting container ${vmid} for chat ${chat.chatId}`);
-      const upid = await api.call("POST", `/nodes/${s.node}/lxc/${vmid}/status/start`);
-      await api.waitTask(s.node, upid, 6e4, signal);
+    for (let attempt = 0; ; attempt++) {
+      if (status !== "running") {
+        this.log.info(`starting container ${vmid} for chat ${chat.chatId}`);
+        const upid = await api.call("POST", `/nodes/${s.node}/lxc/${vmid}/status/start`);
+        await api.waitTask(s.node, upid, 6e4, signal);
+      }
+      const ip = await this.waitForIp(api, s.node, vmid, signal);
+      const ssh = await this.waitForSsh(api, s.node, ip, vmid, signal);
+      if (ssh === "stopped" && attempt === 0) {
+        this.log.warn(`container ${vmid} stopped while it was being handed over; starting it again`);
+        status = await api.status(s.node, vmid);
+        continue;
+      }
+      return { vmid, hostname, ip, created };
     }
-    const ip = await this.waitForIp(api, s.node, vmid, signal);
-    const auth = await this.deps.sshAuth();
-    if (!auth.privateKey && !auth.password) {
-      throw new Error("no SSH credentials: set the sshKeyPath setting, or the PROXMOX_TERMINAL_SSH_KEY / _SSH_PASSWORD secret");
-    }
-    const conn = this.deps.connect ? this.deps.connect(ip, s.sshUser, auth) : new SshConnection({ host: ip, username: s.sshUser, ...auth });
-    await conn.connect(6e4, signal);
-    return conn;
   }
   /** Linked-clone the template into a free vmid, size it, and remember it. */
   async cloneFor(api, s, chat, hostname, signal) {
@@ -21541,6 +22356,26 @@ class ProxmoxProvider {
     throw new Error(
       `no free vmid in ${s.vmidStart}-${s.vmidEnd}` + (lastErr instanceof Error ? ` (last error: ${lastErr.message})` : "")
     );
+  }
+  /**
+   * Until the container's sshd answers, up to {@link SSH_WAIT_MS}. A container
+   * that just booted has its address before sshd listens, and a reused address
+   * can sit in this computer's ARP cache under the last container's MAC for a
+   * while (seen live on node g: remote-host's one connect then got "no answer"
+   * and the command failed). Retrying a TCP connect here rides both out.
+   * Still not answering: go on, and remote-host says why.
+   */
+  async waitForSsh(api, node, ip, vmid, signal) {
+    const ready = this.deps.sshReady ?? tcpReady;
+    const until = Date.now() + SSH_WAIT_MS;
+    while (Date.now() < until && !signal.aborted) {
+      if (await ready(ip, signal)) return "ready";
+      if (await api.status(node, vmid).catch(() => "running") !== "running") return "stopped";
+      await sleep(1e3, signal).catch(() => {
+      });
+    }
+    this.log.warn(`container ${vmid}: nothing answers on ${ip}:22 after ${SSH_WAIT_MS / 1e3}s; handing it over anyway`);
+    return "timeout";
   }
   async waitForIp(api, node, vmid, signal) {
     const until = Date.now() + 6e4;
@@ -21613,7 +22448,7 @@ class ProxmoxProvider {
     try {
       return await api.call("GET", `/nodes/${s.node}/lxc/${vmid}/config`);
     } catch (err) {
-      if (err instanceof ProxmoxError && GONE.test(err.message)) return void 0;
+      if (isGone(err, vmid)) return void 0;
       throw err;
     }
   }
@@ -21633,11 +22468,33 @@ class ProxmoxProvider {
    * a token holding VM.Audit on the pool.
    */
   async poolVmids(api, s) {
-    const all = await api.call("GET", "/cluster/resources", { type: "vm" });
-    return (all ?? []).filter((m) => m.pool === s.pool && m.type === "lxc").map((m) => m.vmid).filter((v) => typeof v === "number");
+    return (await this.poolResources(api, s)).map((m) => m.vmid);
+  }
+  async poolResources(api, s) {
+    const all = await api.call("GET", "/cluster/resources", {
+      type: "vm"
+    });
+    return (all ?? []).filter(
+      (m) => (m.pool === s.pool || m.pool === void 0) && m.type === "lxc" && typeof m.vmid === "number"
+    );
   }
 }
-const GONE = /does not exist|no such|not found/i;
+const SSH_WAIT_MS = 45e3;
+function tcpReady(ip, signal) {
+  return new Promise((resolve) => {
+    const sock = connect({ host: ip, port: 22, timeout: 3e3 });
+    const done = (ok) => {
+      sock.destroy();
+      signal.removeEventListener("abort", abort);
+      resolve(ok);
+    };
+    const abort = () => done(false);
+    signal.addEventListener("abort", abort, { once: true });
+    sock.once("connect", () => done(true));
+    sock.once("timeout", () => done(false));
+    sock.once("error", () => done(false));
+  });
+}
 function inRange(s, vmid) {
   return vmid >= s.vmidStart && vmid <= s.vmidEnd && vmid !== s.templateVmid;
 }
@@ -21655,43 +22512,65 @@ function hostnameFor(chatId) {
   const slug = chatId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) || "chat";
   return `dt-${slug}`;
 }
-const DEFAULTS = {
-  apiUrl: "",
-  node: "pve",
-  templateVmid: 9e3,
-  pool: "dispatch-terminals",
-  bridge: "vmbr0",
-  cores: 2,
-  memory: 4096,
-  vmidStart: 9001,
-  vmidEnd: 9099,
-  idleStopMinutes: 30,
-  destroyUnusedDays: 7,
-  sshUser: "root",
-  sshKeyPath: "",
-  workDir: "/root/work",
-  spawnTimeoutSeconds: 240,
-  caCert: "",
-  insecureTls: false
+function wrap(log, fn) {
+  return async (req, reply) => {
+    try {
+      return await fn(req);
+    } catch (err) {
+      const status = err instanceof ActionError ? err.status : 500;
+      if (status >= 500) log.warn(`proxmox-terminal ${req.method} ${req.url}: ${errText(err)}`);
+      reply.code(status);
+      return { error: errText(err) };
+    }
+  };
+}
+const chatOf = (req) => {
+  const id = String(req.params?.chatId ?? "");
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new ActionError("not a chat id", 400);
+  return id;
 };
-function readSettings(raw) {
-  return coerceSettings(DEFAULTS, raw);
+function defineRoutes(ctx, t) {
+  const live = () => {
+    const it = t();
+    if (!it) throw new ActionError("the plugin is not running", 503);
+    return it;
+  };
+  const h = (fn) => wrap(ctx.log, fn);
+  return (r) => {
+    r.get("/overview", h(() => live().overview()));
+    r.post("/legacy/:chatId/skip-rescue", h(async (req) => {
+      await live().skipRescue(chatOf(req));
+      return { ok: true };
+    }));
+    r.post("/legacy/:chatId/destroy", h(async (req) => {
+      await live().destroyWithoutRescue(chatOf(req));
+      return { ok: true };
+    }));
+  };
 }
 const TOKEN = "PROXMOX_TERMINAL_API_TOKEN";
 const KEY = "PROXMOX_TERMINAL_SSH_KEY";
 const PASSWORD = "PROXMOX_TERMINAL_SSH_PASSWORD";
-let backend;
+let terminal;
+let offSettings;
+function dependenciesOf(ctx) {
+  const d = ctx.dependencies;
+  return d && typeof d.get === "function" ? d : void 0;
+}
 const plugin = definePlugin({
   deactivate() {
-    backend = void 0;
+    offSettings?.();
+    offSettings = void 0;
+    terminal = void 0;
   },
   activate(ctx) {
     if (!ctx.terminals) {
       ctx.log.error("this Dispatch has no `terminals` capability — it predates terminal backends (#414); update Dispatch");
       return;
     }
+    const terminals = ctx.terminals;
     const settings = () => readSettings(ctx.settings.get());
-    backend = new ProxmoxTerminalBackend({
+    const t = new ProxmoxTerminal({
       ctx,
       kv: ctx.kv,
       settings,
@@ -21701,19 +22580,39 @@ const plugin = definePlugin({
         keySecret: KEY,
         passwordSecret: PASSWORD,
         keyPath: () => settings().sshKeyPath
-      })
+      }),
+      dependencies: () => dependenciesOf(ctx),
+      statusChanged: () => pushStatus()
     });
-    ctx.terminals.registerBackend(backend);
-    ctx.log.info('registered terminal backend "proxmox"');
-    void backend.start();
+    let pushed = "";
+    const pushStatus = () => {
+      const s = t.status();
+      const key = JSON.stringify(s);
+      if (key === pushed) return;
+      pushed = key;
+      terminals.setStatus?.(BACKEND_ID, s);
+    };
+    terminal = t;
+    terminals.registerBackend(t.forwarder);
+    ctx.routes?.(defineRoutes(ctx, () => terminal));
+    t.link.connect();
+    pushStatus();
+    offSettings = ctx.settings.onChange?.(() => {
+      pushStatus();
+      void t.probe().then(pushStatus);
+    });
+    const why = t.link.reason();
+    if (why) ctx.log.warn(`terminals are refused: ${why}. Containers are still managed.`);
+    else ctx.log.info('registered terminal backend "proxmox" (through remote-host)');
+    void t.start();
   }
 });
 const hooks = {
   async onShutdown(e) {
-    await backend?.onShutdown(e);
+    await terminal?.onShutdown(e);
   },
   async reconcile(e) {
-    await backend?.reconcile({ chats: e.chats });
+    await terminal?.reconcile({ chats: e.chats });
   }
 };
 const server = Object.assign(plugin, hooks);
