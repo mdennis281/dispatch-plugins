@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import type { ClientChannel } from "ssh2";
-import { nodeTarball, type Attribution, type ChatDir, type ProbeResult } from "@dispatch-plugins/host-agent";
+import { nodeTarball, type Attribution, type ChatDir, type GuiInstallResult, type ProbeResult } from "@dispatch-plugins/host-agent";
 import type { ExecResult, SshTarget } from "@dispatch-plugins/remote-core";
 import type { AgentBundle, RuntimeSource } from "../src/agent.js";
 import { sha256 } from "../src/agent.js";
@@ -58,6 +58,9 @@ export class FakeMachine {
   /** What `dispatch-host chats` reports: this instance's chat directories there. */
   chatDirs: ChatDir[] = [];
   helloFails = false;
+  /** What `gui install` answers; "fail" makes it exit 1. The probe carries `probe.gui` on its own. */
+  gui: GuiInstallResult | "fail" = { state: "no-gui-session", user: "dispatch", consoleUser: "root", installed: true };
+  guiInstalls = 0;
   /** What `forget` fails with, as dispatch-host does when git won't run there. */
   forgetFails?: string;
   /** sshd's MaxSessions. */
@@ -135,6 +138,11 @@ export class FakeMachine {
     if (command.includes("'hello'")) {
       if (this.helloFails) return { code: 1, stdout: "", stderr: "boom" };
       return ok(JSON.stringify({ agentVersion: "0.1.0" }) + "\n");
+    }
+    if (command.includes("'gui' 'install'")) {
+      this.guiInstalls++;
+      if (this.gui === "fail") return { code: 1, stdout: "", stderr: 'dispatch-host: unknown command "gui"' };
+      return ok(JSON.stringify(this.gui) + "\n");
     }
     if (command.includes("'probe'")) return ok(JSON.stringify(this.probe) + "\n");
     if (command.includes("'kill'")) return ok(JSON.stringify({ killed: [] }) + "\n");

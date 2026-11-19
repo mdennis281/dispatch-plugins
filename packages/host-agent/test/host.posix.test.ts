@@ -204,6 +204,9 @@ describe.skipIf(!run)("dispatch-host on a real POSIX host", () => {
     await r.ready();
     await r.run('echo "sudo=$(command -v sudo) sock=${DISPATCH_ELEVATE_SOCK:+set}"');
     expect(r.text()).toContain(`sudo=${join(dirname(DIST), "bin", "sudo")} sock=set`);
+    await r.run('echo "gui=$(command -v dispatch-gui) chat=$DISPATCH_HOST_CHAT dd=$DISPATCH_DERIVED_DATA"');
+    expect(r.text()).toContain(`gui=${join(dirname(DIST), "bin", "dispatch-gui")} chat=`);
+    expect(r.text()).toMatch(/dd=\S*\/chats\/[^/\s]+\/\.DerivedData/);
     r.send(F.kill);
   });
 

@@ -8,10 +8,12 @@
  *   (no sudo). The browser is Playwright's Chromium (Chrome for Testing),
  *   installed beside them, and BOTH servers drive it: a system Chrome would
  *   need an admin to install, and Chrome's own updater needs one too.
- * - **Headless only, for now.** A headed browser, and WebKit (which hangs
- *   headless over plain SSH, measured on cvx-mac 2026-11-06), need the
- *   machine's desktop session: dispatch-host's Tier B. Until a machine has
- *   one, those are refused with that reason, never quietly run otherwise.
+ * - **Headed browsers and WebKit need the desktop session.** WebKit hangs
+ *   even headless over plain SSH (cvx-mac, 2026-11-06). A plan for one says
+ *   `desktop: true`, and the backend runs it inside the machine's login
+ *   session through dispatch-host's GUI agent (Tier B, `dispatch-gui run
+ *   --stdin`). A machine without one refuses it with that reason, never
+ *   quietly runs something else.
  * - **Configured servers** (`info.command`): run as written, in the chat's
  *   directory there. Their paths are the project's to get right.
  * - **A root login** (a Linux box): Chrome won't start as root with its
@@ -37,6 +39,8 @@ export interface McpPlan {
   env(p: PlanPaths): Record<string, string>;
   /** Whether the bridge should answer the server's `roots/list` itself (bundled servers). */
   ownRoots: boolean;
+  /** It must run in the machine's desktop session (a headed browser, WebKit). */
+  desktop: boolean;
   /** For the log: what was changed from what core asked. */
   notes: string[];
 }
@@ -59,6 +63,8 @@ export interface PlanContext {
   label: string;
   /** Whether the machine has a desktop session a headed browser could use (Tier B). */
   desktop: boolean;
+  /** Why it hasn't, for the refusal, when there is more to say than "not set up". */
+  noDesktop?: string;
   /** The login there is root: the browser runs without Chrome's sandbox, which refuses root. */
   root?: boolean;
 }
@@ -76,15 +82,15 @@ export function planProcess(info: Pick<TerminalProcessSpawnInfo, "bundled" | "co
   if (!info.command) throw new PlacementRefused(`MCP server ${info.name} names nothing to run`);
   const argv = [info.command, ...(info.args ?? [])];
   const env = { ...(info.env ?? {}) };
-  return { argv: () => argv, env: () => env, ownRoots: false, notes: [] };
+  return { argv: () => argv, env: () => env, ownRoots: false, desktop: false, notes: [] };
 }
 
 type Bundled = NonNullable<TerminalProcessSpawnInfo["bundled"]>;
 
 function desktopNeeded(ctx: PlanContext, what: string): PlacementRefused {
   return new PlacementRefused(
-    `${what} needs a desktop session on ${ctx.label}, which it doesn't have yet (remote-host runs browsers there headless ` +
-      `until its desktop agent is set up). Use the default headless Chromium there, or set this server's location to local.`,
+    `${what} needs a desktop session on ${ctx.label}, which it doesn't have now (${ctx.noDesktop ?? "its GUI agent isn't running"}). ` +
+      `Use the default headless Chromium there, or set this server's location to local.`,
   );
 }
 
@@ -96,8 +102,9 @@ function planPlaywright(b: Bundled, ctx: PlanContext): McpPlan {
   takeOption(args, "--output-dir"); // ours to choose: never a Dispatch-host path
   if (engine === "webkit" && !ctx.desktop) throw desktopNeeded(ctx, "WebKit");
   if (!headless && !ctx.desktop) throw desktopNeeded(ctx, "A headed browser (browser.headless: false)");
-  let browser: "chromium" | "firefox";
+  let browser: "chromium" | "firefox" | "webkit";
   if (engine === "firefox") browser = "firefox";
+  else if (engine === "webkit") browser = "webkit";
   else {
     browser = "chromium";
     if (engine !== "chromium") notes.push(`${engine} → Playwright's Chromium (Chrome for Testing); no system ${engine} is installed for it there`);
@@ -116,11 +123,13 @@ function planPlaywright(b: Bundled, ctx: PlanContext): McpPlan {
       browser,
       "--output-dir",
       p.out,
-      "--headless",
+      ...(headless ? ["--headless"] : []),
       ...(ctx.root ? ["--no-sandbox"] : []),
     ],
     env: (p) => ({ ...(b.env ?? {}), PLAYWRIGHT_BROWSERS_PATH: need(p.browsersPath, "browsersPath"), TMPDIR: p.tmp }),
     ownRoots: true,
+    // WebKit even headless: it never finishes launching outside the login session.
+    desktop: !headless || browser === "webkit",
     notes,
   };
 }
@@ -149,11 +158,12 @@ function planChromeDevtools(b: Bundled, ctx: PlanContext): McpPlan {
       ...args,
       "--executablePath",
       need(p.executablePath, "executablePath"),
-      "--headless",
+      ...(headless ? ["--headless"] : []),
       ...(ctx.root ? ["--chrome-arg=--no-sandbox"] : []),
     ],
     env: (p) => ({ ...(b.env ?? {}), TMPDIR: p.tmp }),
     ownRoots: true,
+    desktop: !headless,
     notes: ["Chrome → Playwright's Chromium (Chrome for Testing) there", ...(ctx.root ? ["root: the browser's sandbox is off (--chrome-arg=--no-sandbox)"] : [])],
   };
 }

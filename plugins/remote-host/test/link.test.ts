@@ -297,11 +297,53 @@ describe("installing", () => {
     expect(agentCmds).toEqual([
       "'sweep' '--instance' '11111111-2222-3333-4444-555555555555'",
       "'hello' '--instance' '11111111-2222-3333-4444-555555555555'",
+      "'gui' 'install'",
       "'probe'",
     ]);
     expect(l.probe?.os.version).toBe("13.5");
   });
+
+  it("connects even when the GUI agent can't be installed (an agent without it, launchd saying no)", async () => {
+    const m = machine({ "10.0.4.5": "ok" });
+    m.gui = "fail";
+    const { l, warns, statuses } = link(m);
+    await l.ready();
+    expect(m.guiInstalls).toBe(1);
+    expect(warns.join("\n")).toMatch(/GUI agent not set up/);
+    expect(statuses.at(-1)?.state).toBe("online");
+  });
+
+  it("tries the GUI agent again at the next probe while nobody was logged in, and not once it runs", async () => {
+    const m = machine({ "10.0.4.5": "ok" });
+    m.probe = { ...PROBE, gui: { state: "no-gui-session", user: "dispatch", consoleUser: "mikedennis", installed: true } };
+    const { l, statuses } = link(m, { timing: { probeEveryMs: 50 } });
+    l.start();
+    await l.ready();
+    expect(statuses.at(-1)).toMatchObject({ state: "degraded", detail: expect.stringContaining("Tier A only, log in at the Mac") });
+    // Someone logs in at the Mac; the next probe's install finds the session.
+    const running = { state: "running" as const, agent: GUI_AGENT };
+    m.gui = running;
+    m.probe = { ...PROBE, gui: running };
+    await until(() => statuses.at(-1)?.state === "online");
+    const after = m.guiInstalls;
+    await new Promise((r) => setTimeout(r, 200));
+    expect(m.guiInstalls).toBe(after);
+  });
 });
+
+const GUI_AGENT = {
+  agentVersion: "0.3.0",
+  protocol: 1,
+  pid: 42,
+  startedAt: "2026-11-06T00:00:00.000Z",
+  build: "0.3.0-abcdef012345",
+  session: { user: "dispatch", onConsole: true, screenLocked: false },
+  dialogs: [],
+  simulators: { usable: true },
+  runs: 0,
+  sims: 0,
+  silentForMs: 0,
+};
 
 describe("staying up", () => {
   it("goes offline when the connection drops, and comes back by itself", async () => {

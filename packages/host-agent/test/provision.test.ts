@@ -25,7 +25,7 @@ describe("checkProvisionSpec", () => {
     [{ ...SPEC, entry: { name: "@playwright/mcp", bin: "../../x.js" } }, /not a path within the package/],
     [{ ...SPEC, entry: { name: "@playwright/mcp", bin: "/etc/x" } }, /not a path within the package/],
     [{ ...SPEC, entry: { name: "other", bin: "cli.js" } }, /entry must name one of the packages/],
-    [{ ...SPEC, browser: "webkit" }, /not a browser this installs/],
+    [{ ...SPEC, browser: "msedge" }, /not a browser this installs/],
     [{ ...SPEC, browser: undefined, executable: true }, /executable needs a browser/],
     [{ ...SPEC, packages: [] }, /1 to 8 packages/],
   ])("refuses %j", (spec, why) => {

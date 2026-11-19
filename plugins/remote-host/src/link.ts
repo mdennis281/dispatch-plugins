@@ -25,12 +25,13 @@
  */
 import type { PluginContext, PluginLog, TerminalBackendStatusInput } from "@dispatch/plugin-sdk";
 import { SshConnection, errText, pinnedHostKey, type ExecResult, type SshTarget } from "@dispatch-plugins/remote-core";
-import { CLT_DEVELOPER_DIR, type GcResult, type ProbeResult } from "@dispatch-plugins/host-agent";
+import { CLT_DEVELOPER_DIR, type GcResult, type GuiInstallResult, type ProbeResult } from "@dispatch-plugins/host-agent";
 import type { ClientChannel } from "ssh2";
 import type { AgentBundle, RuntimeSource } from "./agent.js";
 import { dialFamily, hostKeyAlgorithms, keySecretName, type HostConfig } from "./hosts.js";
 import { agentCommand, ensureAgent, type Exec, type HostPaths } from "./install.js";
 import { CONNECTING, CONNECTION_LOST, SETTINGS_CHANGED } from "./link-status.js";
+import { guiStatus } from "./gui.js";
 import { gitTooOld, installHint, refusedHint } from "./remote-platform.js";
 
 /** A connection to one address. `SshConnection` is one; tests pass fakes. */
@@ -314,6 +315,8 @@ export class HostLink extends LinkBase {
   private busy = false;
   private gcRunning = false;
   private memory: LinkMemory = {};
+  /** What the last `gui install` found, so the log says only changes. */
+  private lastGuiState?: string;
   private current: TerminalBackendStatusInput = { state: "degraded", detail: CONNECTING };
   private readonly t: LinkTiming;
 
@@ -515,6 +518,8 @@ export class HostLink extends LinkBase {
     };
     if (first) await this.sweepWith(run);
     await run(["hello", "--instance", this.deps.instanceId]);
+    // Tier B on every connect: an agent just installed or upgraded moves the GUI agent forward with it.
+    if (/^darwin$/i.test(paths.platform)) await this.installGui(run);
     const probe = first ? await run<ProbeResult>(["probe"]) : undefined;
     if (this.disposed || gen !== this.gen) {
       conn.close();
@@ -541,6 +546,27 @@ export class HostLink extends LinkBase {
       this.deps.log.warn(`remote-host ${this.host.slug}: ${errText(err)}`);
     }
     return linked;
+  }
+
+  /**
+   * `dispatch-host gui install`: put the GUI agent's LaunchAgent in place and
+   * load it if someone is logged in. Never a reason to fail the connect: an
+   * older agent without it, or a launchd that says no, leaves Tier A as it is,
+   * and the probe reports why.
+   */
+  private async installGui(run: <T>(args: string[]) => Promise<T>): Promise<void> {
+    try {
+      const r = await run<GuiInstallResult>(["gui", "install"]);
+      const did = [
+        r.install && r.install.link !== "keep" ? `GUI agent ${r.install.link === "install" ? "installed" : "upgraded"} (${r.install.current})` : "",
+        r.install?.plist === "written" ? "LaunchAgent written" : "",
+      ].filter(Boolean);
+      const now = r.state === "running" ? `running ${r.agent.agentVersion}` : r.state;
+      if (did.length || now !== this.lastGuiState) this.deps.log.info(`remote-host ${this.host.slug}: ${[...did, `GUI agent ${now}`].join("; ")}`);
+      this.lastGuiState = now;
+    } catch (err) {
+      this.deps.log.warn(`remote-host ${this.host.slug}: GUI agent not set up: ${errText(err)}`);
+    }
   }
 
   private async sweepWith(run: <T>(args: string[]) => Promise<T>): Promise<void> {
@@ -609,6 +635,9 @@ export class HostLink extends LinkBase {
   }
 
   private async probeNow(): Promise<void> {
+    // Not running last time: someone may have logged in at the Mac since, or launchd failed once.
+    const g = this.memory.probe?.gui;
+    if (g && g.state !== "running" && g.state !== "unsupported") await this.installGui((args) => this.agent(args, 60_000));
     const probe = await this.agent<ProbeResult>(["probe"], 60_000);
     this.lastProbeAt = this.now();
     this.memory.probe = probe;
@@ -751,7 +780,9 @@ export function statusFrom(probe: ProbeResult, lastSeenAt: number): TerminalBack
     );
   }
   if (probe.loginEnvError) issues.push("login shell environment unreadable");
-  const notes: string[] = [];
+  const gui = guiStatus(probe);
+  issues.push(...gui.issues);
+  const notes: string[] = [...gui.notes];
   if (probe.brew?.cltTooOld && !probe.brew.blocked) {
     // Not a fault: bottles install. Said so a failed source build has its reason, and the human the fix.
     notes.push(
